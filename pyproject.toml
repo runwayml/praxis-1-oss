@@ -9,7 +9,7 @@ dependencies = [
     # transformers needs torchvision to load the processor of Qwen3.5.
     "torchvision>=0.28",
     "triton>=3.7",
-    "transformers==5.2.0",
+    "transformers==5.10.1",
     "safetensors>=0.4",
     "numpy>=2.0",
     "pillow>=10.0",
