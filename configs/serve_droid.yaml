@@ -1,0 +1,42 @@
+# praxis policy server settings for the single-arm DROID checkpoint.
+# Start: python -m praxis.serve --config configs/serve_droid.yaml
+# The sampler and session values are the defaults of the session parameters.
+# They are the recommended settings of this checkpoint. They can change.
+# A client changes a value for one session in the query of the session URL,
+# for example ws://<host>:8000/api/v1/session?sample_seed=0&num_steps=4
+#
+# The checkpoint config sets the rest of the variant: the canvas (two 256x416
+# tiles, one per view), the pose frame of the actions and the caption of the
+# unguided pass. No key of this file changes them. The rig sends the views at
+# 1024x288 and the server makes the tiles.
+#
+# The alternative recipe: num_steps 2, t_shift 8.0, cfg_scale 1.0 and
+# max_context_chunks 3.
+
+model:
+  checkpoint: checkpoints/praxis-1-droid   # praxis checkpoint directory
+  vae_weights: weights/Wan2.2_VAE.pth                  # public Wan2.2 VAE weights
+  text_encoder: weights/Qwen3.5-2B                     # public Qwen3.5-2B (Hugging Face layout)
+  embodiment: single_arm                               # the rig of the checkpoint
+  device: cuda
+  # BLOCK_C of the fused VAE norm kernel per channel count. It sets the
+  # summation order of the norm. null = the default {160: 64, 320: 64, 640: 256}.
+  vae_norm_block_c: null
+
+sampler:
+  num_steps: 2           # Euler steps per chunk
+  cfg_scale: 3.0         # text guidance scale of the actions (1.0 = off)
+  cfg_video_scale: 1.0   # text guidance scale of the video (1.0 = off)
+  cfg_batched: false     # no effect with window_joint: the passes run one after the other
+  layout: window_joint   # joint Euler over the whole context window
+  t_shift: 1.0           # flow shift of the timestep grid
+  solver: euler          # window_joint needs euler
+  action_steps: null     # window_joint needs null
+
+session:
+  exec_horizon: 24                # command rows per call (null = the full chunk)
+  control_mode: droid_impedance   # none | droid_impedance
+  context_mode: observed          # observed | stateless
+  max_context_chunks: 1           # executed chunks kept as context
+  carry_mode: clean               # clean | zeros (no effect on this checkpoint)
+  prompt: ""                      # task string until the robot sends one

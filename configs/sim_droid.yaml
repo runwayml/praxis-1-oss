@@ -1,0 +1,104 @@
+# praxis closed-loop simulation with the single-arm DROID checkpoint.
+# Every knob of a run lives in this file.
+# Override single values on the command line: --set task.prompt="Lift the red cube."
+#
+#   python scripts/run_sim.py --config configs/sim_droid.yaml
+#
+# The checkpoint config sets the rest of the variant: the canvas (two 256x416
+# tiles, one per view), the pose frame of the actions and the caption of the
+# unguided pass. No key of this file changes them. The scene renders each view
+# at 512x288. The pipeline makes the tiles and converts the pose frame.
+#
+# The alternative recipe: num_steps 2, t_shift 8.0, cfg_scale 1.0 and
+# max_context_chunks 3.
+
+model:
+  checkpoint: checkpoints/praxis-1-droid   # praxis checkpoint directory
+  vae_weights: weights/Wan2.2_VAE.pth                  # public Wan2.2 VAE weights
+  text_encoder: weights/Qwen3.5-2B                     # public Qwen3.5-2B (Hugging Face layout)
+  device: cuda
+  vae_norm_block_c: null   # null = the default table of the fused VAE norm kernel
+
+sampler:                 # the recommended settings of this checkpoint
+  num_steps: 2           # Euler steps per chunk
+  cfg_scale: 3.0         # text guidance scale of the actions (1.0 = off)
+  cfg_video_scale: 1.0   # text guidance scale of the video (1.0 = off)
+  cfg_batched: false     # no effect with window_joint: the passes run one after the other
+  layout: window_joint   # joint Euler over the whole context window
+  t_shift: 1.0           # flow shift of the timestep grid
+  solver: euler          # window_joint needs euler
+  action_steps: null     # window_joint needs null
+
+session:
+  exec_horizon: 24                # command rows per call (null = the full chunk)
+  control_mode: droid_impedance   # none | droid_impedance
+  max_context_chunks: 1           # executed chunks kept as context
+  seed: 0                         # chunk k of the episode with seed s: seed + seed_stride * s + k
+  seed_stride: 1000
+
+policy:
+  type: model           # model | scripted | hold
+  decode_video: true    # decode the predicted video of each call for the viewer and the MP4
+
+task:
+  name: lift_cube                 # lift_cube | cube_on_plate
+  prompt: Pick up the red cube.   # null = the default prompt of the task
+  time_limit_s: 20.6              # 309 ticks: one chunk of 21 rows and twelve of 24
+  cube_size: 0.05                 # metres
+  cube_mass: 0.1                  # kg
+  cube_x: [0.45, 0.62]            # placement range in the robot base frame, metres
+  cube_y: [-0.15, 0.15]
+  cube_yaw_deg: [-45.0, 45.0]
+  lift_height: 0.05               # success: the cube is this high above its rest height ...
+  hold_s: 0.25                    # ... for this time
+
+episodes:
+  seeds: [0, 1, 2]        # one episode per seed (cube placement and sampler seeds)
+  stop_on_success: true
+  after_success_s: 1.0    # time that an episode continues after success
+
+scene:
+  assets_dir: null        # cache of the robot models (null = ~/.cache/praxis/sim)
+  asset_source: null      # a local MuJoCo Menagerie copy at the pinned commit (no download)
+  download: true          # download the missing robot model files
+  substeps: 34            # physics steps per 15 Hz tick
+  image_width: 512        # exterior and wrist images (the pipeline makes one 256x416 tile of each)
+  image_height: 288
+  overview_width: 640     # the extra view for people (not a model input)
+  overview_height: 360
+  shadow_size: 2048       # shadow map size (0 = no shadows)
+  msaa_samples: 4         # anti-aliasing samples (0 = repeatable renders)
+  exterior:               # the fixed camera, robot base frame, metres
+    pos: [0.15, 0.68, 0.48]
+    target: [0.58, 0.0, 0.16]
+    fovy: 70.0
+  wrist:                  # the camera on the gripper, flange frame, metres
+    pos: [-0.08, 0.03, 0.03]
+    tilt_deg: 20.0
+    fovy: 62.0
+
+robot:
+  frame:                  # the pose convention of the policy (the DROID defaults)
+    yaw_offset_deg: 0.0
+    tcp_offset: 0.0
+    base_offset: [0.0, 0.0, 0.0]
+  home_noise: 0.0         # uniform joint noise at reset, radians
+  settle_s: 0.5           # physics time before the first observation
+
+render:
+  egl_device: null        # physical GPU of the renderer (null = the first CUDA_VISIBLE_DEVICES entry)
+
+output:
+  dir: outputs/sim_droid
+  video: true             # one MP4 per episode
+  video_crf: 20           # H.264 quality (lower is better, larger file)
+  save_arrays: true       # poses and commands of each tick (.npz)
+
+viewer:
+  enabled: true
+  host: 127.0.0.1         # 0.0.0.0 shows the stream to all machines that can reach the port
+  port: 8000              # 0 = a free port
+  max_fps: 15.0
+  jpeg_quality: 80
+  keep_open_s: 600        # time that the viewer stays open after the run (null = until Ctrl-C)
+  pace_realtime: false    # true: at most 15 ticks per second

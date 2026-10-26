@@ -1,0 +1,43 @@
+# praxis simulation with the scripted pick policy. It needs no model weights.
+# Use it to check the environment, the renderer, the video and the viewer.
+# Override single values on the command line: --set episodes.seeds=[0,1,2,3,4]
+#
+#   python scripts/run_sim.py --config configs/sim_scripted.yaml
+
+policy:
+  type: scripted          # model | scripted | hold
+  scripted:
+    approach_height: 0.12 # metres above the grasp point
+    lift_height: 0.15     # metres
+    speed: 0.15           # metres per second of the free moves
+    control_mode: droid_impedance
+
+task:
+  name: lift_cube         # lift_cube | cube_on_plate
+  prompt: null            # null = the default prompt of the task
+  time_limit_s: null      # null = the default time limit of the task
+
+episodes:
+  seeds: [0, 1, 2]
+  stop_on_success: true
+  after_success_s: 1.0
+
+scene:
+  image_width: 512
+  image_height: 288
+  shadow_size: 2048
+
+render:
+  egl_device: null        # physical GPU of the renderer (null = the first CUDA_VISIBLE_DEVICES entry)
+
+output:
+  dir: outputs/sim_scripted
+  video: true
+  save_arrays: true
+
+viewer:
+  enabled: true
+  host: 127.0.0.1
+  port: 8000
+  keep_open_s: 60         # null = until Ctrl-C
+  pace_realtime: true     # play at 15 ticks per second, so the live view is easy to follow

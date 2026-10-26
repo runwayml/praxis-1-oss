@@ -1,0 +1,8 @@
+# The image needs only these files. Weights, checkpoints and outputs stay out.
+*
+!pyproject.toml
+!README.md
+!praxis
+!configs
+**/__pycache__
+**/*.pyc

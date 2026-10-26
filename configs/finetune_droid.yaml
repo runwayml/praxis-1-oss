@@ -1,0 +1,63 @@
+# Fine-tuning of the single-arm praxis checkpoint on DROID.
+# The objective values are the training objective of the checkpoint. The train
+# values are the recipe of our fine-tune runs on one node with 6 GPUs (README, "The
+# recipe"): 96 windows per step, lr 3e-6 with a cosine decay, 1,200 steps.
+# Run on one node with N GPUs:
+#   torchrun --nproc_per_node N scripts/finetune.py --config configs/finetune_droid.yaml
+# Override single values on the command line: --set train.steps=100
+
+model:
+  checkpoint: checkpoints/praxis-1-droid   # the start weights (praxis checkpoint)
+  vae_weights: weights/Wan2.2_VAE.pth                # public Wan2.2 VAE weights
+  text_encoder: weights/Qwen3.5-2B                   # public Qwen3.5-2B (Hugging Face layout)
+  # BLOCK_C of the fused VAE norm kernel per channel count. null = the default table.
+  vae_norm_block_c: null
+
+data:
+  # A local LeRobot v2.x tree with the raw 1280x720 DROID videos (README, "Data").
+  # A Hugging Face dataset id (cadene/droid_1.0.1, 320x180 videos) also works.
+  source: droid_hires
+  split: train
+  cache_dir: null              # Hugging Face cache directory (only for a dataset id)
+  max_episodes: null           # use only the first episodes of the pool (null = all)
+  num_workers: 12              # data loader processes per GPU (video decode)
+  text_cache_size: 1024        # text embeddings kept per GPU
+  overfit_windows: null        # N = use only N fixed windows (the overfit check)
+
+objective:
+  video_weight: 1.0            # weight of the video loss
+  action_weight: 1.0           # weight of the action loss
+  video_timestep_shift: 5.0    # shift of the video timestep distribution
+  text_dropout: 0.1            # probability of the encoded blank caption (text_encoder.blank_caption)
+  proprio_dropout: 0.1         # probability of the zero proprio
+  moe_balance_speed: 0.001     # step of the MoE routing bias update
+  moe_seq_balance_coef: 0.0001 # weight of the sequence balance loss of the MoE router
+  action_guard: 5.0            # a window with a larger action loss gets action loss 0
+  moe_dispatch_chunk_size: 65536  # token chunk of the MoE expert dispatch in training
+  fixed_draws: false           # true = same random values for each use of a window
+
+train:
+  steps: 1200                  # optimizer steps
+  # Micro-steps per optimizer step (one window per GPU each). A step uses
+  # N * grad_accum windows on N GPUs: 96 on 6 GPUs. For 96 windows on 8 GPUs,
+  # set grad_accum to 12.
+  grad_accum: 16
+  lr: 3.0e-6                   # peak learning rate
+  warmup_steps: 50             # linear warmup steps (0 = none)
+  lr_schedule: cosine          # after the warmup: flat, or cosine from lr to min_lr at the last step
+  min_lr: 3.0e-7
+  betas: [0.9, 0.95]
+  weight_decay: 1.0e-4         # lr * weight_decay < 3e-8 rounds the decay factor to 1 (no decay)
+  eps: 1.0e-8
+  clip_grad_norm: 1.0          # the joint gradient norm of all weights (null = no clipping)
+  activation_checkpointing: true
+  no_sync: false               # true keeps full fp32 gradients on each GPU (small models only)
+  reduce_dtype: float32        # dtype of the gradient reduce-scatter
+  seed: 0
+  log_every: 1
+  save_every: 100              # one save is 163 GB (54 GB model, 109 GB optimizer state)
+  save: true                   # false = no saves, also not after the last step
+
+output:
+  dir: outputs/finetune_droid
+  resume: null                 # a save directory (output.dir/step-NNNNNN) to continue from
