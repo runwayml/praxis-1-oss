@@ -238,6 +238,43 @@ With `train.no_sync: true`, each GPU keeps the full float32 gradients until
 the last micro-step. For this model they take 109 GB per GPU. Thus use
 `no_sync` only for small models.
 
+## LoRA
+
+`configs/finetune_droid_lora.yaml` runs a LoRA fine-tune
+(`praxis/train/lora.py`). The weights of the checkpoint stay frozen. Each
+target `nn.Linear` layer gets a trainable low-rank update
+`(alpha / rank) * B @ A`. `B` starts at zero, so at step 0 the model is the
+checkpoint.
+
+```bash
+torchrun --nproc_per_node 6 scripts/finetune.py --config configs/finetune_droid_lora.yaml
+```
+
+The `lora` section of the config:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `rank` | 0 | The rank of the update. 0 turns LoRA off (a full fine-tune). |
+| `alpha` | 16.0 | The scale of the update is `alpha / rank`. |
+| `dropout` | 0.0 | Dropout on the input of the update. |
+| `targets` | `[expert]` | Group names of `LORA_TARGETS` or `fnmatch` patterns of `nn.Linear` module names. `expert` is the attention and MLP projections of the action expert. `backbone_attention` is the attention output projections of both towers. |
+| `train_also` | `[]` | `fnmatch` patterns of parameter names that train in full next to the adapters, for example `action_expert.head.*`. |
+
+- With `rank: 16` on the `expert` targets, 80 layers get adapters with
+  5.5 M weights in total. The run needs about 27 GB per GPU on 6 GPUs, and
+  one step takes about 21 s (a full fine-tune: 64 GB and 43 s).
+- The routers of the MoE layers are frozen, so the config sets
+  `objective.moe_balance_speed: 0`.
+- The adapters start at zero and need larger steps than full weights. The
+  config uses a peak learning rate of 1e-4 and no weight decay.
+- A save holds the merged weights in `model/`: a full praxis checkpoint with
+  the names of the start checkpoint. `PraxisPolicy.from_pretrained`, the
+  pipeline, the server and the simulation load it as they load any other
+  checkpoint. Only the target layers differ from the start checkpoint.
+- `trainable.safetensors` holds the adapters (and the `train_also`
+  weights). A LoRA run resumes from the start checkpoint, these tensors and
+  `optimizer/`: give the save with `--resume`, as for a full fine-tune.
+
 ## Outputs
 
 The script adds the metrics of each step to `output.dir/metrics.jsonl`. It

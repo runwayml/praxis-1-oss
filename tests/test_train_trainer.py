@@ -20,6 +20,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from safetensors.torch import load_file
 from tiny_model import tiny_config, tiny_policy
 from torch import Tensor, nn
 from torch.distributed.checkpoint.state_dict import (
@@ -37,9 +38,11 @@ from praxis.checkpoint import (
 )
 from praxis.layers import TransformerBlock
 from praxis.model import PraxisPolicy
+from praxis.train.lora import LoRASettings, apply_lora, merged_state_dict
 from praxis.train.objective import EncodedWindow, FinetuneModel, ObjectiveSettings
 from praxis.train.trainer import (
     FIXED_DRAWS_KEY,
+    TRAINABLE_NAME,
     AdamW,
     TextCache,
     Trainer,
@@ -398,10 +401,16 @@ def _worker(rank: int, world: int, init: str, job: dict) -> None:
     dist.init_process_group("gloo", init_method=init, rank=rank, world_size=world)
     try:
         out = Path(job["out"])
-        if job.get("resume"):
+        lora = job.get("lora")
+        if job.get("resume") and not lora:
             policy = PraxisPolicy.from_pretrained(Path(job["resume"]) / "model", "cpu")
         else:
             policy = tiny_policy(dtype=job.get("dtype", torch.bfloat16))
+        if lora:
+            apply_lora(policy, LoRASettings(**lora))
+            if job.get("resume"):
+                saved = load_file(str(Path(job["resume"]) / TRAINABLE_NAME))
+                assert not policy.load_state_dict(saved, strict=False).unexpected_keys
         model = StandIn(policy)
         settings = _settings(**job.get("settings", {}))
         trainer = Trainer(model, model.blocks(), settings, torch.device("cpu"))
@@ -538,6 +547,42 @@ def test_save_load_and_resume(tmp_path: Path) -> None:
     assert load_config(save / "model") == tiny_config()
     assert json.loads((save / "trainer_state.json").read_text())["step"] == 2
     resumed = _run(2, tmp_path / "b", steps=4, resume=str(save))
+    _assert_exact(resumed["state"], straight["state"])
+    np.testing.assert_array_equal(resumed["loss"], straight["loss"][2:])
+
+
+LORA = {"rank": 2, "alpha": 4.0, "targets": ["expert"]}
+LORA_SCALE = 4.0 / 2
+
+
+def test_lora_training_saves_merged_weights_and_resumes(tmp_path: Path) -> None:
+    """A LoRA run trains only the adapters. Its save is a praxis checkpoint
+    with the adapters folded in, and a resume from the start weights plus
+    trainable.safetensors continues bit for bit."""
+    start = tiny_policy(dtype=torch.bfloat16).state_dict()
+    straight = _run(2, tmp_path / "a", steps=4, save_at=2, lora=LORA)
+    save = tmp_path / "a" / "step-000002"
+    verify_checksums(save / "model")
+    loaded = PraxisPolicy.from_pretrained(save / "model", device="cpu")
+    assert set(loaded.state_dict()) == set(start)
+    scales = {
+        k[: -len(".base.weight")]: LORA_SCALE
+        for k in straight["saved_state"]
+        if k.endswith(".base.weight")
+    }
+    want = merged_state_dict(straight["saved_state"], scales)
+    _assert_exact(loaded.state_dict(), want)
+    # The frozen weights keep their bytes; the target layers change.
+    targets = {f"{m}.weight" for m in scales}
+    changed = {
+        k
+        for k, v in loaded.state_dict().items()
+        if not torch.equal(_bytes(v), _bytes(start[k]))
+    }
+    assert changed and changed <= targets
+    trainable = load_file(str(save / TRAINABLE_NAME))
+    assert trainable and all(".lora_" in k for k in trainable)
+    resumed = _run(2, tmp_path / "b", steps=4, resume=str(save), lora=LORA)
     _assert_exact(resumed["state"], straight["state"])
     np.testing.assert_array_equal(resumed["loss"], straight["loss"][2:])
 

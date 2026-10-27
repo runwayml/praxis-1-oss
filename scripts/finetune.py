@@ -16,6 +16,13 @@ The script writes ``output.dir/metrics.jsonl`` and one save every
 * ``optimizer/`` and ``trainer_state.json``: the state to continue the run.
   Give the save directory with ``--resume`` (or ``output.resume``).
 
+LoRA: with ``lora.rank`` > 0 (``configs/finetune_droid_lora.yaml``), the
+weights of the checkpoint stay frozen and only low-rank adapters of the
+``lora.targets`` layers train (``praxis.train.lora``). A save then holds the
+merged weights in ``model/`` (a full praxis checkpoint, as for a full
+fine-tune) and the trainable tensors in ``trainable.safetensors``. A LoRA run
+resumes from the start checkpoint and these tensors.
+
 ``train.save: false`` turns off all saves. The overfit check
 (``configs/finetune_droid_overfit.yaml``) uses it.
 
@@ -50,6 +57,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 import torch.distributed as dist
 import yaml
+from safetensors.torch import load_file
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -57,6 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from praxis.model import PraxisPolicy
 from praxis.text_encoder import TextEncoder
 from praxis.train.data import DroidWindowDataset, fixed_windows
+from praxis.train.lora import LoRASettings, apply_lora, lora_parameters
 from praxis.train.moe import update_expert_biases
 from praxis.train.objective import (
     EncodedWindow,
@@ -65,6 +74,7 @@ from praxis.train.objective import (
     encode_window,
 )
 from praxis.train.trainer import (
+    TRAINABLE_NAME,
     TextCache,
     Trainer,
     TrainSettings,
@@ -127,8 +137,28 @@ def main() -> None:
     # Each rank maps the full weights from the safetensors files. The page cache
     # holds one copy of the files for all ranks. FSDP then copies the shard of
     # each rank to its GPU.
-    start = Path(resume) / "model" if resume else Path(m["checkpoint"])
+    lora = LoRASettings(**cfg.get("lora", {}))
+    # A LoRA run resumes from the start checkpoint: model/ of a LoRA save
+    # holds merged weights, and the adapters come from trainable.safetensors.
+    start = (
+        Path(resume) / "model" if resume and not lora.enabled else Path(m["checkpoint"])
+    )
     policy = PraxisPolicy.from_pretrained(start, device="cpu")
+    if lora.enabled:
+        wrapped = apply_lora(policy, lora)
+        if resume:
+            saved = load_file(str(Path(resume) / TRAINABLE_NAME))
+            unknown = policy.load_state_dict(saved, strict=False).unexpected_keys
+            if unknown:
+                raise ValueError(f"{TRAINABLE_NAME} has unknown tensors: {unknown[:5]}")
+        n_lora = sum(p.numel() for _, p in lora_parameters(policy))
+        n_train = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+        if rank == 0:
+            print(
+                f"lora: rank {lora.rank}, alpha {lora.alpha}, {len(wrapped)} layers, "
+                f"{n_lora / 1e6:.1f} M adapter weights, {n_train / 1e6:.1f} M trainable",
+                flush=True,
+            )
     model = FinetuneModel(policy, objective)
     trainer = Trainer(
         model,

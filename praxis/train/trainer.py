@@ -62,6 +62,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+from safetensors.torch import save_file
 from torch import Tensor, nn
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -76,6 +77,7 @@ from torch.utils.checkpoint import checkpoint
 
 from praxis.checkpoint import save_checkpoint
 from praxis.model import PraxisPolicy
+from praxis.train.lora import LoRALinear, merged_state_dict
 
 if TYPE_CHECKING:
     from praxis.text_encoder import TextEncoder
@@ -103,6 +105,10 @@ def derive_seed(*keys: int) -> int:
     """
     hi, lo = np.random.SeedSequence([int(k) for k in keys]).generate_state(2)
     return (int(hi) << 32) | int(lo)
+
+
+#: The trainable tensors of a LoRA save (adapters and ``lora.train_also``).
+TRAINABLE_NAME = "trainable.safetensors"
 
 
 @dataclass
@@ -468,6 +474,10 @@ class Trainer:
         torch.manual_seed(derive_seed(settings.seed, self.rank))
         if not any(p.requires_grad for p in model.parameters()):
             model.requires_grad_(True)
+        # LoRA (praxis.train.lora): the save folds each adapter into its layer.
+        self.lora_scales = {
+            n: m.scale for n, m in policy.named_modules() if isinstance(m, LoRALinear)
+        }
         model.train()
         mesh = init_device_mesh(device.type, (self.world,))
         mp = MixedPrecisionPolicy(reduce_dtype=REDUCE_DTYPES[settings.reduce_dtype])
@@ -607,6 +617,19 @@ class Trainer:
         if self.rank == 0:
             cut = len(self.policy_prefix)
             weights = {k[cut:]: v for k, v in state.items() if isinstance(v, Tensor)}
+            if self.lora_scales:
+                # The trainable tensors (adapters and train_also weights) go
+                # to trainable.safetensors for a resume; model/ holds the
+                # merged weights under the names of the checkpoint.
+                names = {
+                    n[cut:] for n, p in self.model.named_parameters() if p.requires_grad
+                }
+                tmp.mkdir(parents=True, exist_ok=True)
+                save_file(
+                    {k: v.contiguous() for k, v in weights.items() if k in names},
+                    str(tmp / TRAINABLE_NAME),
+                )
+                weights = merged_state_dict(weights, self.lora_scales)
             save_checkpoint(tmp / "model", weights, self.config)
         del state
         optim = get_optimizer_state_dict(self.model, self.optimizer)

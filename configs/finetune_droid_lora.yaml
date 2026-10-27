@@ -1,0 +1,64 @@
+# LoRA fine-tune of the single-arm checkpoint on DROID: the weights of the
+# checkpoint stay frozen; low-rank adapters of the action expert train.
+#   torchrun --nproc_per_node 6 scripts/finetune.py --config configs/finetune_droid_lora.yaml
+# The other sections are those of configs/finetune_droid.yaml, with a larger
+# learning rate (adapters start at zero and need larger steps than full
+# weights). A save holds the merged weights in model/ (a full praxis
+# checkpoint) and the adapters in trainable.safetensors.
+
+model:
+  checkpoint: checkpoints/praxis-1-droid   # the start weights (praxis checkpoint)
+  vae_weights: weights/Wan2.2_VAE.pth                # public Wan2.2 VAE weights
+  text_encoder: weights/Qwen3.5-2B                   # public Qwen3.5-2B (Hugging Face layout)
+  vae_norm_block_c: null
+
+data:
+  source: droid_hires
+  split: train
+  cache_dir: null
+  max_episodes: null
+  num_workers: 12
+  text_cache_size: 1024
+  overfit_windows: null
+
+objective:
+  video_weight: 1.0
+  action_weight: 1.0
+  video_timestep_shift: 5.0
+  text_dropout: 0.1
+  proprio_dropout: 0.1
+  moe_balance_speed: 0.0       # the routers are frozen: no routing bias update
+  moe_seq_balance_coef: 0.0001
+  action_guard: 5.0
+  moe_dispatch_chunk_size: 65536
+  fixed_draws: false
+
+lora:
+  rank: 16                     # 0 = off (a full fine-tune)
+  alpha: 32.0                  # the update is (alpha / rank) * B @ A
+  dropout: 0.0
+  targets: [expert]            # praxis/train/lora.py LORA_TARGETS, or fnmatch patterns of nn.Linear names
+  train_also: []               # fnmatch patterns of parameter names that train in full
+
+train:
+  steps: 1200
+  grad_accum: 16
+  lr: 1.0e-4                   # peak learning rate of the adapters
+  warmup_steps: 50
+  lr_schedule: cosine
+  min_lr: 1.0e-5
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  eps: 1.0e-8
+  clip_grad_norm: 1.0
+  activation_checkpointing: true
+  no_sync: false
+  reduce_dtype: float32
+  seed: 0
+  log_every: 1
+  save_every: 100              # one save: 54 GB model + the adapters and their optimizer state
+  save: true
+
+output:
+  dir: outputs/finetune_droid_lora
+  resume: null
