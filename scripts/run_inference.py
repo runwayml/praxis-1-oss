@@ -198,7 +198,7 @@ def main() -> None:
             action_steps=s.get("action_steps"),
             layout=str(s.get("layout", "window_joint")),
             cfg_scale=float(s.get("cfg_scale", 1.0)),
-            cfg_video_scale=float(s.get("cfg_video_scale", 1.0)),
+            cfg_video_scale=float(s.get("cfg_video_scale", 4.0)),
             cfg_batched=bool(s.get("cfg_batched", False)),
         ),
     )

@@ -19,9 +19,9 @@ RECOMMENDED: dict[str, dict[str, object]] = {
     "model": {"embodiment": "single_arm"},
     "sampler": {
         "num_steps": 2,
-        "cfg_scale": 3.0,
-        "cfg_video_scale": 1.0,
-        "t_shift": 1.0,
+        "cfg_scale": 1.0,
+        "cfg_video_scale": 4.0,
+        "t_shift": 12.5,
         "layout": "window_joint",
         "solver": "euler",
         "action_steps": None,
@@ -51,7 +51,7 @@ def test_serve_config_has_the_recommended_settings(name: str) -> None:
 def test_serve_and_offline_configs_sample_the_same() -> None:
     """``run_inference.py`` replays a session with the settings of the server."""
     a, b = _load("serve_droid.yaml"), _load("inference_droid.yaml")
-    defaults = {"cfg_scale": 1.0, "cfg_video_scale": 1.0, "layout": "window_joint"}
+    defaults = {"cfg_scale": 1.0, "cfg_video_scale": 4.0, "layout": "window_joint"}
     for key in ("num_steps", "t_shift", "solver", "action_steps", *defaults):
         default = defaults.get(key)
         assert a["sampler"].get(key, default) == b["sampler"].get(key, default), key

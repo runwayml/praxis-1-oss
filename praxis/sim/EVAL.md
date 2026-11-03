@@ -66,8 +66,8 @@ task. Thus they can show a gain or a loss.
 
 The color tasks name the target in the prompt, so the prompt of the table is
 one example. The checkpoint column gives the successes of
-`praxis-1-droid` with `configs/sim_droid.yaml` (16 scenes x 2
-sampler seeds). `peg_in_hole_4mm` and `peg_in_hole_2mm` are registered but
+`praxis-1-droid` with the earlier sampler settings (`cfg_scale` 3.0,
+`cfg_video_scale` 1.0, `t_shift` 1.0; 16 scenes x 2 sampler seeds). `peg_in_hole_4mm` and `peg_in_hole_2mm` are registered but
 not in a suite: the checkpoint solves 2 of 32 episodes at 4 mm.
 
 ## Run a suite

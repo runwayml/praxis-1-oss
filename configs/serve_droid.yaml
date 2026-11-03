@@ -5,13 +5,13 @@
 # A client changes a value for one session in the query of the session URL,
 # for example ws://<host>:8000/api/v1/session?sample_seed=0&num_steps=4
 #
-# The checkpoint config sets the rest of the variant: the canvas (two 256x416
-# tiles, one per view), the pose frame of the actions and the caption of the
+# The checkpoint config sets the rest of the variant: the canvas (one tile per
+# view; the tile size comes from the checkpoint), the pose frame of the actions and the caption of the
 # unguided pass. No key of this file changes them. The rig sends the views at
 # 1024x288 and the server makes the tiles.
 #
-# The alternative recipe: num_steps 2, t_shift 8.0, cfg_scale 1.0 and
-# max_context_chunks 3.
+# The alternative recipe: num_steps 2, t_shift 8.0, cfg_scale 1.0,
+# cfg_video_scale 1.0 and max_context_chunks 3.
 
 model:
   checkpoint: checkpoints/praxis-1-droid   # praxis checkpoint directory
@@ -25,11 +25,11 @@ model:
 
 sampler:
   num_steps: 2           # Euler steps per chunk
-  cfg_scale: 3.0         # text guidance scale of the actions (1.0 = off)
-  cfg_video_scale: 1.0   # text guidance scale of the video (1.0 = off)
+  cfg_scale: 1.0         # text guidance scale of the actions (1.0 = off)
+  cfg_video_scale: 4.0   # text guidance scale of the video (1.0 = off)
   cfg_batched: false     # no effect with window_joint: the passes run one after the other
   layout: window_joint   # joint Euler over the whole context window
-  t_shift: 1.0           # flow shift of the timestep grid
+  t_shift: 12.5          # flow shift of the timestep grid
   solver: euler          # window_joint needs euler
   action_steps: null     # window_joint needs null
 

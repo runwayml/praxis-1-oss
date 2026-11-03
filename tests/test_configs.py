@@ -2,7 +2,7 @@
 
 The single-arm checkpoint is the only checkpoint of praxis. The recipe is
 its recommended sampling settings: 2 Euler steps, the flow
-shift 1.0, text guidance 3.0 on the actions and none on the video, the
+shift 12.5, text guidance 4.0 on the video and none on the actions, the
 ``window_joint`` layout and 1 context chunk. The README ("Recommended settings") gives the same values. When the
 recipe changes, change the configs, this test and the README together.
 ``tests/serve/test_serve_single_arm.py`` checks the serve config.
@@ -30,9 +30,9 @@ RECIPE: dict[str, dict[str, object]] = {
     },
     "sampler": {
         "num_steps": 2,
-        "t_shift": 1.0,
-        "cfg_scale": 3.0,
-        "cfg_video_scale": 1.0,
+        "t_shift": 12.5,
+        "cfg_scale": 1.0,
+        "cfg_video_scale": 4.0,
         "cfg_batched": False,
         "layout": "window_joint",
         "solver": "euler",

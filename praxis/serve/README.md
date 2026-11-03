@@ -58,9 +58,9 @@ settings can change when we have more robot results:
 | Setting | `serve_droid.yaml` |
 |---|---|
 | `num_steps` | 2 |
-| `cfg_scale` | 3.0 |
-| `cfg_video_scale` | 1.0 |
-| `t_shift` | 1.0 |
+| `cfg_scale` | 1.0 |
+| `cfg_video_scale` | 4.0 |
+| `t_shift` | 12.5 |
 | `layout` | `window_joint` |
 | `context_mode` | `observed` |
 | `max_context_chunks` | 1 |

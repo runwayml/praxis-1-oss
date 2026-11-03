@@ -127,11 +127,11 @@ def test_serve_config_has_the_recipe() -> None:
     assert cfg["model"]["checkpoint"] == "checkpoints/praxis-1-droid"
     assert cfg["sampler"] == {
         "num_steps": 2,
-        "cfg_scale": 3.0,
-        "cfg_video_scale": 1.0,
+        "cfg_scale": 1.0,
+        "cfg_video_scale": 4.0,
         "cfg_batched": False,
         "layout": "window_joint",
-        "t_shift": 1.0,
+        "t_shift": 12.5,
         "solver": "euler",
         "action_steps": None,
     }
@@ -190,7 +190,7 @@ def test_meta_adds_the_variant() -> None:
         "text_uncond": "blank_caption",
     }
     assert meta["max_context_chunks"] == 1 and meta["num_evals"] == 2
-    assert meta["t_shift"] == 1.0 and meta["cfg_batched"] is False
+    assert meta["t_shift"] == 12.5 and meta["cfg_batched"] is False
     local_stack = meta["local_stack"]
     assert isinstance(local_stack, dict)
     assert local_stack["seq"][-1] == {

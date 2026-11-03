@@ -166,8 +166,9 @@ def test_window_joint_settings() -> None:
 def test_sampler_defaults_are_the_recommended_settings() -> None:
     """The defaults are the recommended settings (configs/*_droid.yaml)."""
     s = SamplerSettings()
-    assert (s.num_steps, s.t_shift, s.solver, s.action_steps) == (2, 1.0, "euler", None)
-    assert (s.layout, s.cfg_scale, s.cfg_video_scale) == ("window_joint", 3.0, 1.0)
+    assert (s.num_steps, s.t_shift, s.solver) == (2, 12.5, "euler")
+    assert s.action_steps is None
+    assert (s.layout, s.cfg_scale, s.cfg_video_scale) == ("window_joint", 1.0, 4.0)
     assert s.cfg_batched is False and s.guided
 
 
@@ -519,7 +520,9 @@ def test_session_samples_the_window(cfg: float) -> None:
     pipe = StubPipe()
     session = object.__new__(Session)
     session.pipe = cast(PraxisPipeline, pipe)
-    session.sampler = SamplerSettings(layout="window_joint", cfg_scale=cfg)
+    session.sampler = SamplerSettings(
+        layout="window_joint", cfg_scale=cfg, cfg_video_scale=1.0
+    )
     session.seed = 100
     inputs = StubInputs(
         prompt="Put the cube on the plate.",

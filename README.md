@@ -288,12 +288,12 @@ The defaults in this table are the values of `configs/inference_droid.yaml`.
 | Setting | Default | Effect |
 |---|---|---|
 | `sampler.num_steps` | 2 | Euler steps per chunk. |
-| `sampler.t_shift` | 1.0 | Shift of the timestep grid. 1.0 is a uniform grid. |
+| `sampler.t_shift` | 12.5 | Shift of the timestep grid. 1.0 is a uniform grid. |
 | `sampler.solver` | `euler` | The `window_joint` layout needs `euler`. |
 | `sampler.action_steps` | null | Extra expert-only steps. The `window_joint` layout needs null. |
 | `sampler.layout` | `window_joint` | One Euler update moves the video and the actions of the whole context window (see "Model variant of the checkpoint"). |
-| `sampler.cfg_scale` | 3.0 | Text guidance scale of the actions. 1.0 turns it off. |
-| `sampler.cfg_video_scale` | 1.0 | Text guidance scale of the video. 1.0 turns it off. |
+| `sampler.cfg_scale` | 1.0 | Text guidance scale of the actions. 1.0 turns it off. |
+| `sampler.cfg_video_scale` | 4.0 | Text guidance scale of the video. 1.0 turns it off. |
 | `sampler.cfg_batched` | false | No effect: the guided and the unguided pass run one after the other. |
 | `session.max_context_chunks` | 1 | Executed chunks kept as context. |
 | `session.exec_horizon` | 24 | Command rows per call. null gives the full chunk. A value below 24 moves the next observation off the chunk grid, so each call becomes a new context window. |
@@ -311,16 +311,16 @@ settings can change when we have more robot results.
 | Setting | Value |
 |---|---|
 | `sampler.num_steps` | 2 |
-| `sampler.cfg_scale` | 3.0 |
-| `sampler.cfg_video_scale` | 1.0 |
-| `sampler.t_shift` | 1.0 |
+| `sampler.cfg_scale` | 1.0 |
+| `sampler.cfg_video_scale` | 4.0 |
+| `sampler.t_shift` | 12.5 |
 | `sampler.layout` | `window_joint` |
 | `session.max_context_chunks` | 1 |
 | `session.exec_horizon` | 24 |
 | `session.control_mode` | `droid_impedance` |
 
 The configs also give an alternative recipe: flow shift 8.0, no text
-guidance and 3 context chunks.
+guidance (`cfg_scale` and `cfg_video_scale` 1.0) and 3 context chunks.
 
 The earlier names `configs/*_droid_k.yaml` link to the same files, so
 commands with those names still work.

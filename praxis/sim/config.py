@@ -62,15 +62,15 @@ class SamplerConfig:
 
     The defaults are the recommended settings of the single-arm checkpoint.
     They are 2 Euler steps of the ``window_joint`` layout with the flow shift
-    1.0, text guidance 3.0 on the actions and none on the video (scale 1.0).
+    12.5, text guidance 4.0 on the video and none on the actions (scale 1.0).
     """
 
     num_steps: int = 2
-    cfg_scale: float = 3.0
-    cfg_video_scale: float = 1.0
+    cfg_scale: float = 1.0
+    cfg_video_scale: float = 4.0
     cfg_batched: bool = False
     layout: str = "window_joint"
-    t_shift: float = 1.0
+    t_shift: float = 12.5
     solver: str = "euler"
     action_steps: int | None = None
 

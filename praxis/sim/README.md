@@ -163,7 +163,8 @@ forwarding is not possible.
 After the run, the viewer stays open for `viewer.keep_open_s` seconds
 (`null`: until Ctrl-C). Ctrl-C stops the viewer and the run at all times.
 
-With the settings of `configs/sim_droid.yaml`, one call takes 0.7 to 1.3 s
+With the earlier sampler settings (`cfg_scale` 3.0, `cfg_video_scale` 1.0,
+`t_shift` 1.0), one call takes 0.7 to 1.3 s
 for 1.6 s of robot time. We measured this time with
 `scripts/run_inference.py` on one H100, without the video decode. The first
 call of a process takes about 22 s, because it compiles the model. The loop
@@ -181,7 +182,7 @@ file keeps its default. An unknown key stops the run with an error.
 | Block | Keys | Effect |
 |---|---|---|
 | `model` | `checkpoint`, `vae_weights`, `text_encoder`, `device`, `vae_norm_block_c` | the weights, as in `configs/inference_droid.yaml` |
-| `sampler` | `num_steps`, `cfg_scale`, `cfg_video_scale`, `cfg_batched`, `layout`, `t_shift`, `solver`, `action_steps` | the sampler of each call. The defaults are the recommended settings of the single-arm checkpoint: 2 steps, `cfg_scale` 3.0, `cfg_video_scale` 1.0, `t_shift` 1.0, `window_joint` layout. |
+| `sampler` | `num_steps`, `cfg_scale`, `cfg_video_scale`, `cfg_batched`, `layout`, `t_shift`, `solver`, `action_steps` | the sampler of each call. The defaults are the recommended settings of the single-arm checkpoint: 2 steps, `cfg_scale` 1.0, `cfg_video_scale` 4.0, `t_shift` 12.5, `window_joint` layout. |
 | `session` | `exec_horizon`, `control_mode`, `max_context_chunks`, `seed`, `seed_stride` | chunk `k` of the episode with seed `s` samples with `seed + seed_stride * s + k`. The defaults: 24 rows per call, `droid_impedance`, 1 context chunk. |
 | `policy` | `type`, `decode_video`, `scripted` | `model`, `scripted` or `hold`. `hold` keeps the start pose. |
 | `task` | `name`, `prompt`, `time_limit_s`, `cube_size`, `cube_mass`, `cube_x`, `cube_y`, `cube_yaw_deg`, `lift_height`, `hold_s` | the task, the prompt (`null`: the default of the task), the time limit and the cube placement |
@@ -264,7 +265,8 @@ The scripted rows used a second GPU for the renderer:
 | Scripted pick, `lift_cube`, seeds 0 to 9 | 10/10 successes at tick 66 to 74. Tracking error (commanded vs executed pose, after each tick): p95 0.38 to 0.41 mm, max 0.48 mm, rotation max 0.09 deg. 0 IK misses. |
 | Speed of the scripted loop | 50 ticks/s (3.3 times real time) with 3 views, the MP4, the arrays and the viewer |
 
-The model rows used the settings of `configs/sim_droid.yaml`, the default
+The model rows used the earlier sampler settings (`cfg_scale` 3.0,
+`cfg_video_scale` 1.0, `t_shift` 1.0), the default
 time limit and prompt of each task, and `policy.decode_video: false`. The
 renderer used the GPU of the model:
 

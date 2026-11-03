@@ -95,12 +95,12 @@ class SamplerSettings:
     """
 
     num_steps: int = 2
-    t_shift: float = 1.0
+    t_shift: float = 12.5
     solver: str = "euler"
     action_steps: int | None = None
     layout: str = "window_joint"
-    cfg_scale: float = 3.0
-    cfg_video_scale: float = 1.0
+    cfg_scale: float = 1.0
+    cfg_video_scale: float = 4.0
     cfg_batched: bool = False
 
     def __post_init__(self) -> None:
