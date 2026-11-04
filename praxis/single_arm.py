@@ -89,6 +89,9 @@ MAX_CONTEXT_CHUNKS = 3
 
 # The tile canvas: one tile (height, width) per view, side by side.
 TILE_SIZE: tuple[int, int] = (256, 416)
+# The native DROID view (height, width). The fit rule of an antialiased canvas
+# crops each view to its aspect before the resize (see :func:`fit_resize_size`).
+NATIVE_VIEW: tuple[int, int] = (720, 1280)
 # Frames per resize call of the tile canvas (bounds the float32 memory).
 TILE_CHUNK_FRAMES = 32
 
@@ -303,15 +306,33 @@ def latest_frame(obs: dict, view: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def fit_resize_size(tile_w: int) -> tuple[int, int]:
+    """Return the ``(height, width)`` of the fit resize for tiles ``tile_w`` wide.
+
+    The native view scaled down so that its width is ``tile_w``, the height
+    rounded down: ``(234, 416)`` for 416-wide tiles. It is also the size the
+    client restricts each view to for an antialiased canvas.
+    """
+    nh, nw = NATIVE_VIEW
+    return min(nh, tile_w, nh * tile_w // nw), min(nw, tile_w)
+
+
 def _tile_view(
-    frames: np.ndarray, tile_h: int, tile_w: int, tol: float
+    frames: np.ndarray, tile_h: int, tile_w: int, tol: float, antialias: bool = False
 ) -> torch.Tensor:
     """Return the ``(T, 3, tile_h, tile_w)`` uint8 tile of one view.
 
-    ``frames`` is ``(T, H, W, 3)`` or ``(H, W, 3)`` uint8. The frames get a
-    centre crop to the tile aspect (:func:`praxis.robot_io.aspect_crop`, no
-    crop when the aspects agree within ``tol``), one bilinear resize without
-    antialias in float32, then a round and a clamp to uint8.
+    ``frames`` is ``(T, H, W, 3)`` or ``(H, W, 3)`` uint8. All resizes are
+    bilinear in float32 with ``align_corners=False``, then a round and a clamp
+    to uint8. ``antialias`` (the ``video.antialias`` of the checkpoint config)
+    selects the canvas rule of the checkpoint's training:
+
+    * off: a centre crop to the tile aspect (:func:`praxis.robot_io.aspect_crop`,
+      no crop when the aspects agree within ``tol``) and one resize to the tile.
+    * on (the fit rule): a centre crop to the native view aspect, one
+      antialiased resize to :func:`fit_resize_size` and a centre trim to the
+      tile (234x416 -> 224x416 for praxis-1-droid). An input already at the fit size
+      is not resized.
     """
     a = np.asarray(frames, np.uint8)
     if a.ndim == 3:
@@ -319,6 +340,8 @@ def _tile_view(
     if a.ndim != 4 or a.shape[-1] != 3:
         raise ValueError(f"frames must be (T,H,W,3), got {a.shape}")
     fr = torch.from_numpy(np.ascontiguousarray(a)).permute(0, 3, 1, 2)
+    if antialias:
+        return _fit_view(fr, tile_h, tile_w, tol)
     cropped = aspect_crop(fr, tile_h, tile_w, tol)
     out = torch.cat(
         [
@@ -327,11 +350,38 @@ def _tile_view(
                 size=(tile_h, tile_w),
                 mode="bilinear",
                 align_corners=False,
+                antialias=antialias,
             )
             for chunk in cropped.split(TILE_CHUNK_FRAMES, dim=0)
         ]
     )
     return out.round().clamp(0, 255).to(torch.uint8)
+
+
+def _fit_view(fr: torch.Tensor, tile_h: int, tile_w: int, tol: float) -> torch.Tensor:
+    """Return the fit-rule tile ``(T, 3, tile_h, tile_w)`` of ``fr`` (uint8)."""
+    rh, rw = fit_resize_size(tile_w)
+    if rh < tile_h or rw < tile_w:
+        raise ValueError(f"the fit size {rh}x{rw} is below the tile {tile_h}x{tile_w}")
+    cropped = aspect_crop(fr, *NATIVE_VIEW, tol)
+    if tuple(cropped.shape[-2:]) != (rh, rw):
+        cropped = torch.cat(
+            [
+                torch.nn.functional.interpolate(
+                    chunk.float(),
+                    size=(rh, rw),
+                    mode="bilinear",
+                    align_corners=False,
+                    antialias=True,
+                )
+                .round()
+                .clamp(0, 255)
+                .to(torch.uint8)
+                for chunk in cropped.split(TILE_CHUNK_FRAMES, dim=0)
+            ]
+        )
+    y0, x0 = (rh - tile_h) // 2, (rw - tile_w) // 2
+    return cropped[..., y0 : y0 + tile_h, x0 : x0 + tile_w].contiguous()
 
 
 def tile_clip(
@@ -341,6 +391,7 @@ def tile_clip(
     tile_w: int = TILE_SIZE[1],
     tol: float = ASPECT_TOL,
     device: torch.device | str = "cpu",
+    antialias: bool = False,
 ) -> torch.Tensor:
     """Convert frames to a ``(1, 3, T, tile_h, 2 * tile_w)`` clip of the tile canvas.
 
@@ -352,7 +403,7 @@ def tile_clip(
     """
     if wrist is None:
         raise ValueError("The tile canvas needs the exterior and the wrist view.")
-    tiles = [_tile_view(v, tile_h, tile_w, tol) for v in (exterior, wrist)]
+    tiles = [_tile_view(v, tile_h, tile_w, tol, antialias) for v in (exterior, wrist)]
     if tiles[0].shape[0] != tiles[1].shape[0]:
         raise ValueError(
             f"exterior has {tiles[0].shape[0]} frames, wrist has {tiles[1].shape[0]}"
@@ -373,6 +424,7 @@ def current_clip(
     device: torch.device | str = "cpu",
     tile_size: tuple[int, int] | None = None,
     aspect_tol: float | None = None,
+    antialias: bool = False,
 ) -> torch.Tensor:
     """Return the tile clip ``(1, 3, 1, H, W)`` of the current frames.
 
@@ -385,7 +437,13 @@ def current_clip(
         wrist = None
     th, tw, tol = _tile_args(tile_size, aspect_tol)
     return tile_clip(
-        exterior[None], None if wrist is None else wrist[None], th, tw, tol, device
+        exterior[None],
+        None if wrist is None else wrist[None],
+        th,
+        tw,
+        tol,
+        device,
+        antialias,
     )
 
 
@@ -395,6 +453,7 @@ def executed_clip(
     device: torch.device | str = "cpu",
     tile_size: tuple[int, int] | None = None,
     aspect_tol: float | None = None,
+    antialias: bool = False,
 ) -> tuple[torch.Tensor, np.ndarray | None] | None:
     """Return the clip and the pose8 rows of the ``need`` executed raws, or ``None``.
 
@@ -417,7 +476,7 @@ def executed_clip(
     if wrist_chunk is None:
         return None
     th, tw, tol = _tile_args(tile_size, aspect_tol)
-    clip = tile_clip(ext_chunk, wrist_chunk, th, tw, tol, device)
+    clip = tile_clip(ext_chunk, wrist_chunk, th, tw, tol, device, antialias)
     return clip, pose8_history(obs, need)
 
 
@@ -771,7 +830,7 @@ class SingleArmServeSession:
     ``encode`` maps a prepared clip ``(1, 3, T, H, W)`` in [0, 255] to video
     latents ``(1, C, T', H', W')``. The clips are tile clips
     (:func:`tile_clip`, ``tile_size`` and ``aspect_tol`` default to 256x416
-    and 0.03). A missing current wrist frame raises ``ValueError``. An
+    and 0.03, ``antialias`` to off). A missing current wrist frame raises ``ValueError``. An
     exterior or wrist stack that is missing or too short for the executed
     chunk restarts the session (a cold start at depth 0).
 
@@ -802,7 +861,9 @@ class SingleArmServeSession:
         n_chunks: int = N_CHUNKS,
         tile_size: tuple[int, int] | None = None,
         aspect_tol: float | None = None,
+        antialias: bool = False,
     ):
+        self.antialias = bool(antialias)
         self.tile_size = (
             None if tile_size is None else (int(tile_size[0]), int(tile_size[1]))
         )
@@ -859,12 +920,16 @@ class SingleArmServeSession:
         frame = rig_frame(obs)
         pose8 = pose8_to_model(extract_pose8(obs), frame)
         check_flange(obs, pose8)
-        cur_clip = current_clip(obs, self.device, self.tile_size, self.aspect_tol)
+        cur_clip = current_clip(
+            obs, self.device, self.tile_size, self.aspect_tol, self.antialias
+        )
         if self.stateless:
             self.restart()
         elif self._boundary_latents:
             need = self.stream.expected_next_rows
-            got = executed_clip(obs, need, self.device, self.tile_size, self.aspect_tol)
+            got = executed_clip(
+                obs, need, self.device, self.tile_size, self.aspect_tol, self.antialias
+            )
             if got is None:
                 self.restart()
             else:

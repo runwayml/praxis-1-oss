@@ -1,15 +1,13 @@
 """The serve config holds the recommended sampling settings (CPU only).
 
 ``praxis/serve/README.md`` gives the same values. The deployed server reads
-``configs/serve_droid.yaml`` (``configs/serve_droid_k.yaml`` is the same
-file), so a change of these values changes the served answers.
+``configs/serve_droid.yaml``, so a change of these values changes the served answers.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,8 +38,8 @@ def _load(name: str) -> dict:
     return yaml.safe_load((ROOT / "configs" / name).read_text())
 
 
-@pytest.mark.parametrize("name", ["serve_droid.yaml", "serve_droid_k.yaml"])
-def test_serve_config_has_the_recommended_settings(name: str) -> None:
+def test_serve_config_has_the_recommended_settings() -> None:
+    name = "serve_droid.yaml"
     cfg = _load(name)
     for block, values in RECOMMENDED.items():
         got = {key: cfg[block].get(key) for key in values}

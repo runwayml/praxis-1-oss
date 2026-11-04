@@ -163,13 +163,15 @@ forwarding is not possible.
 After the run, the viewer stays open for `viewer.keep_open_s` seconds
 (`null`: until Ctrl-C). Ctrl-C stops the viewer and the run at all times.
 
-With the earlier sampler settings (`cfg_scale` 3.0, `cfg_video_scale` 1.0,
-`t_shift` 1.0), one call takes 0.7 to 1.3 s
+With `praxis-1-droid-k` and the settings of that run (`cfg_scale` 1.0,
+`cfg_video_scale` 1.0, `t_shift` 8.0, `max_context_chunks` 3),
+one call took 0.7 to 1.3 s
 for 1.6 s of robot time. We measured this time with
 `scripts/run_inference.py` on one H100, without the video decode. The first
-call of a process takes about 22 s, because it compiles the model. The loop
+call of a process took about 22 s, because it compiles the model. The loop
 stops the physics during a call, so the live view stops during each call.
-Set `policy.decode_video: false` to save the video decode time. Then the
+The current settings (`cfg_video_scale` 4.0) also run the decoder on the
+unguided pass. We have not measured the call time of `praxis-1-droid` yet. Set `policy.decode_video: false` to save the video decode time. Then the
 human view has no predicted video. The decode time increases with the
 context depth.
 
@@ -249,8 +251,8 @@ Tasks:
 - Cameras: the exterior camera stays at one position on the left of the
   robot. The wrist
   camera is on the gripper, with the fingers at the bottom of the image.
-  Both render 512x288. The pipeline makes one 256x416 tile of each view
-  (the 256x832 model canvas).
+  Both render 512x288. The pipeline makes one tile of each view (224x416
+  for `praxis-1-droid`, a 224x832 model canvas; 256x416 for `praxis-1-droid-k`).
 - Physics: 34 substeps per tick (1/510 s), implicit-fast integrator,
   elliptic friction cones, gravity compensation on the arm.
 
@@ -265,8 +267,8 @@ The scripted rows used a second GPU for the renderer:
 | Scripted pick, `lift_cube`, seeds 0 to 9 | 10/10 successes at tick 66 to 74. Tracking error (commanded vs executed pose, after each tick): p95 0.38 to 0.41 mm, max 0.48 mm, rotation max 0.09 deg. 0 IK misses. |
 | Speed of the scripted loop | 50 ticks/s (3.3 times real time) with 3 views, the MP4, the arrays and the viewer |
 
-The model rows used the earlier sampler settings (`cfg_scale` 3.0,
-`cfg_video_scale` 1.0, `t_shift` 1.0), the default
+The model rows used `praxis-1-droid-k` with the settings of that run (`cfg_scale` 1.0,
+`cfg_video_scale` 1.0, `t_shift` 8.0, `max_context_chunks` 3), the default
 time limit and prompt of each task, and `policy.decode_video: false`. The
 renderer used the GPU of the model:
 

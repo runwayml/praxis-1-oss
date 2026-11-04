@@ -46,7 +46,8 @@ A missing field takes the value of the checkpoint.
   0 and the text in block 1. It is the only value.
 - ``video.canvas`` (``"tiles"``): each view resized to one tile
   (``tile_height`` x ``tile_width``, centre crop beyond ``aspect_tol``). It
-  is the only value.
+  is the only value. ``video.antialias`` (``false``) turns on the antialias
+  of the bilinear resize, as in the training of the checkpoint.
 - ``video.vae_encode_impl`` (``"megakernel"``): the only value, with the
   optional ``vae_megakernel_chunk_frames``.
 - ``text_encoder.uncond`` (``"blank_caption"``): encodes ``blank_caption``
@@ -339,6 +340,7 @@ class ModelVariant:
     canvas: str
     tile_size: tuple[int, int]
     aspect_tol: float
+    antialias: bool
     vae_encode_impl: str
     vae_megakernel_chunk_frames: int | None
     text_uncond: str
@@ -508,6 +510,18 @@ def _video_variant(video: Mapping[str, object]) -> dict[str, object]:
         )
     if video.get("keep_aspect", True) is not True:
         raise CheckpointError("config: video.canvas='tiles' needs keep_aspect=true")
+    antialias = video.get("antialias", False)
+    if not isinstance(antialias, bool):
+        raise CheckpointError(
+            f"config: video.antialias must be a bool, got {antialias!r}"
+        )
+    if antialias and th > tw * 720 // 1280:
+        # The fit rule of an antialiased canvas trims the native view resized to
+        # tw wide (single_arm.fit_resize_size); a taller tile cannot be cut.
+        raise CheckpointError(
+            f"config: video.antialias needs tiles no taller than {tw * 720 // 1280} "
+            f"for {tw}-wide tiles, got {th}x{tw}"
+        )
     bounds = video.get("tile_bounds_rows_cols")
     if bounds is not None:
         want = {v: [0, th, i * tw, (i + 1) * tw] for i, v in enumerate(views)}
@@ -527,6 +541,7 @@ def _video_variant(video: Mapping[str, object]) -> dict[str, object]:
         "canvas": canvas,
         "tile_size": (th, tw),
         "aspect_tol": float(tol),
+        "antialias": antialias,
         "vae_encode_impl": impl,
         "vae_megakernel_chunk_frames": chunk,
     }

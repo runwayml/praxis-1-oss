@@ -147,11 +147,6 @@ def test_serve_config_has_the_recipe() -> None:
         assert not Path(cfg["model"][key]).is_absolute(), key
 
 
-def test_serve_droid_k_is_the_serve_config() -> None:
-    """``configs/serve_droid_k.yaml`` is a second name of the serve config."""
-    assert _serve_config("serve_droid_k.yaml") == _serve_config()
-
-
 @pytest.mark.parametrize("offline", ["inference_droid.yaml", "sim_droid.yaml"])
 def test_serve_and_offline_configs_sample_the_same(offline: str) -> None:
     serve = _serve_config()
@@ -164,9 +159,9 @@ def test_serve_and_offline_configs_sample_the_same(offline: str) -> None:
 
 
 def test_tile_canvas_keeps_the_rig_image_size() -> None:
-    """The rig sends the views at 1024x288. The server makes the tiles."""
+    """Without antialias the rig sends the views at 1024x288. The server makes the tiles."""
     factory = _factory(SINGLE_ARM)[0]
-    assert factory.restrict == (1024, 288)
+    assert factory.restrict == (1024, 288) and factory.restrict_first is False
     assert factory.stack_keys == (
         "image.wrist",
         "image.exterior",
@@ -297,3 +292,33 @@ def test_session_gets_the_sampler_and_settings_of_the_session() -> None:
     # max_context_chunks is clipped to n_chunks - 1.
     factory({"max_context_chunks": 9})
     assert pipe.sessions[-1]["max_context_chunks"] == 3
+
+
+def test_antialiased_canvas_declares_the_fit_serve_stack() -> None:
+    """An antialiased 224x416 canvas (praxis-1-droid) asks the client for 416x234 views.
+
+    The stack is the handshake of the praxis-1-droid serve:
+    ``restrict_image_size`` right after ``stop_on_fault``, then the frame stack
+    with every past frame half a frame period after its tick, then the schedule.
+    """
+    config = copy.deepcopy(SINGLE_ARM)
+    video = config["video"]
+    video.update(antialias=True, height=224, tile_height=224)
+    if "tile_bounds_rows_cols" in video:
+        video["tile_bounds_rows_cols"] = {
+            "exterior": [0, 224, 0, 416],
+            "wrist": [0, 224, 416, 832],
+        }
+    factory = _factory(config)[0]
+    assert factory.restrict == (416, 234) and factory.restrict_first is True
+    seq = factory({}).meta["local_stack"]["seq"]
+    assert [e["name"] for e in seq] == [
+        "stop_on_fault",
+        "restrict_image_size",
+        "temporal_stack",
+        "chunked_schedule",
+    ]
+    assert seq[1]["args"] == {"width": 416, "height": 234}
+    offsets = seq[2]["args"]["offsets_sec"]
+    assert len(offsets) == 25 and offsets[-1] == 0.0
+    assert offsets[0] == -24 / 15 + 0.5 / 15 and offsets[-2] == -1 / 15 + 0.5 / 15

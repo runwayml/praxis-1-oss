@@ -350,3 +350,33 @@ def test_run_checks_the_model_paths_first(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match=r"model\.checkpoint"):
         check_model_paths(cfg)
     assert not (tmp_path / "out").exists()
+
+
+def test_placeholder_takes_the_policy_canvas(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run_episode`` sizes the dark slot before the first prediction by ``canvas_hw``."""
+    from praxis.sim import loop
+    from praxis.sim.loop import HoldPolicy
+
+    env = _render_env_or_skip()
+    sizes: list[tuple[int, int]] = []
+    real = loop.human_frame
+
+    def spy(
+        obs, predicted, lines, predicted_slot=False, predicted_hw=loop.PREDICTED_HW
+    ):
+        sizes.append(predicted_hw)
+        return real(obs, predicted, lines, predicted_slot, predicted_hw)
+
+    monkeypatch.setattr(loop, "human_frame", spy)
+
+    class _Predicting(HoldPolicy):
+        decode_video = True
+        canvas_hw = (224, 832)
+
+    try:
+        run_episode(
+            env, _Predicting(), seed=0, max_ticks=2
+        )  # ty: ignore[invalid-argument-type]
+    finally:
+        env.close()
+    assert sizes and set(sizes) == {(224, 832)}

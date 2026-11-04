@@ -592,3 +592,33 @@ def test_overfit_batches_read_files_only_once(
         ids.append(next_batch().window_id)
     assert ids == [i % 4 for i in range(11)]
     assert len(reads) == n_reads and len(seen) == 4
+
+
+def test_window_frames_follow_video_antialias(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``video.antialias`` sets the tile resize of the training windows like inference."""
+    import copy
+
+    rng = np.random.default_rng(0)
+    views = [rng.integers(0, 256, (93, 72, 96, 3), dtype=np.uint8) for _ in range(2)]
+    reads = iter(views * 3)
+    monkeypatch.setattr(data, "read_frames", lambda *a, **k: next(reads))
+
+    def frames(antialias: bool | None) -> torch.Tensor:
+        cfg = copy.deepcopy(CONFIG)
+        if antialias is not None:
+            cfg["video"]["antialias"] = antialias
+        if antialias:
+            cfg["video"].update(tile_height=224, tile_width=416)
+        ds = data.DroidWindowDataset(str(root), cfg)
+        return ds.load_window(ds.load_episode(2), 25).frames
+
+    plain = tile_clip(*views, *TILE, 0.03)[0].permute(1, 0, 2, 3).to(torch.uint8)
+    # The fit rule of an antialiased canvas: the praxis-1-droid tile, from the config.
+    smooth = tile_clip(*views, 224, 416, 0.03, antialias=True)[0].permute(1, 0, 2, 3)
+    smooth = smooth.to(torch.uint8)
+    assert not torch.equal(plain, smooth)
+    assert torch.equal(frames(None), plain)
+    assert torch.equal(frames(False), plain)
+    assert torch.equal(frames(True), smooth)

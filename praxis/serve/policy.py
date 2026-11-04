@@ -117,8 +117,16 @@ class PolicyFactory:
             )
         variant = model_variant(config)
         self.stack_keys = STACK_KEYS
-        # The rig sends the views at 1024x288. The server makes the tiles.
-        self.restrict = (single_arm.CANVAS_W, single_arm.CANVAS_H)
+        # The client bounds each view before it sends it. An antialiased canvas
+        # (praxis-1-droid) asks for the fit size of its tiles (416x234), resized once per
+        # tick ahead of the stack, as in training. Otherwise the rig sends the
+        # views at 1024x288. The server makes the tiles.
+        self.restrict_first = variant.antialias
+        if variant.antialias:
+            fh, fw = single_arm.fit_resize_size(variant.tile_size[1])
+            self.restrict = (fw, fh)
+        else:
+            self.restrict = (single_arm.CANVAS_W, single_arm.CANVAS_H)
         self.fps = float(config["chunking"].get("grid_hz", robot_io.FPS))
         self.n_chunks = int(config["chunking"].get("n_chunks", single_arm.N_CHUNKS))
         expert, rope = config["action_expert"], config["backbone"]["rope"]
@@ -351,6 +359,7 @@ class ServedPolicy:
                 f.fps,
                 *f.restrict,
                 self.stop_on_fault,
+                restrict_first=f.restrict_first,
             ),
             "compress_images": compress_images(),
             "image_codecs": image_codecs(),

@@ -160,7 +160,9 @@ class FakePipeline:
 
     def session(self, **kwargs: object) -> Session:
         # The session of the real pipeline, with its defaults.
-        return PraxisPipeline.session(self, **kwargs)  # ty: ignore[invalid-argument-type]
+        return PraxisPipeline.session(
+            self, **kwargs
+        )  # ty: ignore[invalid-argument-type]
 
 
 def _single_arm_factory(
@@ -184,7 +186,9 @@ def _single_arm_factory(
         **session,
     }
     pipe = FakePipeline(SINGLE_ARM, sampler)
-    return PolicyFactory(pipe, defaults, checkpoint)  # ty: ignore[invalid-argument-type]
+    return PolicyFactory(
+        pipe, defaults, checkpoint
+    )  # ty: ignore[invalid-argument-type]
 
 
 def _pipe(factory: PolicyFactory) -> FakePipeline:
@@ -448,6 +452,15 @@ def test_local_stack_offsets() -> None:
     offsets = spec["seq"][1]["args"]["offsets_sec"]
     assert len(offsets) == 25 and offsets[0] == -1.6 and offsets[-1] == 0.0
     assert offsets[1] == -1.5333333333333334
+    first = params.local_stack(("a",), 24, 15.0, 416, 234, True, restrict_first=True)
+    assert [e["name"] for e in first["seq"]] == [
+        "stop_on_fault",
+        "restrict_image_size",
+        "temporal_stack",
+        "chunked_schedule",
+    ]
+    late = first["seq"][2]["args"]["offsets_sec"]
+    assert late[0] == -1.6 + 0.5 / 15 and late[-1] == 0.0
     stateless = params.local_stack(("a",), 0, 15.0, 416, 256, False)
     assert [e["name"] for e in stateless["seq"]] == [
         "chunked_schedule",
@@ -883,7 +896,6 @@ def test_boot_rejects_a_checkpoint_that_is_not_single_arm() -> None:
         PolicyFactory(pipe, {}, "/ckpt/other")  # ty: ignore[invalid-argument-type]
 
 
-@pytest.mark.parametrize("config", ["serve_droid.yaml", "serve_droid_k.yaml"])
 @pytest.mark.parametrize(
     ("embodiment", "overrides", "error"),
     [
@@ -895,7 +907,6 @@ def test_boot_rejects_a_checkpoint_that_is_not_single_arm() -> None:
 )
 def test_boot_checks_the_rig_of_the_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
-    config: str,
     embodiment: str,
     overrides: list[str],
     error: str | None,
@@ -917,7 +928,7 @@ def test_boot_checks_the_rig_of_the_checkpoint(
 
     monkeypatch.setattr(server_module, "PraxisPipeline", pipeline)
     cfg = server_module.load_config(
-        ROOT / "configs" / config, ["model.device=cpu", *overrides]
+        ROOT / "configs" / "serve_droid.yaml", ["model.device=cpu", *overrides]
     )
     if error is None:
         factory = server_module.build_factory(cfg)

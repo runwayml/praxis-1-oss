@@ -62,7 +62,7 @@ scene:
   asset_source: null      # a local MuJoCo Menagerie copy at the pinned commit (no download)
   download: true          # download the missing robot model files
   substeps: 34            # physics steps per 15 Hz tick
-  image_width: 512        # exterior and wrist images (the pipeline makes one 256x416 tile of each)
+  image_width: 512        # exterior and wrist images (the pipeline makes one tile of each)
   image_height: 288
   overview_width: 640     # the extra view for people (not a model input)
   overview_height: 360

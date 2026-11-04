@@ -71,7 +71,6 @@ pytest tests/
   not autotuning (see "Determinism" in `README.md`). Keep them fixed.
 - The settings of `configs/*_droid.yaml` are the recommended settings.
   Change them only with a measurement.
-- `configs/*_droid_k.yaml` are links to `configs/*_droid.yaml` (the earlier names).
 - The server and the sim use the same pipeline. Do not add a second code path
   for the same model.
 - Do not commit weights, checkpoints, datasets or outputs. `outputs/` is

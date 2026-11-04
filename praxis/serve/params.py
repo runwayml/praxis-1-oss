@@ -198,10 +198,19 @@ def git_commit(root: Path) -> str:
     return sha + ("-dirty" if changes else "")
 
 
-def frame_offsets_sec(history_frames: int, stride: int, fps: float) -> list[float]:
-    """Return the time offsets of the frame stack in seconds, oldest first, 0.0 last."""
+def frame_offsets_sec(
+    history_frames: int, stride: int, fps: float, half_frame: bool = False
+) -> list[float]:
+    """Return the time offsets of the frame stack in seconds, oldest first, 0.0 last.
+
+    With ``half_frame``, every past offset is half a frame period later. The
+    client stack picks the latest sample at or before each offset, and frames
+    arrive on the control ticks: an offset on a tick picks the previous tick
+    when the clock jitters early, half a period after it picks that tick.
+    """
     frames = [*range(0, history_frames, stride), history_frames]
-    return [-f / fps for f in reversed(frames)]
+    half = 0.5 / fps if half_frame else 0.0
+    return [0.0 if f == 0 else -f / fps + half for f in reversed(frames)]
 
 
 def local_stack(
@@ -211,6 +220,7 @@ def local_stack(
     width: int,
     height: int,
     stop_on_fault: bool,
+    restrict_first: bool = False,
 ) -> dict:
     """Return the ``local_stack`` value of the handshake: the rig-side pipeline.
 
@@ -220,24 +230,34 @@ def local_stack(
     with observed context). ``chunked_schedule`` plays the commands at their
     time offsets. ``restrict_image_size`` scales down each image to fit
     ``width`` x ``height``.
+
+    ``restrict_first`` (the antialiased canvas of praxis-1-droid) puts
+    ``restrict_image_size`` right after ``stop_on_fault``, so each frame is
+    resized once on its own tick and the stack holds the small frames, and it
+    targets each past stack frame half a frame period after its tick
+    (:func:`frame_offsets_sec`). Without it the restrict comes last.
     """
     seq: list[dict] = [{"name": "stop_on_fault"}] if stop_on_fault else []
+    restrict = {
+        "name": "restrict_image_size",
+        "args": {"width": int(width), "height": int(height)},
+    }
+    if restrict_first:
+        seq.append(restrict)
     if history_frames > 0:
         seq.append(
             {
                 "name": "temporal_stack",
                 "args": {
                     "keys": list(keys),
-                    "offsets_sec": frame_offsets_sec(history_frames, 1, fps),
+                    "offsets_sec": frame_offsets_sec(
+                        history_frames, 1, fps, half_frame=restrict_first
+                    ),
                     "pad_start": False,
                 },
             }
         )
     seq.append({"name": "chunked_schedule"})
-    seq.append(
-        {
-            "name": "restrict_image_size",
-            "args": {"width": int(width), "height": int(height)},
-        }
-    )
+    if not restrict_first:
+        seq.append(restrict)
     return {"seq": seq}

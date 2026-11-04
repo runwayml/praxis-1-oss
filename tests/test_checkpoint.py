@@ -27,6 +27,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINTS = Path(os.environ.get("PRAXIS_CHECKPOINT_DIR", ROOT / "checkpoints"))
 REFUSED = OTHER_VARIANT_REFUSED.split("(")[0].strip()
 CHECKPOINT_CONFIG = Path(__file__).resolve().parent / "data" / "praxis-1-droid.json"
+# The earlier checkpoint praxis-1-droid-k: the same model with 256x416 tiles
+# and no antialias.
+K_CONFIG = Path(__file__).resolve().parent / "data" / "praxis-1-droid-k.json"
 
 # The variant fields of a config of another rig (format 1, no embodiment).
 OTHER_RIG: dict = {
@@ -131,12 +134,23 @@ def test_single_arm_config_loads() -> None:
     assert variant.text_uncond == "blank_caption" and variant.blank_caption == " "
 
 
-def test_checkpoint_config_validates() -> None:
-    """The config.json of the checkpoint (a copy in tests/data) loads unchanged."""
-    config = json.loads(CHECKPOINT_CONFIG.read_text())
+@pytest.mark.parametrize(
+    ("path", "tile_size", "antialias"),
+    [(CHECKPOINT_CONFIG, (224, 416), True), (K_CONFIG, (256, 416), False)],
+)
+def test_checkpoint_config_validates(
+    path: Path, tile_size: tuple[int, int], antialias: bool
+) -> None:
+    """The config.json of the checkpoints (copies in tests/data) load unchanged.
+
+    ``praxis-1-droid.json`` is the default checkpoint, ``praxis-1-droid-k.json``
+    the earlier one.
+    """
+    config = json.loads(path.read_text())
     assert config["embodiment"] == "single_arm" and config["format_version"] == 2
     validate_config(config)
     variant = model_variant(config)
+    assert variant.tile_size == tile_size and variant.antialias is antialias
     assert variant.attention_backend == "flash"
     assert variant.moe_dispatch_chunk_size == 16384
     assert variant.vae_encode_impl == "megakernel"
@@ -210,3 +224,23 @@ def test_checkpoint_dir_config() -> None:
     if not (path / "config.json").is_file():
         pytest.skip(f"{path} is not available")
     assert load_config(path) == json.loads(CHECKPOINT_CONFIG.read_text())
+
+
+def test_video_antialias_is_read() -> None:
+    """``video.antialias`` sets the resize of the tiles; absent means off."""
+    assert model_variant(SINGLE_ARM).antialias is False
+    assert model_variant(_with(SINGLE_ARM, "video.antialias", False)).antialias is False
+    antialiased = _with(
+        _with(_with(SINGLE_ARM, "video.height", 224), "video.tile_height", 224),
+        "video.antialias",
+        True,
+    )
+    assert model_variant(antialiased).antialias is True
+    with pytest.raises(CheckpointError, match="video.antialias"):
+        model_variant(_with(SINGLE_ARM, "video.antialias", "yes"))
+
+
+def test_antialias_refuses_a_tile_taller_than_the_fit() -> None:
+    """The fit rule trims 234x416 to the tile, so a 256x416 tile cannot use it."""
+    with pytest.raises(CheckpointError, match="no taller than 234"):
+        model_variant(_with(SINGLE_ARM, "video.antialias", True))

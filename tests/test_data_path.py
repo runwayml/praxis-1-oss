@@ -8,6 +8,8 @@ frame conversion.
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -106,6 +108,30 @@ def test_tile_clip_equals_the_original_canvas(size: tuple[int, int]) -> None:
     assert _sha(u8.numpy()) == sha
     for (c, t, y, x), v in {**ext_px, **wrist_px}.items():
         assert float(clip[0, c, t, y, x]) == v
+
+
+# SHA-256 of the uint8 canvas bytes (1, 3, 2, 224, 832) of the praxis-1-droid training
+# data path and serve: the fit-416 rule (a centre crop to the native 720x1280
+# aspect, an antialiased bilinear resize to 234x416 and a centre trim to
+# 224x416), computed with the original serve and training code, on the frames of
+# ``test_tile_clip_equals_the_original_canvas``. A 416x234 frame, the size the
+# client sends, is trimmed with no resize.
+ANTIALIAS_CANVAS_REF = {
+    (720, 1280): "e9a050a35e7c8d6fff1940109412f0375d5772b33293327c5cbf3c14dc47db48",
+    (234, 416): "8046acf194e1b67ebedc19e5169035f9a3bf772192986c362ac706cadfbd5495",
+    (288, 512): "cbec75a15f3995b104e092cc460303d5f4a3bdaa893e15db8aa01912106017ad",
+}
+
+
+@pytest.mark.parametrize("size", sorted(ANTIALIAS_CANVAS_REF))
+def test_antialias_clip_equals_the_training_canvas(size: tuple[int, int]) -> None:
+    h, w = size
+    rng = np.random.default_rng(0)
+    ext = rng.integers(0, 256, size=(2, h, w, 3), dtype=np.uint8)
+    wrist = rng.integers(0, 256, size=(2, h, w, 3), dtype=np.uint8)
+    clip = sa.tile_clip(ext, wrist, 224, 416, 0.03, antialias=True)
+    assert clip.shape == (1, 3, 2, 224, 832)
+    assert _sha(clip.to(torch.uint8).numpy()) == ANTIALIAS_CANVAS_REF[size]
 
 
 def test_tile_clip_on_a_gradient() -> None:
@@ -483,3 +509,68 @@ def test_session_tiles_restart_on_a_short_wrist_stack() -> None:
     obs["image.wrist"] = obs["image.exterior"][-1]
     assert sess.prepare(obs).depth == 0
     assert sess.restart_count == 2
+
+
+@pytest.mark.parametrize("antialias", [False, True])
+def test_session_clips_follow_the_checkpoint_antialias(antialias: bool) -> None:
+    """The pipeline session passes ``video.antialias`` to the current and executed clips."""
+    from types import SimpleNamespace
+
+    from praxis.pipeline import Session
+
+    rng = np.random.default_rng(10)
+    frames, p = _frames(rng, 30), _pose8(rng, 30)
+    frames = {
+        v: rng.integers(0, 256, size=(30, 288, 512, 3), dtype=np.uint8) for v in frames
+    }
+    config = json.loads(
+        (Path(__file__).resolve().parent / "data" / "praxis-1-droid.json").read_text()
+    )
+    config["video"]["antialias"] = antialias
+    enc = _Encoder()
+    pipe = SimpleNamespace(
+        policy=SimpleNamespace(config=config),
+        vae=SimpleNamespace(encode=enc),
+        stats=_stats(),
+        device="cpu",
+        sampler=None,
+    )
+    sess = Session(pipe)  # ty: ignore[invalid-argument-type]
+    state = sess.state
+    state.finish(state.prepare(_obs(frames, p, 0, 1)), torch.zeros(1, 6, 40))
+    enc.clips = []
+    state.prepare(_obs(frames, p, 0, 22))
+    cur, stream = enc.clips[0], enc.clips[1]
+    assert cur.shape[-2:] == stream.shape[-2:] == (224, 832)
+    want_cur = sa.tile_clip(
+        frames["exterior"][21], frames["wrist"][21], 224, 416, 0.03, antialias=antialias
+    )
+    want_stream = sa.tile_clip(
+        frames["exterior"][:21],
+        frames["wrist"][:21],
+        224,
+        416,
+        0.03,
+        antialias=antialias,
+    )
+    assert torch.equal(cur, want_cur) and torch.equal(stream, want_stream)
+    other = sa.tile_clip(
+        frames["exterior"][21],
+        frames["wrist"][21],
+        224,
+        416,
+        0.03,
+        antialias=not antialias,
+    )
+    assert not torch.equal(cur, other)
+
+
+def test_pinned_stats_are_the_checkpoint_stats() -> None:
+    """The pinned codec statistics equal the ``normalization`` block of
+    praxis-1-droid."""
+    config = json.loads(
+        (Path(__file__).resolve().parent / "data" / "praxis-1-droid.json").read_text()
+    )
+    norm = config["normalization"]
+    assert norm["action_q01"] == Q01 and norm["action_q99"] == Q99
+    assert norm["proprio_mean"] == P_MEAN and norm["proprio_std"] == P_STD

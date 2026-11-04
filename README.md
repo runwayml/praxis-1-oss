@@ -121,7 +121,10 @@ You need three sets of weights:
 
 1. The praxis checkpoint `praxis-1-droid`: a directory with
    `config.json`, `model.safetensors.index.json`, 17 safetensors shards and
-   `SHA256SUMS`.
+   `SHA256SUMS` (54.4 GB).
+   The SHA-256 of its `config.json` is
+   `63fde53c91174a52c9f4b16b6f09733f30103c4e711fe863a0f0296314307c86`
+   (`tests/data/praxis-1-droid.json` is a copy).
 2. The Wan2.2 VAE: `Wan2.2_VAE.pth` from the Hugging Face model
    `Wan-AI/Wan2.2-TI2V-5B`.
 3. The text encoder: the Hugging Face model `Qwen/Qwen3.5-2B`.
@@ -137,6 +140,14 @@ mkdir -p $C   # copy the checkpoint files into this directory
 ```
 
 `SHA256SUMS` lists the shards, `config.json` and the index.
+
+The earlier checkpoint `praxis-1-droid-k` (`config.json` SHA-256
+`f09961f066aa9fde871cd5032daedfd986dfd1f4b1901ada15f97a858b4ba6b9`,
+copy in `tests/data/praxis-1-droid-k.json`) has the same architecture and
+other weights, with 256x416 tiles and a resize without antialias. It runs with the same code and
+configs: put it in `checkpoints/praxis-1-droid` instead. Its config sets
+its own canvas and resize. The recommended sampler settings were measured
+on `praxis-1-droid`.
 
 The checkpoint asks for the `flash` attention backend of the trunk
 (`backbone.attention.backend` in `config.json`). We made the validation
@@ -176,8 +187,7 @@ CUDA_VISIBLE_DEVICES=0 MUJOCO_GL=egl \
 
 `task.prompt=null` selects the prompt of the task. `viewer.host=0.0.0.0`
 shows the live view to all machines that can reach the port. See the
-warning in `praxis/sim/README.md` ("Live view"). The earlier config name
-`configs/sim_droid_k.yaml` links to the same file.
+warning in `praxis/sim/README.md` ("Live view").
 
 To run the policy on recorded episodes:
 
@@ -322,9 +332,6 @@ settings can change when we have more robot results.
 The configs also give an alternative recipe: flow shift 8.0, no text
 guidance (`cfg_scale` and `cfg_video_scale` 1.0) and 3 context chunks.
 
-The earlier names `configs/*_droid_k.yaml` link to the same files, so
-commands with those names still work.
-
 ## Single-arm rig
 
 The checkpoint config selects the rig. praxis supports one rig:
@@ -334,8 +341,9 @@ without this key.
 The data of the rig:
 
 - Canvas: the pipeline crops each view to the tile aspect (centre crop) and
-  resizes it to a 256x416 tile. The exterior tile and the wrist tile make the 256x832
-  canvas.
+  resizes it to the tile of the checkpoint config: 224x416 for `praxis-1-droid`, with
+  antialias (`video.antialias: true`), 256x416 for `praxis-1-droid-k`. The exterior tile
+  and the wrist tile make the canvas (224x832 for `praxis-1-droid`).
 - Actions: 10 values per row, `[xyz3, rot6d6, grip1]`. The position and the
   rotation are relative to the arm pose at the start of the chunk. The
   gripper is absolute.
@@ -374,8 +382,10 @@ variant of the model:
   - The video noise and the action noise come from separate seeds.
   - Text guidance swaps the instruction for the blank caption `" "`.
 - Data.
-  - The pipeline resizes each view to a 256 x 416 tile. The two tiles make
-    a 256 x 832 canvas.
+  - The pipeline resizes each view to the tile of the checkpoint config:
+    224 x 416 for `praxis-1-droid` (a 224 x 832 canvas), 256 x 416 for `praxis-1-droid-k`. The
+    resize uses antialias when the config has `video.antialias: true`
+    (`praxis-1-droid`).
   - The pose is the flange pose with no turn.
   - The normalization statistics come from the checkpoint.
 
@@ -422,16 +432,21 @@ kernels: the setting of the validation runs (`FLA_KERNEL_CONFIGS` in
 
 We compared praxis with the original implementation of the checkpoint on
 one H100 in bfloat16, with PyTorch 2.13 and the `flash` attention backend.
-We compared raw bytes, so `-0.0` and `+0.0` count as different.
+We compared raw bytes, so `-0.0` and `+0.0` count as different. These runs
+used `praxis-1-droid-k`. `praxis-1-droid` has the same architecture, normalization statistics and
+action codec, other weights, and a 224x416 canvas with an antialiased
+resize. The `praxis-1-droid-k` comparisons do not show `praxis-1-droid` parity. The last column
+gives the `praxis-1-droid` status: the CPU data path checks below ran on `praxis-1-droid`, the
+GPU checks are pending.
 
-| Part | Result |
-|---|---|
-| Action expert | 259 of 259 values equal per case, 6 cases (1 to 3 chunks, two timesteps). The values cover the inputs, the rotary tables, the masks, every block output and the velocity. |
-| Trunk | 64 of 64 checks equal per case, 4 cases (1 to 3 chunks, and the first sampler step of 1 chunk). The checks cover the rotary positions, the masks, every block output of both towers, the taps and the velocity. |
-| Full sampler | 8 fixed cases equal in fresh processes: context depth 0 to 2 with two seeds, and two cases with text guidance 3.0 and flow shift 1.0. The checks cover the noise, the time grid, the velocity inputs and outputs, the guidance combine and the outputs (19 values per case, 43 with guidance). |
-| Robot input and output | The tile canvas, the action and proprio codec on the checkpoint stats and the pose frame conversion equal the values of the original implementation (`tests/test_data_path.py`). |
-| Video autoencoder | Not bitwise equal. The original implementation uses another kernel of the encoder. The latents differ by 1 or 2 bfloat16 units in the last place in a part of the values. The weights are equal. |
-| Closed loop | 3 tasks x 4 seeds in the simulation (`block_in_bowl`, `stack_block`, `press_button`). With the encoder of the original implementation, all 12 episodes are equal on every tick. With the encoder of praxis, 7 of 12 episodes succeed, the same count as the original implementation. |
+| Part | Result (`praxis-1-droid-k`) | `praxis-1-droid` |
+|---|---|---|
+| Action expert | 259 of 259 values equal per case, 6 cases (1 to 3 chunks, two timesteps). The values cover the inputs, the rotary tables, the masks, every block output and the velocity. | Pending (GPU). |
+| Trunk | 64 of 64 checks equal per case, 4 cases (1 to 3 chunks, and the first sampler step of 1 chunk). The checks cover the rotary positions, the masks, every block output of both towers, the taps and the velocity. | Pending (GPU). |
+| Full sampler | 8 fixed cases equal in fresh processes: context depth 0 to 2 with two seeds, and two cases with text guidance 3.0 and flow shift 1.0. The checks cover the noise, the time grid, the velocity inputs and outputs, the guidance combine and the outputs (19 values per case, 43 with guidance). | Pending (GPU). |
+| Robot input and output | The tile canvas, the action and proprio codec on the checkpoint stats and the pose frame conversion equal the values of the original implementation (`tests/test_data_path.py`). | Codec and pose frame: the pinned codec values hold on the `praxis-1-droid` statistics (`test_pinned_stats_are_the_checkpoint_stats`: they equal its `normalization` block). Canvas: equal to the training data path for 416x234 frames, the RoboLab input (`test_antialias_clip_equals_the_training_canvas`). Other frame sizes are not bitwise equal: training resizes to 416 wide and then trims to the 32-px grid, praxis crops to the tile aspect and then resizes. In an offline check against the training code, the antialiased canvases of 1280x720 and 512x288 frames differed by about 3 levels (mean absolute, 0 to 255) on random noise and by less than 0.4 on smooth gradients. |
+| Video autoencoder | Not bitwise equal. The original implementation uses another kernel of the encoder. The latents differ by 1 or 2 bfloat16 units in the last place in a part of the values. The weights are equal. | Pending (GPU). The autoencoder and its weights are shared; its output on `praxis-1-droid` inputs has not been compared. |
+| Closed loop | 3 tasks x 4 seeds in the simulation (`block_in_bowl`, `stack_block`, `press_button`). With the encoder of the original implementation, all 12 episodes are equal on every tick. With the encoder of praxis, 7 of 12 episodes succeed, the same count as the original implementation. | Pending (GPU). |
 
 The text encoder (Qwen3.5-2B, frozen) does not depend on the checkpoint.
 Its check against the original implementation gave 1079 of 1079 values equal (token ids,

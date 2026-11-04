@@ -39,8 +39,6 @@ Set the weight paths in `configs/serve_droid.yaml`. Then start the server:
 python -m praxis.serve --config configs/serve_droid.yaml --host 0.0.0.0 --port 8000
 ```
 
-`configs/serve_droid_k.yaml` (the earlier name) links to the same file.
-
 The server loads the model and runs a warmup over the context depths 0 to
 `max_context_chunks` of the config (0 to 1). Then it accepts connections.
 Set `PRAXIS_SKIP_WARMUP=1` to skip the warmup.

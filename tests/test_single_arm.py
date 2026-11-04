@@ -324,3 +324,61 @@ def test_decode_clips_only_the_q99_dims_of_the_config() -> None:
     edge = q99_denormalize(np.ones((1, 10), np.float32), *_q(stats), dims)
     assert np.all(rel[:, [0, 1]] == edge[0, [0, 1]])
     assert np.all(rel[:, 9] == 1.0)
+
+
+def _views(seed: int, h: int = 288, w: int = 512) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    ext = rng.integers(0, 256, (2, h, w, 3), dtype=np.uint8)
+    wrist = rng.integers(0, 256, (2, h, w, 3), dtype=np.uint8)
+    return ext, wrist
+
+
+def test_tile_clip_antialias_off_is_the_plain_bilinear_resize() -> None:
+    """``antialias=False`` (the default) is byte-identical to the resize before the flag."""
+    ext, wrist = _views(0)
+    clip = sa.tile_clip(ext, wrist, 224, 416, 0.03)
+    assert torch.equal(clip, sa.tile_clip(ext, wrist, 224, 416, 0.03, antialias=False))
+    fr = torch.from_numpy(ext).permute(0, 3, 1, 2)
+    want = (
+        torch.nn.functional.interpolate(
+            sa.aspect_crop(fr, 224, 416, 0.03).float(),
+            size=(224, 416),
+            mode="bilinear",
+            align_corners=False,
+        )
+        .round()
+        .clamp(0, 255)
+    )
+    assert torch.equal(clip[0, :, :, :, :416].permute(1, 0, 2, 3), want)
+
+
+def test_tile_clip_antialias_on_is_the_fit_rule() -> None:
+    """``antialias=True`` crops to the native aspect, resizes to 234x416, trims to 224x416."""
+    ext, wrist = _views(1)
+    on = sa.tile_clip(ext, wrist, 224, 416, 0.03, antialias=True)
+    off = sa.tile_clip(ext, wrist, 224, 416, 0.03, antialias=False)
+    assert not torch.equal(on, off)
+    assert sa.fit_resize_size(416) == (234, 416)
+    fr = torch.from_numpy(wrist).permute(0, 3, 1, 2)
+    fit = (
+        torch.nn.functional.interpolate(
+            sa.aspect_crop(fr, 720, 1280, 0.03).float(),
+            size=(234, 416),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )
+        .round()
+        .clamp(0, 255)
+    )
+    want = fit[..., 5:229, :]
+    assert torch.equal(on[0, :, :, :, 416:].permute(1, 0, 2, 3), want)
+
+
+def test_tile_clip_antialias_on_does_not_resize_a_fit_size_input() -> None:
+    """A 416x234 view (what the client sends) is only trimmed to 416x224."""
+    rng = np.random.default_rng(3)
+    ext = rng.integers(0, 256, (2, 234, 416, 3), dtype=np.uint8)
+    clip = sa.tile_clip(ext, ext, 224, 416, 0.03, antialias=True)
+    want = torch.from_numpy(ext[:, 5:229]).permute(0, 3, 1, 2).float()
+    assert torch.equal(clip[0, :, :, :, :416].permute(1, 0, 2, 3), want)

@@ -62,7 +62,8 @@ logger = logging.getLogger(__name__)
 STACK_ROWS = 25  # 24 executed rows + the current row
 FIRST_CHUNK_ROWS = 21
 CHUNK_ROWS = 24
-# The predicted video of the checkpoint: two 256x416 tiles, exterior then wrist.
+# The size of the dark placeholder before the first prediction when the policy
+# has no canvas of its own (the canvas of the 256x416 tiles).
 PREDICTED_HW = (256, 832)
 BAD_VIEW_MEAN = 2.0  # a model view with a lower mean pixel value is black
 BAD_VIEW_STD = 1.0  # a model view with a lower pixel std is one flat color
@@ -289,6 +290,11 @@ class ModelPolicy:
         self.session = None
         self.calls = 0
 
+    @property
+    def canvas_hw(self) -> tuple[int, int]:
+        """The ``(height, width)`` of the predicted canvas of the checkpoint."""
+        return single_arm.canvas_size(self.pipe.policy.config)
+
     @classmethod
     def from_config(cls, cfg: SimConfig, prompt: str) -> ModelPolicy:
         """Load the checkpoint, the autoencoder and the text encoder of ``cfg``."""
@@ -385,17 +391,19 @@ def human_frame(
     predicted: np.ndarray | None,
     lines: list[str],
     predicted_slot: bool = False,
+    predicted_hw: tuple[int, int] = PREDICTED_HW,
 ) -> np.ndarray | None:
     """Return the video frame of one tick, or ``None`` without rendered views.
 
     Top row: ``[overview | exterior | wrist]``, the rendered views. Bottom
     row (with ``predicted_slot``): the predicted ``[exterior | wrist]`` canvas
     of the model under the rendered views. Before the first prediction, the
-    bottom row is dark, so all the frames of a video have the same size. The
-    status lines go on a band at the bottom.
+    bottom row is dark (``predicted_hw``, the canvas of the checkpoint), so
+    all the frames of a video have the same size. The status lines go on a
+    band at the bottom.
     """
     if predicted is None and predicted_slot:
-        predicted = np.full((*PREDICTED_HW, 3), 16, dtype=np.uint8)
+        predicted = np.full((*predicted_hw, 3), 16, dtype=np.uint8)
     views = [obs.overview, obs.exterior, obs.wrist]
     names = ["overview", "exterior (model input)", "wrist (model input)"]
     panels = [v for v in views if v is not None]
@@ -594,6 +602,8 @@ def run_episode(
     predicted: np.ndarray | None = None
     extra = dict(status_extra or {})
     predicted_slot = bool(getattr(policy, "decode_video", False))
+    ph, pw = getattr(policy, "canvas_hw", PREDICTED_HW)
+    predicted_hw = (int(ph), int(pw))
 
     def status(phase: str) -> dict[str, object]:
         s = env.task.status
@@ -618,7 +628,7 @@ def run_episode(
             success=env.task.status.success,
             extra={"seed": seed, "grip": obs.grip},
         )
-        frame = human_frame(obs, row_frame, lines, predicted_slot)
+        frame = human_frame(obs, row_frame, lines, predicted_slot, predicted_hw)
         if frame is None:
             return
         if video is not None:

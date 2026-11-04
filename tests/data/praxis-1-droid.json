@@ -191,7 +191,7 @@
     "proprio_frames": 1
   },
   "video": {
-    "height": 256,
+    "height": 224,
     "width": 832,
     "views": [
       "exterior",
@@ -200,17 +200,17 @@
     "canvas": "tiles",
     "layout": "hstack",
     "keep_aspect": true,
-    "antialias": false,
+    "antialias": true,
     "tile_bounds_rows_cols": {
       "exterior": [
         0,
-        256,
+        224,
         0,
         416
       ],
       "wrist": [
         0,
-        256,
+        224,
         416,
         832
       ]
@@ -228,7 +228,7 @@
       2,
       2
     ],
-    "tile_height": 256,
+    "tile_height": 224,
     "tile_width": 416,
     "aspect_tol": 0.03,
     "vae_encode_impl": "megakernel",

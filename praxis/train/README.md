@@ -103,7 +103,10 @@ The raw MP4 files have time stamps at 50 to 60 fps and one frame for each
 files have only one key frame. This decode needs CPU time:
 `data.num_workers` sets the number of loader processes for each GPU.
 
-The data recipe matches the DROID training data of the checkpoint:
+The data recipe is the DROID recipe of the checkpoint. The canvas follows
+the checkpoint config (see "Canvas"). For `praxis-1-droid` the canvas of a 1280x720
+frame is close to its training canvas but not bitwise equal (see
+"Validation" in the top README):
 
 - Episodes: the successful episodes with a language instruction and at
   least 102 frames (the window and 0.5 s more).
@@ -112,10 +115,13 @@ The data recipe matches the DROID training data of the checkpoint:
 - Window: 93 frames at 15 Hz in 4 chunks of 21, 24, 24 and 24 frames.
 - Start: the start time is uniform in `[0, D - 6.2 s]`, with `D` the
   duration of the episode video. Then it snaps down to the frame grid.
-- Canvas: each camera gets its own 256x416 tile with the tile code of the
-  serve path. The code crops the frame to the tile aspect at the centre
-  and resizes it (bilinear, no antialias). The exterior camera 1 goes left
-  and the wrist camera right (256x832).
+- Canvas: each camera gets its own tile (the tile size of the checkpoint
+  config) with the tile code of the serve path. The code crops the frame
+  to the tile aspect at the centre and resizes it (bilinear). The resize
+  uses antialias when the checkpoint config has `video.antialias: true`,
+  as for `praxis-1-droid`. Without the key, or with `false`, it has no antialias. The
+  same switch sets the resize of inference. The exterior camera 1 goes left
+  and the wrist camera right (two tiles wide, 256x832 or 224x832).
 - Poses: the flange pose of DROID, with no turn. The proprio is the
   observed pose at the start of each chunk.
 - Actions: the commanded pose of each frame relative to the observed pose
@@ -204,7 +210,8 @@ warmup.
 The weights, the gradients and the AdamW moments take 8 bytes per
 parameter: 203 GiB for the 27.2B parameters. FSDP divides them by the number
 of GPUs. Each GPU also holds the activations, a copy of the autoencoder and a
-copy of the text encoder. We measured these values on H100 GPUs with 80 GB:
+copy of the text encoder. We measured these values on H100 GPUs with 80 GB,
+with `praxis-1-droid-k` (`praxis-1-droid` has the same model and a smaller canvas):
 
 | GPUs | Gradient accumulation | Windows per step | Peak memory per GPU | Time per step |
 |---|---|---|---|---|
@@ -332,7 +339,7 @@ hardware. Pass rule:
 If the loss still falls at the last step, run more steps
 (`--set train.steps=1200`).
 
-We ran the check on 4 H100 GPUs:
+We ran the check on 4 H100 GPUs with `praxis-1-droid-k`:
 
 | | 4 H100 GPUs |
 |---|---|
@@ -354,7 +361,7 @@ GPUs.
 ## Validation of the training step
 
 We compared the training step of praxis with the original training code
-on one H100. Both sides used the same windows and
+on one H100, with `praxis-1-droid-k`. Both sides used the same windows and
 the same random values (timesteps, noise, dropout and rotary offsets). Both
 sides used the Triton kernel of flex attention in the trunk, activation
 checkpointing and deterministic algorithms. The test computed the gradients

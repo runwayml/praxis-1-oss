@@ -81,10 +81,3 @@ def test_paths_are_relative(name: str) -> None:
         paths.append(cfg["input"]["episodes_dir"])
     for path in paths:
         assert not Path(path).is_absolute() and ".." not in Path(path).parts, path
-
-
-@pytest.mark.parametrize("kind", ["inference", "serve", "sim"])
-def test_old_config_names_still_work(kind: str) -> None:
-    """``configs/*_droid_k.yaml`` (the names before the rename) give the same config."""
-    old = ROOT / "configs" / f"{kind}_droid_k.yaml"
-    assert old.resolve() == (ROOT / "configs" / f"{kind}_droid.yaml").resolve()

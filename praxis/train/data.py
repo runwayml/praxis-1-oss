@@ -21,9 +21,12 @@ DROID training data of the checkpoint:
   one frame per 15 Hz step.
 * Canvas: each camera gets its own tile with the code of the serve path
   (:func:`praxis.single_arm.tile_clip`): a centre crop to the tile aspect
-  (1280x720 becomes 1170x720), one bilinear resize without antialias to
-  256x416 and a round to uint8. The exterior camera 1 goes left and the
-  wrist camera right (256x832).
+  (1280x720 becomes 1170x720 for 256x416 tiles, 1280x689 for the 224x416
+  tiles of praxis-1-droid), one bilinear resize to the tile and a round to uint8.
+  The resize uses antialias when the checkpoint config has
+  ``video.antialias: true`` (praxis-1-droid). Without the key, or with
+  ``false``, it has no antialias. The exterior camera 1 goes left and the
+  wrist camera right (two tiles wide, 256x832 or 224x832).
 * Poses: DROID gives the flange pose ``[x, y, z, roll, pitch, yaw]`` with
   extrinsic x-y-z Euler angles. The model uses the flange frame without a
   turn (``pose_frame: "flange"``). :func:`droid_pose8` makes the
@@ -389,6 +392,7 @@ class DroidWindowDataset(IterableDataset):
         tile_h, width = canvas_size(config)
         self.tile = (tile_h, width // len(VIEWS))
         self.aspect_tol = float(config["video"].get("aspect_tol", ASPECT_TOL))
+        self.antialias = bool(config["video"].get("antialias", False))
         if config.get("pose_frame") != "flange":
             raise ValueError("DROID windows need the config pose_frame 'flange'")
         self.source = str(source)
@@ -529,7 +533,9 @@ class DroidWindowDataset(IterableDataset):
             read_frames(self._file(self._video(episode.index, v)), anchor, stop)
             for v in VIEWS
         )
-        clip = tile_clip(ext, wrist, *self.tile, self.aspect_tol)
+        clip = tile_clip(
+            ext, wrist, *self.tile, self.aspect_tol, antialias=self.antialias
+        )
         obs, cmd = episode.observed, episode.commanded
         starts = [anchor + off for off, _ in self.geometry]
         actions = [

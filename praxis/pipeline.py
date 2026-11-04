@@ -150,6 +150,7 @@ class Session:
             n_chunks=int(config["chunking"].get("n_chunks", single_arm.N_CHUNKS)),
             tile_size=variant.tile_size,
             aspect_tol=variant.aspect_tol,
+            antialias=variant.antialias,
         )
 
     @torch.no_grad()

@@ -25,8 +25,7 @@ of the volume. A leading ``/`` also means the root of the volume.
 These environment variables of ``modal deploy`` change the deployment:
 
 * ``PRAXIS_CONFIG``: the serve config, a path in the repository. The default
-  is ``configs/serve_droid.yaml`` (``configs/serve_droid_k.yaml`` is the same
-  file).
+  is ``configs/serve_droid.yaml``.
 * ``PRAXIS_CHECKPOINT``: the checkpoint directory in the volume. The default
   is ``model.checkpoint`` of the config, for example a fine-tuned copy of
   the checkpoint. A checkpoint that is not single-arm fails the boot.

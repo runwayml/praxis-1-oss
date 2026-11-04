@@ -7,8 +7,10 @@
 #
 # The checkpoint config sets the rest of the variant: the canvas (one tile per
 # view; the tile size comes from the checkpoint), the pose frame of the actions and the caption of the
-# unguided pass. No key of this file changes them. The rig sends the views at
-# 1024x288 and the server makes the tiles.
+# unguided pass. No key of this file changes them. The client bounds each view
+# before it sends it: 416x234 for an antialiased canvas (praxis-1-droid: the training
+# fit size, resized ahead of the frame stack), else 1024x288. The server makes
+# the tiles.
 #
 # The alternative recipe: num_steps 2, t_shift 8.0, cfg_scale 1.0,
 # cfg_video_scale 1.0 and max_context_chunks 3.
