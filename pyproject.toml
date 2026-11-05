@@ -43,7 +43,7 @@ serve = [
 # package editable on top: pip install -e packages/praxis-sim. A PyPI release of
 # praxis-sim replaces the git reference.
 sim = [
-    "praxis-sim @ git+https://github.com/runwayml/praxis-1.git#subdirectory=packages/praxis-sim",
+    "praxis-sim @ git+https://github.com/runwayml/praxis-1-oss.git#subdirectory=packages/praxis-sim",
     "imageio>=2.30",
     "imageio-ffmpeg>=0.4",
 ]

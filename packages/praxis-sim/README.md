@@ -7,7 +7,7 @@ torch. The model loop (`praxis.sim.loop`), the video writer and the live viewer 
 `praxis` package, which runs the simulation through this one.
 
 ```bash
-pip install "praxis-sim @ git+https://github.com/runwayml/praxis-1.git#subdirectory=packages/praxis-sim"
+pip install "praxis-sim @ git+https://github.com/runwayml/praxis-1-oss.git#subdirectory=packages/praxis-sim"
 # or, from a checkout of this repository (the `sim` extra of praxis pulls the package in too):
 pip install -e packages/praxis-sim
 ```

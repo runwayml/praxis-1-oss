@@ -413,7 +413,7 @@ environment, or next to a sim stack on another Python). The `sim` extra of
 
 | Sim | Package | Python | Install | Reaches the model |
 | --- | --- | --- | --- | --- |
-| MuJoCo rig (this repository) | `praxis-sim` | >= 3.10 | `pip install -e ".[sim]"`, or on its own `pip install "praxis-sim @ git+https://github.com/runwayml/praxis-1.git#subdirectory=packages/praxis-sim"` | in process (`praxis.sim.loop`), or LeRobot's `--env.type=praxis_sim` |
+| MuJoCo rig (this repository) | `praxis-sim` | >= 3.10 | `pip install -e ".[sim]"`, or on its own `pip install "praxis-sim @ git+https://github.com/runwayml/praxis-1-oss.git#subdirectory=packages/praxis-sim"` | in process (`praxis.sim.loop`), or LeRobot's `--env.type=praxis_sim` |
 
 A simulator that cannot share praxis's Python or numpy reaches the model through
 the policy server of the `serve` extra (two processes: the server in the praxis
