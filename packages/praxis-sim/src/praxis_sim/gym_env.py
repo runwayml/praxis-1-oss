@@ -52,7 +52,7 @@ _register_suite()
 
 STATE_DIM = 7
 SCENE_SEED_KEY = "scene_seed"
-# The largest integer float32 holds exactly: LeRobot casts the observation to float32.
+# Every integer up to 2**24 is exact in float32: LeRobot casts the observation to float32.
 MAX_SCENE_SEED = 2**24
 
 

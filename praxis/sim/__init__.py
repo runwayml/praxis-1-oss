@@ -87,7 +87,12 @@ class _Alias(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         module.__spec__ = self._specs.pop(alias, module.__spec__)
 
 
-sys.meta_path.insert(0, _Alias())
+# Once per interpreter: a reload of this package must not add a second finder.
+if not any(
+    type(f).__name__ == "_Alias" and type(f).__module__ == __name__
+    for f in sys.meta_path
+):
+    sys.meta_path.insert(0, _Alias())
 
 
 def __getattr__(name: str) -> types.ModuleType:

@@ -40,8 +40,9 @@ serve = [
 # The MuJoCo simulation (praxis/sim, scripts/run_sim.py): the simulator package of
 # packages/praxis-sim from this repository (mujoco, gymnasium, numpy; no torch) and the
 # MP4 writer's imageio. To work on the simulator itself in a checkout, install the
-# package editable on top: pip install -e packages/praxis-sim. A PyPI release of
-# praxis-sim replaces the git reference.
+# package editable on top, as a separate command after the extra (re-running the
+# extra replaces it with the copy from main): pip install -e packages/praxis-sim.
+# A PyPI release of praxis-sim replaces the git reference.
 sim = [
     "praxis-sim @ git+https://github.com/runwayml/praxis-1-oss.git#subdirectory=packages/praxis-sim",
     "imageio>=2.30",

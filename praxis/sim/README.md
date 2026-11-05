@@ -41,8 +41,9 @@ pip install -e ".[sim]"   # the praxis-sim package (mujoco 3.16, gymnasium) + im
 
 Use the `sim` extra in addition to the install steps of the top README. The
 extra installs the simulator package from this repository's git URL; to work on
-the simulator itself, install the checkout's copy editable on top:
-`pip install -e packages/praxis-sim`. The
+the simulator itself, install the checkout's copy editable on top, as a separate
+command after the extra: `pip install -e packages/praxis-sim` (re-running the `sim`
+extra replaces it with the copy from `main`). The
 scripted policy needs no GPU and no model weights. The model policy needs the
 weights of the top README and one GPU with 80 GB of memory.
 
