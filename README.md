@@ -119,6 +119,14 @@ parity needs `transformers` 5.2.0, `flash-linear-attention` 0.5.0 and
 
 ## Get the weights
 
+The praxis checkpoints:
+
+| Checkpoint | Local directory | What it is |
+|---|---|---|
+| Base | `checkpoints/praxis-1-base` | The pretrained model without action heads: the start of a fine-tune for a new rig |
+| Bimanual (YAM) | `checkpoints/praxis-1-yam` | The bimanual checkpoint (see [Bimanual rig](#bimanual-rig)) |
+| Single-arm (DROID) | `checkpoints/praxis-1-droid` | The single-arm checkpoint, the default of the configs |
+
 You need three sets of weights:
 
 1. The praxis checkpoint `praxis-1-droid`: a directory with
@@ -142,14 +150,15 @@ mkdir -p $C   # copy the checkpoint files into this directory
 ```
 
 `SHA256SUMS` lists the shards, `config.json` and the index.
+The configs read each checkpoint from its
+local directory: `checkpoints/praxis-1-droid` (single-arm),
+`checkpoints/praxis-1-yam` (bimanual, see [Bimanual rig](#bimanual-rig)).
 
-The earlier checkpoint `praxis-1-droid-k` (`config.json` SHA-256
-`f09961f066aa9fde871cd5032daedfd986dfd1f4b1901ada15f97a858b4ba6b9`,
-copy in `tests/data/praxis-1-droid-k.json`) has the same architecture and
-other weights, with 256x416 tiles and a resize without antialias. It runs with the same code and
-configs: put it in `checkpoints/praxis-1-droid` instead. Its config sets
-its own canvas and resize. The recommended sampler settings were measured
-on `praxis-1-droid`.
+The tests also use the config of the earlier single-arm checkpoint `praxis-1-droid-k`
+(`tests/data/praxis-1-droid-k.json`, SHA-256
+`f09961f066aa9fde871cd5032daedfd986dfd1f4b1901ada15f97a858b4ba6b9`): the same
+architecture with 256x416 tiles and a resize without antialias. The
+recommended sampler settings were measured on `praxis-1-droid`.
 
 The checkpoint asks for the `flash` attention backend of the trunk
 (`backbone.attention.backend` in `config.json`). We made the validation
@@ -366,10 +375,12 @@ The data of the rig:
 The bimanual checkpoint `praxis-1-yam` (`"embodiment": "bimanual"`) is the
 model variant of the single-arm checkpoint with 20-D actions over two arms
 and a canvas of three views. The weights have the same layout as the single-arm
-checkpoint (54.4 GB; `tests/data/praxis-1-yam.json` is a copy of its
-`config.json`, SHA-256
-`2511b1a2138f9f2f1b9be2c25f8bf99b97bfcf0c205335e7312d5135bacf3c3c`). Serve it with `configs/serve_yam.yaml` (the Modal app:
-`PRAXIS_CONFIG=configs/serve_yam.yaml`). The rig code is
+checkpoint (54.4 GB).
+`tests/data/praxis-1-yam.json` is a copy of its `config.json`, SHA-256
+`2511b1a2138f9f2f1b9be2c25f8bf99b97bfcf0c205335e7312d5135bacf3c3c`. Copy the
+checkpoint files into `checkpoints/praxis-1-yam` and serve it with
+`configs/serve_yam.yaml` (the
+Modal app: `PRAXIS_CONFIG=configs/serve_yam.yaml`). The rig code is
 `praxis/bimanual.py`.
 
 The data of the rig:
