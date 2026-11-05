@@ -232,8 +232,8 @@ def test_meta_names_the_single_arm_rig() -> None:
 
 
 @pytest.mark.parametrize("embodiment", ["two_arm", "other"])
-def test_factory_refuses_a_checkpoint_that_is_not_single_arm(embodiment: str) -> None:
-    with pytest.raises(ValueError, match="single-arm checkpoint only"):
+def test_factory_refuses_a_checkpoint_of_another_rig(embodiment: str) -> None:
+    with pytest.raises(ValueError, match="single-arm and the bimanual checkpoints"):
         _factory({**SINGLE_ARM, "embodiment": embodiment})
 
 
@@ -322,3 +322,45 @@ def test_antialiased_canvas_declares_the_fit_serve_stack() -> None:
     offsets = seq[2]["args"]["offsets_sec"]
     assert len(offsets) == 25 and offsets[-1] == 0.0
     assert offsets[0] == -24 / 15 + 0.5 / 15 and offsets[-2] == -1 / 15 + 0.5 / 15
+
+
+def test_factory_serves_the_bimanual_rig() -> None:
+    """The bimanual checkpoint: the yam_ee2 wire, its stack keys and a
+    416x416 restrict box ahead of the frame stack."""
+    import json
+
+    from praxis import bimanual
+
+    yam = json.loads((ROOT / "tests" / "data" / "praxis-1-yam.json").read_text())
+    cfg = _serve_config("serve_yam.yaml")
+    assert cfg["model"]["embodiment"] == "bimanual"
+    pipe = _Pipeline(yam, SamplerSettings(**cfg["sampler"]))
+    factory = PolicyFactory(
+        pipe,  # ty: ignore[invalid-argument-type]
+        dict(cfg["session"]),
+        "/ckpt/praxis-1-yam",
+    )
+    assert factory.stack_keys == bimanual.STACK_KEYS
+    assert factory.restrict == (416, 416) and factory.restrict_first is False
+    assert factory.half_frame is True
+    meta = factory({}).meta
+    assert meta["embodiment"] == "yam_ee2" and meta["control_mode"] == "none"
+    assert meta["wire_commands"] == [
+        "robot_command.left",
+        "robot_command.right",
+        "target_grip.left",
+        "target_grip.right",
+    ]
+    assert pipe.sessions[-1]["control_mode"] == "none"
+    seq = meta["local_stack"]["seq"]
+    # The YAM client order: the stack, then the restrict; half-frame offsets.
+    assert [s["name"] for s in seq] == [
+        "stop_on_fault",
+        "temporal_stack",
+        "chunked_schedule",
+        "restrict_image_size",
+    ]
+    offsets = seq[1]["args"]["offsets_sec"]
+    assert offsets[-1] == 0.0 and abs(offsets[0] + 23.5 / 15) < 1e-9
+    with pytest.raises(ValueError, match="control_mode"):
+        factory({"control_mode": "droid_impedance"})

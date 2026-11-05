@@ -14,11 +14,13 @@ The tensor names start with ``backbone.encoder.``, ``backbone.decoder.`` or
 ``action_expert.``. All tensors are bfloat16, except the MoE routing biases
 (``*.ffn.expert_bias``), which are float32. The loaders keep the stored dtype.
 
-``load_config`` checks the config with ``validate_config``. Only the
-single-arm checkpoint loads: ``"embodiment": "single_arm"``, format version 2.
-A config without that embodiment raises ``CheckpointError``
-(``OTHER_RIG_REFUSED``), and so does a single-arm config of another model
-variant (``OTHER_VARIANT_REFUSED``). The variant fields below are optional.
+``load_config`` checks the config with ``validate_config``. Format version 2
+loads for two rigs: ``"embodiment": "single_arm"`` (the DROID checkpoint) and
+``"embodiment": "bimanual"`` (the YAM checkpoint). Both rigs run the same model
+variant; only the expert head widths, the views and the normalization differ.
+A config of another embodiment raises ``CheckpointError``
+(``OTHER_RIG_REFUSED``), and so does a config of another model variant
+(``OTHER_VARIANT_REFUSED``). The variant fields below are optional.
 A missing field takes the value of the checkpoint.
 ``model_variant`` returns the resolved values of these fields:
 
@@ -52,8 +54,11 @@ A missing field takes the value of the checkpoint.
   optional ``vae_megakernel_chunk_frames``.
 - ``text_encoder.uncond`` (``"blank_caption"``): encodes ``blank_caption``
   for the unconditional pass. It is the only value.
-- ``pose_frame`` (``"flange"``): the flange pose with no turn. It is the only
-  value.
+- ``pose_frame``: the frame of the arm poses of the model. ``"flange"`` (the
+  single-arm rig): the Franka flange pose with no turn; the session converts
+  the pose of each client to it. ``"rig"`` (the bimanual rig): the poses as
+  the rig reports them, in its world frame, with no conversion. Each rig
+  takes only its own value; a missing field takes it.
 
 An unknown key or value in these sections raises ``CheckpointError``.
 """
@@ -125,6 +130,8 @@ def load_config(path: str | Path) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 FORMAT_VERSION = 2
+#: Action rows per action token (one token per latent frame).
+FRAMES_PER_TOKEN = 4
 
 #: The expert RoPE of the checkpoint. It is the only supported value.
 EXPERT_TRUNK_ROPE: dict[str, object] = {
@@ -150,24 +157,43 @@ ROPE_REF_PLACEMENTS = ("group",)
 CANVASES = ("tiles",)
 VAE_ENCODE_IMPLS = ("megakernel",)
 TEXT_UNCONDS = ("blank_caption",)
-POSE_FRAMES = ("flange",)
+POSE_FRAMES = ("flange", "rig")
+#: The pose frame of each rig (``pose_frame`` in the config).
+RIG_POSE_FRAMES: dict[str, str] = {"single_arm": "flange", "bimanual": "rig"}
 #: The tile canvas of the checkpoint: the views, the tile (height,
 #: width) and the aspect tolerance of the centre crop.
 VIEWS = ("exterior", "wrist")
 TILE_SIZE = (256, 416)
 ASPECT_TOL = 0.03
 
-#: The error of a config without ``"embodiment": "single_arm"``.
+#: The rigs of format version 2 and the views of each rig, in canvas order.
+EMBODIMENTS = ("single_arm", "bimanual")
+RIG_VIEWS: dict[str, tuple[str, ...]] = {
+    "single_arm": VIEWS,
+    "bimanual": ("top_left", "wrist_left", "wrist_right"),
+}
+#: The action row width of each rig (``action_space.dim``).
+RIG_ACTION_DIMS: dict[str, int] = {"single_arm": 10, "bimanual": 20}
+#: The native camera view (height, width) of each rig. The fit rule of an
+#: antialiased canvas resizes this view to the tile width and trims it to the
+#: tile: DROID 720x1280 -> 234x416 -> 224x416, YAM 1200x1920 -> 260x416 ->
+#: 256x416.
+NATIVE_VIEWS: dict[str, tuple[int, int]] = {
+    "single_arm": (720, 1280),
+    "bimanual": (1200, 1920),
+}
+
+#: The error of a config of another embodiment.
 OTHER_RIG_REFUSED = (
-    'config: only "embodiment": "single_arm" is supported; use the single-arm '
-    "checkpoint"
+    'config: only "embodiment": "single_arm" or "bimanual" is supported; use the '
+    "single-arm or the bimanual checkpoint"
 )
 
-#: The error of a single-arm config of another model variant. ``{reason}``
-#: names the field that differs from the checkpoint.
+#: The error of a config of another model variant. ``{reason}`` names the
+#: field that differs from the checkpoint.
 OTHER_VARIANT_REFUSED = (
-    "config: this single-arm model variant is not supported ({reason}); "
-    "use the single-arm checkpoint"
+    "config: this model variant is not supported ({reason}); "
+    "use the single-arm or the bimanual checkpoint"
 )
 
 _TOP_KEYS = frozenset(
@@ -489,7 +515,9 @@ def _expert_variant(ex: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _video_variant(video: Mapping[str, object]) -> dict[str, object]:
+def _video_variant(
+    video: Mapping[str, object], embodiment: str = "single_arm"
+) -> dict[str, object]:
     canvas = _choice(video.get("canvas", "tiles"), CANVASES, "video.canvas")
     th = _positive_int(video.get("tile_height", TILE_SIZE[0]), "video.tile_height")
     tw = _positive_int(video.get("tile_width", TILE_SIZE[1]), "video.tile_width")
@@ -498,7 +526,7 @@ def _video_variant(video: Mapping[str, object]) -> dict[str, object]:
         raise CheckpointError(f"config: video.aspect_tol must be a number, got {tol!r}")
     if not 0.0 <= float(tol) < 1.0:
         raise CheckpointError(f"config: video.aspect_tol must be in [0, 1), got {tol}")
-    views = video.get("views", list(VIEWS))
+    views = video.get("views", list(RIG_VIEWS.get(embodiment, VIEWS)))
     if not isinstance(views, list) or not views:
         raise CheckpointError("config: video.canvas='tiles' needs video.views")
     height, width = video.get("height", th), video.get("width", tw * len(views))
@@ -515,12 +543,13 @@ def _video_variant(video: Mapping[str, object]) -> dict[str, object]:
         raise CheckpointError(
             f"config: video.antialias must be a bool, got {antialias!r}"
         )
-    if antialias and th > tw * 720 // 1280:
+    nh, nw = NATIVE_VIEWS.get(embodiment, NATIVE_VIEWS["single_arm"])
+    if antialias and th > tw * nh // nw:
         # The fit rule of an antialiased canvas trims the native view resized to
         # tw wide (single_arm.fit_resize_size); a taller tile cannot be cut.
         raise CheckpointError(
-            f"config: video.antialias needs tiles no taller than {tw * 720 // 1280} "
-            f"for {tw}-wide tiles, got {th}x{tw}"
+            f"config: video.antialias needs tiles no taller than {tw * nh // nw} "
+            f"for {tw}-wide tiles of a {nh}x{nw} view, got {th}x{tw}"
         )
     bounds = video.get("tile_bounds_rows_cols")
     if bounds is not None:
@@ -602,14 +631,15 @@ def model_variant(config: Mapping[str, object]) -> ModelVariant:
         raise CheckpointError(
             "config: text_encoder.uncond='blank_caption' needs a blank_caption string"
         )
-    pose_frame = _choice(config.get("pose_frame", "flange"), POSE_FRAMES, "pose_frame")
+    rig_frame = RIG_POSE_FRAMES.get(str(config.get("embodiment")), "flange")
+    pose_frame = _choice(config.get("pose_frame", rig_frame), POSE_FRAMES, "pose_frame")
     return ModelVariant(
         **expert_fields,  # ty: ignore[invalid-argument-type]
         backbone_layout=layout,
         attention_backend=str(backend),
         moe_dispatch_chunk_size=chunk,
         rope_ref_placement=str(placement),
-        **_video_variant(video),
+        **_video_variant(video, str(config.get("embodiment", "single_arm"))),
         text_uncond=str(uncond),
         blank_caption=caption,
         pose_frame=str(pose_frame),
@@ -657,15 +687,16 @@ def _check_normalization(config: Mapping[str, object]) -> None:
 
 
 def _check_single_arm(config: Mapping[str, object], version: object) -> None:
-    """Refuse a single-arm config of another model variant.
+    """Refuse a config of another model variant.
 
-    The single-arm rig runs only this model variant: format version 2,
+    Both rigs run only this model variant: format version 2,
     the chunk-causal backbone, the trunk RoPE of the expert, the tile canvas
-    and the flange pose frame.
+    and the pose frame of the rig (``RIG_POSE_FRAMES``).
     """
     layout = _section(config, "backbone").get("layout", "chunk_causal")
     canvas = _section(config, "video").get("canvas", "tiles")
-    pose_frame = config.get("pose_frame", "flange")
+    rig_frame = RIG_POSE_FRAMES.get(str(config.get("embodiment")), "flange")
+    pose_frame = config.get("pose_frame", rig_frame)
     reason = None
     if version != FORMAT_VERSION:
         reason = f"format_version {version!r}"
@@ -675,17 +706,18 @@ def _check_single_arm(config: Mapping[str, object], version: object) -> None:
         reason = "no action_expert.rope"
     elif canvas != "tiles":
         reason = f"canvas {canvas!r}"
-    elif pose_frame != "flange":
-        reason = f"pose_frame {pose_frame!r}"
+    elif pose_frame != rig_frame:
+        reason = f"pose_frame {pose_frame!r} (the {config.get('embodiment')} rig has {rig_frame!r})"
     if reason is not None:
         raise CheckpointError(OTHER_VARIANT_REFUSED.format(reason=reason))
 
 
 def validate_config(config: Mapping[str, object]) -> None:
-    """Check a checkpoint config: the single-arm rig (the checkpoint
-    only), the format version, the variant fields (``model_variant``) and the
-    normalization vectors. Raises ``CheckpointError``."""
-    if config.get("embodiment") != "single_arm":
+    """Check a checkpoint config: the rig (``EMBODIMENTS``), the format
+    version, the variant fields (``model_variant``), the views of the rig and
+    the normalization vectors. Raises ``CheckpointError``."""
+    embodiment = config.get("embodiment")
+    if embodiment not in EMBODIMENTS:
         raise CheckpointError(OTHER_RIG_REFUSED)
     version = config.get("format_version", 1)
     if isinstance(version, bool) or not isinstance(version, int) or version > 2:
@@ -695,7 +727,34 @@ def validate_config(config: Mapping[str, object]) -> None:
         )
     _check_single_arm(config, version)
     model_variant(config)
+    _check_rig(config, str(embodiment))
     _check_normalization(config)
+
+
+def _check_rig(config: Mapping[str, object], embodiment: str) -> None:
+    """Check the views and the action widths of the rig of ``config``."""
+    want = list(RIG_VIEWS[embodiment])
+    views = _section(config, "video").get("views", want)
+    if views != want:
+        raise CheckpointError(
+            f"config: the {embodiment} rig has the views {want}, got {views}"
+        )
+    dim = _section(config, "action_space").get("dim")
+    if dim is None:
+        return
+    if dim != RIG_ACTION_DIMS[embodiment]:
+        raise CheckpointError(
+            f"config: the {embodiment} rig has action_space.dim "
+            f"{RIG_ACTION_DIMS[embodiment]}, got {dim}"
+        )
+    expert = _section(config, "action_expert")
+    proprio = expert.get("proprio_patch_dim", dim)
+    action = expert.get("action_patch_dim", dim * FRAMES_PER_TOKEN)
+    if proprio != dim or action != dim * FRAMES_PER_TOKEN:
+        raise CheckpointError(
+            f"config: action_space.dim {dim} needs proprio_patch_dim {dim} and "
+            f"action_patch_dim {dim * FRAMES_PER_TOKEN}, got {proprio} and {action}"
+        )
 
 
 def expected_dtype(config: Mapping[str, object], name: str) -> torch.dtype:

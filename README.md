@@ -1,8 +1,10 @@
 praxis-1
 
-Praxis is a video-action policy for a robot arm. The checkpoint is
-`praxis-1-droid`, the single-arm checkpoint. It is for a
-single-arm robot with an exterior camera and a wrist camera (the DROID rig).
+Praxis is a video-action policy for robot arms. There are two checkpoints of
+one model variant: `praxis-1-droid`, the single-arm checkpoint, for a
+single-arm robot with an exterior camera and a wrist camera (the DROID rig),
+and `praxis-1-yam`, the bimanual checkpoint, for two YAM arms with a top
+camera and two wrist cameras (see [Bimanual rig](#bimanual-rig)).
 For each policy call, the model predicts the next video chunk and the next
 action chunk. The robot then executes the action chunk.
 
@@ -39,7 +41,7 @@ One policy call gives these outputs:
 | Video autoencoder | `praxis/vae.py` | Wan2.2 VAE | Maps frames to latents and back. Frozen. |
 | Text encoder | `praxis/text_encoder.py` | Qwen3.5-2B | Maps the task string to tokens. Frozen. |
 | Sampler | `praxis/sampler.py` | - | Flow-matching Euler steps from noise to the sample. |
-| Robot input and output | `praxis/single_arm.py`, `praxis/robot_io.py` | - | Camera canvas, pose conversions, normalization, context window, command format, control modes. |
+| Robot input and output | `praxis/single_arm.py`, `praxis/bimanual.py`, `praxis/robot_io.py` | - | Camera canvas, pose conversions, normalization, context window, command format, control modes. |
 | Pipeline | `praxis/model.py`, `praxis/pipeline.py` | - | Connects all parts. |
 
 The backbone and the action expert share one checkpoint (about 54 GB in
@@ -334,9 +336,9 @@ guidance (`cfg_scale` and `cfg_video_scale` 1.0) and 3 context chunks.
 
 ## Single-arm rig
 
-The checkpoint config selects the rig. praxis supports one rig:
-`"embodiment": "single_arm"` in `config.json`. The loader refuses a config
-without this key.
+The checkpoint config selects the rig: `"embodiment": "single_arm"` or
+`"embodiment": "bimanual"` in `config.json`. The loader refuses a config
+without one of them.
 
 The data of the rig:
 
@@ -358,6 +360,43 @@ The data of the rig:
   (mean) from the flange forward kinematics.
 - Prompt: the session gives the task string to the text encoder without a
   rewrite.
+
+## Bimanual rig
+
+The bimanual checkpoint `praxis-1-yam` (`"embodiment": "bimanual"`) is the
+model variant of the single-arm checkpoint with 20-D actions over two arms
+and a canvas of three views. The weights have the same layout as the single-arm
+checkpoint (54.4 GB; `tests/data/praxis-1-yam.json` is a copy of its
+`config.json`, SHA-256
+`2511b1a2138f9f2f1b9be2c25f8bf99b97bfcf0c205335e7312d5135bacf3c3c`). Serve it with `configs/serve_yam.yaml` (the Modal app:
+`PRAXIS_CONFIG=configs/serve_yam.yaml`). The rig code is
+`praxis/bimanual.py`.
+
+The data of the rig:
+
+- Observations: `robot_state.{left,right}.ee_pose` (`[xyz3, quat_wxyz4]`, in
+  the world frame of the rig), `grip.{left,right}`, and the views
+  `image.exterior` (the top camera), `image.wrist_left`, `image.wrist_right`.
+- Canvas: three 256x416 tiles side by side (256x1248), in the order top,
+  left wrist, right wrist. Each view goes through the fit rule of training:
+  an antialiased resize so that it fits 416 px with its aspect kept, then a
+  centre trim to the 32-px grid (1200x1920 or 600x960 -> 260x416 ->
+  256x416). The client bounds each view to a 416x416 box. praxis serves
+  16:10 views only; it refuses views at another aspect.
+- Actions: 20 values per row, `[L: xyz3 rot6d6 grip1 | R: same]`. Each arm is
+  relative to its own pose at the start of the chunk. The grippers are
+  absolute. The proprio is the absolute 20-D pose, mean/std-normalized, with
+  the gripper value of the rig (no clip).
+- Pose frame: `"pose_frame": "rig"`. The poses stay in the world frame of
+  the rig, as recorded in training. There is no frame conversion.
+- Commands: `robot_command.left`, `robot_command.right` (`cartesian_pos`,
+  `[xyz3, R_flat9]`), `target_grip.left`, `target_grip.right` and
+  `timestamp`; the handshake names the `yam_ee2` wire. The rig has one
+  control mode, `none`.
+- Prompt: the task string goes to the text encoder verbatim. The checkpoint
+  was trained on window captions such as "Pick up the pen from the center of
+  the table, then place the pen in the bag" (no closing period), so send
+  prompts in that form.
 
 ### Model variant of the checkpoint
 

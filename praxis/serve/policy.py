@@ -15,8 +15,9 @@ and adds the session rules of the server:
 * The sampler settings of the session (``num_steps``, ``cfg_scale`` and the
   other sampler parameters).
 
-The server serves the single-arm checkpoint. The handshake meta
-holds the variant of the checkpoint (:func:`praxis.checkpoint.model_variant`).
+The server serves the single-arm checkpoint (the ``franka_ee`` wire) and the
+bimanual checkpoint (the ``yam_ee2`` wire). The handshake meta holds the
+variant of the checkpoint (:func:`praxis.checkpoint.model_variant`).
 
 The checks of the session parameters run in a fixed order. The first bad
 value gives the error message of the session.
@@ -31,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-from praxis import robot_io, single_arm
+from praxis import bimanual, robot_io, single_arm
 from praxis.checkpoint import model_variant
 from praxis.pipeline import PraxisPipeline, StepResult
 from praxis.sampler import action_substep_grid, check_guidance, sampler_num_evals
@@ -61,13 +62,36 @@ SESSION_DEFAULTS: dict = {
     "max_chunks_per_episode": None,
 }
 
-# The frame stack keys of the rig, in the declared order.
+# The frame stack keys of the single-arm rig, in the declared order.
 STACK_KEYS: tuple[str, ...] = (
     "image.wrist",
     "image.exterior",
     "robot_state.ee_pose",
     "grip",
 )
+
+# The wire of each rig: the handshake ``embodiment``, the action layout and
+# the command keys.
+RIG_WIRES: dict[str, dict[str, object]] = {
+    "single_arm": {
+        "embodiment": "franka_ee",
+        "action_layout": "ee-10d [xyz3 rot6d6 grip1], rel-to-anchor, grip abs",
+        "wire_commands": ["robot_command", "target_grip"],
+    },
+    "bimanual": {
+        "embodiment": "yam_ee2",
+        "action_layout": (
+            "ee-20d [L: xyz3 rot6d6 grip1 | R: same], each arm rel-to-its-anchor, "
+            "grips abs"
+        ),
+        "wire_commands": [
+            "robot_command.left",
+            "robot_command.right",
+            "target_grip.left",
+            "target_grip.right",
+        ],
+    },
+}
 
 
 class ChunkBudgetExhausted(RuntimeError):
@@ -110,25 +134,37 @@ class PolicyFactory:
         self.code_version = served_code_version()
         image_codecs()  # a bad PRAXIS_IMAGE_CODECS fails the boot
         config = pipe.policy.config
-        if pipe.embodiment != "single_arm":
+        if pipe.embodiment not in RIG_WIRES:
             raise ValueError(
                 f"the checkpoint {checkpoint} is for the {pipe.embodiment!r} rig. "
-                "The server serves the single-arm checkpoint only."
+                "The server serves the single-arm and the bimanual checkpoints."
             )
         variant = model_variant(config)
-        self.stack_keys = STACK_KEYS
+        self.embodiment = pipe.embodiment
+        self.rig = bimanual if pipe.embodiment == "bimanual" else single_arm
+        self.wire = RIG_WIRES[pipe.embodiment]
         # The client bounds each view before it sends it. An antialiased canvas
-        # (praxis-1-droid) asks for the fit size of its tiles (416x234), resized once per
-        # tick ahead of the stack, as in training. Otherwise the rig sends the
-        # views at 1024x288. The server makes the tiles.
+        # asks for the fit size of its tiles: 416x234 for praxis-1-droid, resized once
+        # per tick ahead of the stack, as in training. The bimanual rig bounds
+        # each view to a 416x416 box with the aspect kept (1920x1200 ->
+        # 416x260) after the stack, as on the YAM rig, with half-frame
+        # stack offsets. Otherwise the rig sends the views at 1024x288. The
+        # server makes the tiles.
         self.restrict_first = variant.antialias
-        if variant.antialias:
+        self.half_frame = variant.antialias
+        if pipe.embodiment == "bimanual":
+            self.stack_keys = bimanual.STACK_KEYS
+            self.restrict = (bimanual.RESTRICT_SIDE, bimanual.RESTRICT_SIDE)
+            self.restrict_first = False
+        elif variant.antialias:
+            self.stack_keys = STACK_KEYS
             fh, fw = single_arm.fit_resize_size(variant.tile_size[1])
             self.restrict = (fw, fh)
         else:
+            self.stack_keys = STACK_KEYS
             self.restrict = (single_arm.CANVAS_W, single_arm.CANVAS_H)
         self.fps = float(config["chunking"].get("grid_hz", robot_io.FPS))
-        self.n_chunks = int(config["chunking"].get("n_chunks", single_arm.N_CHUNKS))
+        self.n_chunks = int(config["chunking"].get("n_chunks", self.rig.N_CHUNKS))
         expert, rope = config["action_expert"], config["backbone"]["rope"]
         self.provenance = {
             "expert_rope": bool(expert["rope_cross"]),
@@ -215,10 +251,10 @@ class ServedPolicy:
             raise ValueError(
                 f"prompt_style {self.prompt_style!r} not in {PROMPT_STYLES}"
             )
-        if self.control_mode not in single_arm.CONTROL_MODES:
+        if self.control_mode not in factory.rig.CONTROL_MODES:
             raise ValueError(
                 f"Unknown control_mode {self.control_mode!r}; known modes are "
-                f"{sorted(single_arm.CONTROL_MODES)}"
+                f"{sorted(factory.rig.CONTROL_MODES)}"
             )
         if (
             context_mode == "observed"
@@ -338,10 +374,10 @@ class ServedPolicy:
             "compile": self.compile,
             "skip_video_decoder": self.skip_video_decoder,
             "action_steps": self.action_steps,
-            "embodiment": "franka_ee",
+            "embodiment": f.wire["embodiment"],
             "control_mode": self.control_mode,
-            "action_layout": "ee-10d [xyz3 rot6d6 grip1], rel-to-anchor, grip abs",
-            "wire_commands": ["robot_command", "target_grip"],
+            "action_layout": f.wire["action_layout"],
+            "wire_commands": list(f.wire["wire_commands"]),
             "wan_pattern": "contiguous-window-144444",
             "chunk_rows": robot_io.ACTION_CHUNK,
             "prompt": self.session.state.prompt,
@@ -360,6 +396,7 @@ class ServedPolicy:
                 *f.restrict,
                 self.stop_on_fault,
                 restrict_first=f.restrict_first,
+                half_frame=f.half_frame,
             ),
             "compress_images": compress_images(),
             "image_codecs": image_codecs(),
@@ -393,26 +430,28 @@ class ServedPolicy:
         from scipy.signal import savgol_filter
 
         state = self.session.state
-        assert isinstance(state, single_arm.SingleArmServeSession)
+        rig = self.factory.rig
         rows = res.action_rows_norm
         if rows.shape[0] < self.sg_window or self.sg_window <= self.sg_order:
             return res.commands
         rel = robot_io.denormalize_rows(rows, state.stats, state.dims)
         out = rel.copy()
-        for dim in single_arm.Q99_DIMS:
+        for dim in rig.Q99_DIMS:
             if dim < rel.shape[1]:
                 out[:, dim] = savgol_filter(rel[:, dim], self.sg_window, self.sg_order)
-        out = robot_io.clip_grip(out, single_arm.GRIP_DIMS)
+        out = robot_io.clip_grip(out, rig.GRIP_DIMS)
         # The fps, the control mode and the pose frame of the session.
-        return state.rel_to_wire(out, res.inputs["pose8_now"])
+        return state.rel_to_wire(out, res.inputs["pose_now"])
 
     def close(self) -> None:
         """Drop the context of the session."""
         self.session.state.reset()
 
 
-def warmup_obs(step: int, stack: int = 25) -> dict:
+def warmup_obs(step: int, stack: int = 25, embodiment: str = "single_arm") -> dict:
     """Return a synthetic observation with a full frame stack for the boot warmup."""
+    if embodiment == "bimanual":
+        return bimanual.warmup_obs(step, stack)
     h, w = 288, 512
     t = step * robot_io.ACTION_CHUNK + np.arange(stack)
 

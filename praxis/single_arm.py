@@ -799,6 +799,11 @@ class SingleArmChunkInputs:
     prompt: str
 
     @property
+    def pose_now(self) -> np.ndarray:
+        """Return the current pose (``pose8_now``), the rig-neutral name."""
+        return self.pose8_now
+
+    @property
     def refs(self) -> list[torch.Tensor]:
         """Return the reference latents ``[anchor, *cleans]``."""
         return [self.anchor, *self.cleans]

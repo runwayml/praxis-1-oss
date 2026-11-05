@@ -1,7 +1,8 @@
 # praxis policy server
 
 `praxis/serve/` is a policy server for Positronic robot clients. It serves
-the single-arm checkpoint `praxis-1-droid`. It speaks the
+the single-arm checkpoint `praxis-1-droid` (`configs/serve_droid.yaml`) and
+the bimanual checkpoint `praxis-1-yam` (`configs/serve_yam.yaml`). It speaks the
 Positronic offboard protocol over a WebSocket. Its paths, session
 parameters, handshake and message formats follow that protocol. A
 Positronic client changes only its policy address.
@@ -47,8 +48,8 @@ The checkpoint uses the `flash` attention backend. It needs the
 `flash-attn-4` package. The section "Get the weights" of the top README
 tells how to use the `triton` backend instead.
 
-`model.embodiment: single_arm` of the serve config names the rig of the
-checkpoint. A checkpoint that is not single-arm fails at the boot.
+`model.embodiment` of the serve config (`single_arm` or `bimanual`) names
+the rig of the checkpoint. A checkpoint of another rig fails at the boot.
 
 The serve config holds the current recommended sampling settings. These
 settings can change when we have more robot results:

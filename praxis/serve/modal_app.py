@@ -14,8 +14,10 @@ set``), from the root of the repository:
     modal deploy praxis/serve/modal_app.py
 
 The serve config of the single-arm checkpoint is ``configs/serve_droid.yaml``
-(the default). Its trunk uses the ``flash`` attention backend; the image
-installs ``flash-attn-4`` for it.
+(the default). The bimanual checkpoint uses ``configs/serve_yam.yaml``
+(``PRAXIS_CONFIG=configs/serve_yam.yaml``). Both checkpoints use the
+``flash`` attention backend of the trunk; the image installs ``flash-attn-4``
+for it.
 
 Modal builds the image from ``docker/Dockerfile``. The volume holds the
 ``checkpoints/`` and ``weights/`` directories of the repository layout. The
@@ -28,7 +30,7 @@ These environment variables of ``modal deploy`` change the deployment:
   is ``configs/serve_droid.yaml``.
 * ``PRAXIS_CHECKPOINT``: the checkpoint directory in the volume. The default
   is ``model.checkpoint`` of the config, for example a fine-tuned copy of
-  the checkpoint. A checkpoint that is not single-arm fails the boot.
+  the checkpoint. A checkpoint of another rig than the config fails the boot.
 * ``PRAXIS_MODAL_APP_NAME``: the app name. The default is ``praxis-serve``.
   Deploy each checkpoint as a separate app.
 * ``PRAXIS_MODAL_GPU``: the GPU type. The default is ``H100``. Modal can run

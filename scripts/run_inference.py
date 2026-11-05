@@ -122,7 +122,7 @@ def call_record(
         "proprio": inp["proprio"].cpu(),
         "proprio_all": inp["proprio_all"].cpu(),
         "boundary_poses8": torch.from_numpy(inp["boundary_poses"].copy()),
-        "pose8_now": torch.from_numpy(inp["pose8_now"].copy()),
+        "pose8_now": torch.from_numpy(inp["pose_now"].copy()),
         "text_embedding": inp["text_embedding"].cpu(),
     }
     # The session encodes the current frame first. With context it then

@@ -8,8 +8,9 @@ returns the robot commands of that chunk, with the predicted video latent and
 the normalized actions.
 
 The pipeline runs the single-arm checkpoint (``"embodiment":
-"single_arm"``) on the single-arm rig (:mod:`praxis.single_arm`), with the
-``window_joint`` sampler.
+"single_arm"``) on the single-arm rig (:mod:`praxis.single_arm`) and the
+bimanual checkpoint (``"embodiment": "bimanual"``) on the bimanual rig
+(:mod:`praxis.bimanual`), with the ``window_joint`` sampler.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from praxis import single_arm
+from praxis import bimanual, single_arm
 from praxis.checkpoint import model_variant
 from praxis.model import PraxisPolicy, SamplerSettings
 from praxis.robot_io import NormStats
@@ -70,7 +71,7 @@ class PraxisPipeline:
         )
         self.text = TextEncoder(text_encoder, device=self.device)
         self.sampler = sampler or SamplerSettings()
-        # The loader refuses every config but the single-arm one.
+        # The loader refuses every config but the single-arm and bimanual ones.
         self.embodiment = str(self.policy.config["embodiment"])
         self.variant = model_variant(self.policy.config)
         norm = self.policy.config["normalization"]
@@ -96,13 +97,15 @@ class PraxisPipeline:
         prompt: str = "",
         seed: int = 0,
         max_context_chunks: int = 1,
-        control_mode: str = "droid_impedance",
+        control_mode: str | None = None,
         exec_horizon: int | None = 24,
         sampler: SamplerSettings | None = None,
     ) -> Session:
         """Open a session for one robot episode.
 
         The defaults are the recommended settings of the checkpoint.
+        ``control_mode`` defaults to ``droid_impedance`` on the single-arm rig
+        and ``none`` on the bimanual rig.
         ``sampler`` replaces the sampler settings of the pipeline for this
         session.
         """
@@ -126,7 +129,7 @@ class Session:
         prompt: str = "",
         seed: int = 0,
         max_context_chunks: int = 1,
-        control_mode: str = "droid_impedance",
+        control_mode: str | None = None,
         exec_horizon: int | None = 24,
         sampler: SamplerSettings | None = None,
     ) -> None:
@@ -136,18 +139,26 @@ class Session:
         variant = model_variant(pipeline.policy.config)
         config = pipeline.policy.config
         # The checkpoint config sets the tiles of the canvas. The canvas and
-        # the pose frame of the single-arm rig are fixed.
-        self.state = single_arm.SingleArmServeSession(
+        # the pose frame of each rig are fixed.
+        rig = bimanual if config.get("embodiment") == "bimanual" else single_arm
+        if control_mode is None:
+            control_mode = "none" if rig is bimanual else "droid_impedance"
+        session_cls = (
+            bimanual.BimanualServeSession
+            if rig is bimanual
+            else single_arm.SingleArmServeSession
+        )
+        self.state = session_cls(
             encode=pipeline.vae.encode,
             stats=pipeline.stats,
             device=pipeline.device,
             prompt=prompt,
             max_context_chunks=max_context_chunks,
-            fps=float(config["chunking"].get("grid_hz", single_arm.FPS)),
-            dims=single_arm.q99_dims(config),
+            fps=float(config["chunking"].get("grid_hz", rig.FPS)),
+            dims=rig.q99_dims(config),
             control_mode=control_mode,
             exec_horizon=exec_horizon,
-            n_chunks=int(config["chunking"].get("n_chunks", single_arm.N_CHUNKS)),
+            n_chunks=int(config["chunking"].get("n_chunks", rig.N_CHUNKS)),
             tile_size=variant.tile_size,
             aspect_tol=variant.aspect_tol,
             antialias=variant.antialias,
@@ -177,12 +188,13 @@ class Session:
                 "proprio": inputs.proprio,
                 "proprio_all": inputs.proprio_all,
                 "boundary_poses": inputs.boundary_poses,
-                "pose8_now": inputs.pose8_now,
+                "pose_now": inputs.pose_now,
             },
         )
 
     def _sample(
-        self, inputs: single_arm.SingleArmChunkInputs
+        self,
+        inputs: single_arm.SingleArmChunkInputs | bimanual.BimanualChunkInputs,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Sample one chunk. Return the video latent, the actions and the text."""
         text = self.pipe.encode_text(inputs.prompt)

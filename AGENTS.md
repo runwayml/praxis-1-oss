@@ -2,8 +2,9 @@
 
 praxis-1 is a standalone implementation of a robot policy: a video and action
 model that predicts the next action chunk from camera frames, the robot
-state and a text prompt. It runs one checkpoint: the single-arm DROID
-checkpoint `praxis-1-droid`. This file
+state and a text prompt. It runs two checkpoints of one model variant: the
+single-arm DROID checkpoint `praxis-1-droid` and the bimanual YAM checkpoint
+`praxis-1-yam`. This file
 points to the parts of the code base and gives the rules that keep the
 results reproducible. `README.md` is the user guide.
 
@@ -16,7 +17,7 @@ results reproducible. `README.md` is the user guide.
 | `praxis/action_expert.py` | the action expert that reads the backbone taps |
 | `praxis/sampler.py` | the flow sampler: timestep grids, the seeded noise, guidance |
 | `praxis/pipeline.py` | `PraxisPipeline` and its sessions: one call turns observations into robot commands |
-| `praxis/single_arm.py`, `praxis/robot_io.py` | the robot input and output: canvases, pose frames, normalization, command decoding |
+| `praxis/single_arm.py`, `praxis/bimanual.py`, `praxis/robot_io.py` | the robot input and output of each rig: canvases, pose frames, normalization, command decoding |
 | `praxis/checkpoint.py` | the checkpoint format: `config.json` validation, strict load, `save_checkpoint`, `SHA256SUMS` |
 | `praxis/vae.py`, `praxis/text_encoder.py` | the video autoencoder and the text encoder |
 | `praxis/kernels/` | Triton kernels (forward and backward) that keep the bits of the checkpoint |

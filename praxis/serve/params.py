@@ -221,6 +221,7 @@ def local_stack(
     height: int,
     stop_on_fault: bool,
     restrict_first: bool = False,
+    half_frame: bool | None = None,
 ) -> dict:
     """Return the ``local_stack`` value of the handshake: the rig-side pipeline.
 
@@ -236,7 +237,13 @@ def local_stack(
     resized once on its own tick and the stack holds the small frames, and it
     targets each past stack frame half a frame period after its tick
     (:func:`frame_offsets_sec`). Without it the restrict comes last.
+    ``half_frame`` (default: ``restrict_first``) sets the half-frame offsets
+    on their own: the bimanual rig keeps the restrict last, as the YAM
+    client does (the restrict costs the client a resize per tick), with
+    half-frame offsets.
     """
+    if half_frame is None:
+        half_frame = restrict_first
     seq: list[dict] = [{"name": "stop_on_fault"}] if stop_on_fault else []
     restrict = {
         "name": "restrict_image_size",
@@ -251,7 +258,7 @@ def local_stack(
                 "args": {
                     "keys": list(keys),
                     "offsets_sec": frame_offsets_sec(
-                        history_frames, 1, fps, half_frame=restrict_first
+                        history_frames, 1, fps, half_frame=half_frame
                     ),
                     "pad_start": False,
                 },

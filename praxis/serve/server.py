@@ -241,8 +241,8 @@ def load_config(path: str | Path, overrides: Sequence[str] = ()) -> dict:
 def build_factory(cfg: dict) -> PolicyFactory:
     """Load the model of a serve config and return its policy factory.
 
-    The server serves the single-arm checkpoint. ``model.embodiment``
-    of the config must be ``single_arm`` and match the checkpoint, else the
+    The server serves the single-arm and the bimanual checkpoints.
+    ``model.embodiment`` of the config must match the checkpoint, else the
     boot fails.
     """
     m, s = cfg["model"], cfg["sampler"]
@@ -270,7 +270,8 @@ def build_factory(cfg: dict) -> PolicyFactory:
         raise ValueError(
             f"model.embodiment of the serve config is {m.get('embodiment')!r}, but "
             f"the checkpoint {m['checkpoint']} is for the {pipe.embodiment!r} rig. "
-            "Serve the single-arm checkpoint with configs/serve_droid.yaml."
+            "Serve the single-arm checkpoint with configs/serve_droid.yaml and "
+            "the bimanual checkpoint with configs/serve_yam.yaml."
         )
     factory = PolicyFactory(pipe, dict(cfg.get("session") or {}), str(m["checkpoint"]))
     factory({}).close()  # a bad default fails the boot, not each session
@@ -302,7 +303,7 @@ def warmup(factory: PolicyFactory, executor: ThreadPoolExecutor) -> None:
         }
     )
     for step in range(depths):
-        obs = warmup_obs(step)
+        obs = warmup_obs(step, embodiment=factory.embodiment)
         executor.submit(policy.select_action, obs).result()
     policy.close()
     logger.info("warmup: %d depths in %.1f s", depths, time.monotonic() - t0)

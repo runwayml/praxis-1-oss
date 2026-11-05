@@ -889,10 +889,10 @@ def test_boot_rejects_bad_defaults() -> None:
         factory({})
 
 
-def test_boot_rejects_a_checkpoint_that_is_not_single_arm() -> None:
+def test_boot_rejects_a_checkpoint_of_another_rig() -> None:
     sampler = SamplerSettings(num_steps=2, layout="window_joint")
     pipe = FakePipeline({**SINGLE_ARM, "embodiment": "two_arm"}, sampler)
-    with pytest.raises(ValueError, match="single-arm checkpoint only"):
+    with pytest.raises(ValueError, match="single-arm and the bimanual checkpoints"):
         PolicyFactory(pipe, {}, "/ckpt/other")  # ty: ignore[invalid-argument-type]
 
 
@@ -902,7 +902,7 @@ def test_boot_rejects_a_checkpoint_that_is_not_single_arm() -> None:
         ("single_arm", [], None),
         ("two_arm", [], "Serve the single-arm checkpoint"),
         ("single_arm", ["model.embodiment=two_arm"], "Serve the single-arm"),
-        ("two_arm", ["model.embodiment=two_arm"], "single-arm checkpoint only"),
+        ("two_arm", ["model.embodiment=two_arm"], "single-arm and the bimanual"),
     ],
 )
 def test_boot_checks_the_rig_of_the_checkpoint(
@@ -1089,7 +1089,7 @@ def test_step_result_holds_raw_rows_and_clamped_actions() -> None:
     state = session.state
     assert isinstance(state, single_arm.SingleArmServeSession)
     # The fps, the control mode and the pose frame of the session.
-    wire = state.rel_to_wire(res.action_rel, res.inputs["pose8_now"])
+    wire = state.rel_to_wire(res.action_rel, res.inputs["pose_now"])
     assert wire[0]["robot_command"]["mode"] == single_arm.DROID_IMPEDANCE
     poses, grips = single_arm.wire_to_arrays(wire)
     got_poses, got_grips = single_arm.wire_to_arrays(res.commands)

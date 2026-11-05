@@ -173,8 +173,8 @@ def test_other_rig_config_is_refused(config: dict) -> None:
     with pytest.raises(CheckpointError) as err:
         validate_config(config)
     assert str(err.value) == OTHER_RIG_REFUSED
-    assert '"embodiment": "single_arm"' in str(err.value)
-    assert "single-arm checkpoint" in str(err.value)
+    assert '"embodiment": "single_arm" or "bimanual"' in str(err.value)
+    assert "single-arm or the bimanual checkpoint" in str(err.value)
     if "embodiment" not in config and config["format_version"] == 1:
         with pytest.raises(CheckpointError, match="single_arm"):
             model_variant(config)
