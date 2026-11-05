@@ -18,8 +18,8 @@ import math
 import mujoco
 import numpy as np
 
-from praxis.sim.scene import ObjectSpec, StaticBox
-from praxis.sim.tasks import Task, TaskConfig, TaskStatus
+from praxis_sim.scene import ObjectSpec, StaticBox
+from praxis_sim.tasks import Task, TaskConfig, TaskStatus
 
 BOWL = "bowl"
 TARGET = "green_block"
@@ -316,7 +316,7 @@ class PressButton(Task):
             "button_qpos": model.joint(BUTTON + "_joint").qposadr[0],
             "base_geom": model.geom(f"{BUTTON}_base").id,
         }
-        from praxis.sim.scene import PAD_GEOMS
+        from praxis_sim.scene import PAD_GEOMS
 
         self._pad_ids = {model.geom(name).id: name for name in PAD_GEOMS}
         self._model = model

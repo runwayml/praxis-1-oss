@@ -18,8 +18,8 @@ from collections.abc import Callable
 import mujoco
 import numpy as np
 
-from praxis.sim.scene import StaticBox
-from praxis.sim.tasks import PickPlace, Task, TaskConfig, TaskStatus
+from praxis_sim.scene import StaticBox
+from praxis_sim.tasks import PickPlace, Task, TaskConfig, TaskStatus
 
 TRAY = "tray"
 SQUARE_COLOURS: dict[str, tuple[float, float, float, float]] = {

@@ -64,7 +64,7 @@ def _set_env(name: str, value: str, override: bool) -> None:
     if "mujoco" in sys.modules and name in LOAD_TIME_VARIABLES:
         warnings.warn(
             f"MuJoCo is already imported, so {name}={value!r} has no effect. "
-            "Call praxis.sim.gl.prepare before the first import of mujoco.",
+            "Call praxis_sim.gl.prepare before the first import of mujoco.",
             stacklevel=3,
         )
         return

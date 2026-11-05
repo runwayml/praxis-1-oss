@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 import mujoco
 import numpy as np
 
-from praxis.sim.scene import CONTROL_HZ, PAD_GEOMS, ObjectSpec, StaticBox
+from praxis_sim.scene import CONTROL_HZ, PAD_GEOMS, ObjectSpec, StaticBox
 
 CUBE = "red_cube"
 PLATE = "blue_plate"
@@ -379,11 +379,11 @@ TASKS: dict[str, Callable[[TaskConfig], Task]] = {
 
 
 def _register_suite() -> None:
-    from praxis.sim.suite import SUITE_TASKS
-    from praxis.sim.suite_hard import HARD_TASKS
-    from praxis.sim.suite_insert import INSERT_TASKS
-    from praxis.sim.suite_multi import MULTI_TASKS
-    from praxis.sim.suite_place import PLACE_TASKS
+    from praxis_sim.suite import SUITE_TASKS
+    from praxis_sim.suite_hard import HARD_TASKS
+    from praxis_sim.suite_insert import INSERT_TASKS
+    from praxis_sim.suite_multi import MULTI_TASKS
+    from praxis_sim.suite_place import PLACE_TASKS
 
     TASKS.update(SUITE_TASKS)
     TASKS.update(PLACE_TASKS)

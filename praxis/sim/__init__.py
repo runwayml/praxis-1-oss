@@ -1,36 +1,46 @@
-"""MuJoCo simulation of the single-arm rig (a Franka arm with a two-finger gripper).
+"""MuJoCo simulation of the single-arm rig: the model loop, the video writer and the live viewer.
 
-The simulation renders the two camera views of the rig and executes the robot
-commands of the policy at 15 Hz. Use it to check a single-arm checkpoint in
-closed loop without a real robot.
+The simulator itself (scene, robot, tasks, environment, the evaluation suites, the
+scripted policy, the run settings) is the ``praxis-sim`` package of
+``packages/praxis-sim``, installable without torch. This package keeps the parts
+that need the model: :mod:`praxis.sim.loop` (the closed-loop sampling loop and
+the policies), :mod:`praxis.sim.video` (the MP4 writer) and
+:mod:`praxis.sim.viewer` (the live view in a web browser).
 
-Modules:
-
-* :mod:`praxis.sim.gl`: the OpenGL backend of the renderer.
-* :mod:`praxis.sim.assets`: download and check of the open-source robot models.
-* :mod:`praxis.sim.scene`: the MuJoCo model (arm, gripper, table, objects,
-  lights, cameras).
-* :mod:`praxis.sim.robot`: frames, inverse kinematics, gripper map and one
-  control tick.
-* :mod:`praxis.sim.tasks`: the task registry (prompt, object placement,
-  success check).
-* :mod:`praxis.sim.env`: the environment (reset, step, observe).
-* :mod:`praxis.sim.scripted`: a scripted pick policy that sends the same
-  commands as the model.
-* :mod:`praxis.sim.config`: the settings of a run and the YAML loader.
-* :mod:`praxis.sim.loop`: the closed-loop sampling loop and the policies
-  (model, scripted, hold).
-* :mod:`praxis.sim.video`: the MP4 writer and the frame layout.
-* :mod:`praxis.sim.viewer`: the live view in a web browser.
+The simulator modules stay reachable under their old names (``praxis.sim.scene``,
+``praxis.sim.env``, ...): they are the modules of ``praxis_sim``.
 
 Run it with ``scripts/run_sim.py``. See ``praxis/sim/README.md``.
 
-MuJoCo reads the OpenGL backend when Python imports it. Thus this package sets
-the default backend before any sub-module imports MuJoCo. To select a
-different backend, call :func:`praxis.sim.gl.prepare` before the first import
-of a sub-module that uses MuJoCo.
+MuJoCo reads the OpenGL backend when Python imports it. ``praxis_sim`` sets the
+default backend before any sub-module imports MuJoCo. To select a different
+backend, call :func:`praxis_sim.gl.prepare` before the first import of a module
+that uses MuJoCo.
 """
 
-from praxis.sim import gl
+import importlib
+import sys
 
-gl.prepare()
+import praxis_sim  # noqa: F401  (sets the OpenGL backend)
+
+# The simulator modules under their former names.
+for _name in (
+    "assets",
+    "config",
+    "env",
+    "eval_suites",
+    "gl",
+    "robot",
+    "scene",
+    "scripted",
+    "suite",
+    "suite_hard",
+    "suite_insert",
+    "suite_multi",
+    "suite_place",
+    "tasks",
+):
+    _module = importlib.import_module(f"praxis_sim.{_name}")
+    sys.modules[f"{__name__}.{_name}"] = _module
+    globals()[_name] = _module
+del _module, _name

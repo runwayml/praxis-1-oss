@@ -1,11 +1,11 @@
 """Frames, inverse kinematics, gripper map and the 15 Hz control tick of the sim arm.
 
 Policy convention (the observation and command contract of
-:mod:`praxis.single_arm`):
+:mod:`praxis.single_arm` (copied in :mod:`praxis_sim.pose`)):
 
 * The pose is ``[x, y, z, qw, qx, qy, qz]`` in metres, in the robot base
   frame. The quaternion is scalar first.
-* The frame is the ``ee`` site of :mod:`praxis.sim.scene`: origin at the
+* The frame is the ``ee`` site of :mod:`praxis_sim.scene`: origin at the
   Franka flange, rotation ``flange @ Rz(-45 deg)``. :class:`FrameConfig`
   can move this frame (a yaw about the tool axis, a point along the tool
   axis, a base offset) to test other conventions.
@@ -29,8 +29,8 @@ from typing import Protocol
 import mujoco
 import numpy as np
 
-from praxis.sim import gl
-from praxis.sim.scene import (
+from praxis_sim import gl
+from praxis_sim.scene import (
     ARM_ACTUATORS,
     ARM_JOINTS,
     CONTROL_HZ,
@@ -317,7 +317,7 @@ class Cameras:
         if gl.is_software_renderer(self.renderer):
             logger.warning(
                 "MuJoCo renders on the CPU (%s). This is slow. See "
-                "praxis.sim.gl for the EGL setup of an NVIDIA GPU.",
+                "praxis_sim.gl for the EGL setup of an NVIDIA GPU.",
                 self.renderer,
             )
         else:

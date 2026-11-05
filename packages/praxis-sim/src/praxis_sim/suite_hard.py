@@ -29,9 +29,9 @@ from collections.abc import Callable
 import mujoco
 import numpy as np
 
-from praxis.sim.scene import ObjectSpec
-from praxis.sim.suite import _Container
-from praxis.sim.tasks import CUBE, PickPlace, Task, TaskConfig, TaskStatus
+from praxis_sim.scene import ObjectSpec
+from praxis_sim.suite import _Container
+from praxis_sim.tasks import CUBE, PickPlace, Task, TaskConfig, TaskStatus
 
 # Colours that stay distinct on the wood table in both camera views.
 COLOURS: dict[str, tuple[float, float, float, float]] = {

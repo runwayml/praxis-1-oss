@@ -25,10 +25,18 @@ then gets the 24 executed frames plus the current frame. It keeps up to
 The package uses only the core praxis API (`praxis.pipeline`,
 `praxis.single_arm`). The core package does not use this package.
 
+The simulator itself (scene, robot, tasks, environment, evaluation suites, scripted policy,
+run settings) is the `praxis-sim` package in `packages/praxis-sim` (import name `praxis_sim`):
+MuJoCo, Gymnasium and numpy, no torch, so other frameworks can install it on its own (LeRobot's
+`--env.type=praxis_sim` does). `praxis.sim` keeps the model loop, the video writer and the live
+viewer, and exposes the simulator modules under their former names (`praxis.sim.scene`, ...).
+`praxis_sim.gym_env` is the Gymnasium wrapper; `python -m praxis_sim.compare` pairs a LeRobot
+evaluation with a run of `scripts/run_sim_eval.py`.
+
 ## Install
 
 ```bash
-pip install -e ".[sim]"      # mujoco 3.16, imageio, imageio-ffmpeg
+pip install -e ".[sim]" -e packages/praxis-sim   # the simulator package (mujoco 3.16, gymnasium) + imageio, imageio-ffmpeg
 ```
 
 Use the `sim` extra in addition to the install steps of the top README. The

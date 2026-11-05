@@ -83,7 +83,7 @@ pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytor
 pip install packaging ninja wheel
 CAUSAL_CONV1D_FORCE_BUILD=TRUE MAX_JOBS=16 \
   pip install --no-cache-dir --no-build-isolation causal-conv1d==1.6.1
-pip install -e ".[kernels,sim]"
+pip install -e ".[kernels,sim]" -e packages/praxis-sim   # the simulator is its own package, see praxis/sim/README.md
 pip install --no-deps nvidia-cudnn-cu13==9.24.0.43
 python -c "import causal_conv1d_cuda; print('causal-conv1d OK')"
 ```

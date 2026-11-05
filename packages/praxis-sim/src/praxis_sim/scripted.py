@@ -10,8 +10,8 @@ of ``StepResult.commands`` of :mod:`praxis.pipeline`:
 
 The rows are relative to the arm pose at the start of the chunk, as the
 model actions are. :func:`rig_commands` composes them with that pose in the
-frame of the rig (the ``ee`` site of :mod:`praxis.sim.scene`) and gives the
-command dicts of :mod:`praxis.single_arm`. The model session converts its own
+frame of the rig (the ``ee`` site of :mod:`praxis_sim.scene`) and gives the
+command dicts of :mod:`praxis_sim.pose` (copies of :mod:`praxis.single_arm`). The model session converts its own
 pose frame to the rig frame itself, so the scripted rows need no conversion.
 
 The policy reads the cube pose from the simulation (privileged data). It
@@ -26,11 +26,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from praxis import single_arm
-from praxis.robot_io import rot6d, rot6d_to_matrix, unit_quat_wxyz_to_matrix
-from praxis.sim.env import Observation, SimEnv
-from praxis.sim.robot import pose7_to_pos_rot, site_to_policy
-from praxis.sim.scene import CONTROL_HZ, PINCH_OFFSET
+from praxis_sim import pose as single_arm
+from praxis_sim.env import Observation, SimEnv
+from praxis_sim.pose import rot6d, rot6d_to_matrix, unit_quat_wxyz_to_matrix
+from praxis_sim.robot import pose7_to_pos_rot, site_to_policy
+from praxis_sim.scene import CONTROL_HZ, PINCH_OFFSET
 
 FIRST_CHUNK_ROWS = 21
 CHUNK_ROWS = 24
@@ -62,7 +62,7 @@ def rig_commands(
     Each row is ``[xyz3, rot6d6, grip1]`` relative to the pose ``pose8_now``
     (``[xyz3, quat_wxyz4, grip1]``): ``xyz_abs = xyz_rel + anchor_xyz`` in
     float64 and ``R_abs = R_rel @ R_anchor``. The gripper is absolute. The
-    dicts have the format of :mod:`praxis.single_arm`: the pose
+    dicts have the format of :mod:`praxis_sim.pose` (copies of :mod:`praxis.single_arm`): the pose
     ``[xyz3, R_flat9]`` float32 with a row-major rotation, the target grip,
     the ``timestamp`` offset ``t * dt``, and ``mode`` in every command when it
     is set.

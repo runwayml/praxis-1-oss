@@ -11,10 +11,10 @@ The YAML blocks:
   of the policy (the same keys as ``configs/inference_droid.yaml``).
 * ``policy``: ``model``, ``scripted`` or ``hold``.
 * ``task``: the task name, the prompt, the time limit and the object
-  placement (:class:`praxis.sim.tasks.TaskConfig`).
+  placement (:class:`praxis_sim.tasks.TaskConfig`).
 * ``episodes``: the seeds and the stop rule.
 * ``scene``: images, cameras, lights and physics
-  (:class:`praxis.sim.scene.SceneConfig`).
+  (:class:`praxis_sim.scene.SceneConfig`).
 * ``robot``: the policy frame, the inverse kinematics and the reset pose.
 * ``render``: the EGL device of the renderer.
 * ``output``: the output directory, the MP4 and the arrays.
@@ -36,11 +36,11 @@ from pathlib import Path
 
 import yaml
 
-from praxis.sim.env import EnvConfig
-from praxis.sim.robot import DROID_HOME, FrameConfig, IkConfig
-from praxis.sim.scene import SceneConfig
-from praxis.sim.scripted import ScriptedConfig
-from praxis.sim.tasks import TaskConfig
+from praxis_sim.env import EnvConfig
+from praxis_sim.robot import DROID_HOME, FrameConfig, IkConfig
+from praxis_sim.scene import SceneConfig
+from praxis_sim.scripted import ScriptedConfig
+from praxis_sim.tasks import TaskConfig
 
 POLICIES: tuple[str, ...] = ("model", "scripted", "hold")
 
