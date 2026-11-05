@@ -1,9 +1,13 @@
 """Pose math and command helpers of the simulation, without torch.
 
-Copies of the functions of ``praxis.robot_io`` and ``praxis.single_arm`` that the
-simulation uses (the scripted policy, the Gymnasium wrapper), so that the package
-installs without the model's dependencies. ``tests/test_sim_pose_copies.py`` of the
-praxis repository checks them against the originals, bit for bit. Keep them in sync.
+Copies of the functions of ``praxis.robot_io``, ``praxis.single_arm`` and
+``praxis.train.data`` that the simulation uses (the scripted policy, the Gymnasium
+wrapper), so that the package installs without the model's dependencies.
+``tests/test_sim_pose_copies.py`` of the praxis repository checks every copy against
+its original, bit for bit (``DROID_IMPEDANCE`` included: a change of the table in
+``praxis.single_arm`` has to land here too). Keep them in sync.
+``matrix_to_euler_xyz`` and ``pose8_to_droid7`` are new (the DROID pose of the
+Gymnasium wrapper); ``euler_xyz_to_matrix`` composes two of the copies.
 """
 
 from __future__ import annotations

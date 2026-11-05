@@ -3,8 +3,11 @@ name = "praxis-sim"
 version = "0.1.0"
 description = "The MuJoCo single-arm rig of Praxis-1 and its evaluation suites, as Gymnasium environments"
 readme = "README.md"
-requires-python = ">=3.12"
+# 3.10 and up, so the simulator installs next to other sim stacks and in LeRobot
+# environments; the praxis package itself needs 3.12.
+requires-python = ">=3.10"
 # No torch: the model loop, the video writer and the live viewer stay in the praxis package.
+# The scene code uses the MjSpec API, which changes between MuJoCo minor versions.
 dependencies = [
     "numpy>=2.0",
     "mujoco>=3.16.0,<3.17",
@@ -25,6 +28,7 @@ include = ["praxis_sim*"]
 
 [tool.ruff]
 line-length = 88
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "RUF"]

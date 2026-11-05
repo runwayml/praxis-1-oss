@@ -258,7 +258,10 @@ def to_dict(cfg: object) -> dict:
     return out
 
 
-def from_dict[T](cls: type[T], data: dict | None, path: str = "") -> T:
+T = typing.TypeVar("T")
+
+
+def from_dict(cls: type[T], data: dict | None, path: str = "") -> T:
     """Build the dataclass ``cls`` from a mapping. Missing keys keep their defaults."""
     if data is None:
         data = {}

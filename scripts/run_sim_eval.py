@@ -15,7 +15,7 @@ Usage:
     python scripts/run_sim_eval.py --suite hard --policy scripted \\
         --out outputs/eval/oracle --no-video
 
-The suites are in ``praxis/sim/eval_suites.py``: ``droid`` (7 tasks, 224
+The suites are in ``praxis_sim.eval_suites`` (``packages/praxis-sim``): ``droid`` (7 tasks, 224
 episodes), ``droid_guard`` (7 tasks, 56 episodes) and ``hard`` (11 tasks, 352
 episodes). Each episode writes ``<out>/<suite dir>/<task>/episode_<seed>.json``
 and ``.mp4``. The suite dir is ``suite`` for sampler seed 0 and ``suite_s<k>``

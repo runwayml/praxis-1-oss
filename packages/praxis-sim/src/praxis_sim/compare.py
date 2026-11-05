@@ -1,17 +1,3 @@
-# Copyright 2026 The HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 """Compare a ``lerobot-eval`` run of the praxis sim with a praxis ``run_sim_eval.py`` run.
 
 Both runs are sets of episodes keyed by ``(task, scene seed)``. The LeRobot run is
@@ -21,7 +7,7 @@ For each task and in total the script gives the successes of both runs, the
 episodes the LeRobot run won (praxis failed, LeRobot succeeded) and lost, the exact
 McNemar p, and for the total the mean difference with a 95 % bootstrap interval.
 
-    python -m lerobot.envs.praxis_sim.compare outputs/eval/lerobot_guard/eval_info.json \\
+    python -m praxis_sim.compare outputs/eval/lerobot_guard/eval_info.json \\
         /path/to/praxis/outputs/eval/guard --sampler-seed 0
 """
 

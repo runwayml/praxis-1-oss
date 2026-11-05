@@ -6,10 +6,9 @@ import dataclasses
 
 import numpy as np
 import pytest
+from praxis_sim import pose
 
 from praxis import robot_io, single_arm
-
-pose = pytest.importorskip("praxis_sim.pose")
 
 
 def _quats(n: int, seed: int) -> np.ndarray:
@@ -59,8 +58,35 @@ def test_frame_conversions_match_the_core() -> None:
     assert pose.control_mode_payload(
         "droid_impedance"
     ) == single_arm.control_mode_payload("droid_impedance")
+    assert pose.DROID_IMPEDANCE == single_arm.DROID_IMPEDANCE
     assert pose.control_mode_payload("none") is None
     rel = np.tile(np.array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5], np.float32), (3, 1))
     wire = single_arm.rel10_to_wire(rel, pose8[0])
     a, b = pose.wire_to_arrays(wire), single_arm.wire_to_arrays(wire)
     assert np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
+
+
+def test_euler_helpers_match_the_training_data_module() -> None:
+    """The Euler and quaternion helpers copy ``praxis.train.data`` (the DROID pose code)."""
+    pytest.importorskip("av")  # praxis.train.data needs the `train` extra
+    pytest.importorskip("pyarrow")
+    from praxis.train import data
+
+    rng = np.random.default_rng(4)
+    rpy = rng.uniform(-np.pi, np.pi, size=(200, 3))
+    assert np.array_equal(
+        pose.euler_xyz_to_quat_xyzw(rpy), data.euler_xyz_to_quat_xyzw(rpy)
+    )
+    p, q = _quats(200, 5), _quats(200, 6)
+    assert np.array_equal(pose.quat_mul_xyzw(p, q), data._quat_mul_xyzw(p, q))
+    assert np.array_equal(
+        pose.quat_xyzw_to_matrix_raw(p), data.quat_xyzw_to_matrix_raw(p)
+    )
+    # The composition the Gymnasium wrapper uses, and its inverse (new code): a round trip
+    # of the DROID pose through pose8 keeps the Euler angles to float precision.
+    rot = pose.euler_xyz_to_matrix(rpy)
+    assert np.array_equal(
+        rot, data.quat_xyzw_to_matrix_raw(data.euler_xyz_to_quat_xyzw(rpy))
+    )
+    back = pose.matrix_to_euler_xyz(rot)
+    assert np.allclose(pose.euler_xyz_to_matrix(back), rot, atol=1e-12)

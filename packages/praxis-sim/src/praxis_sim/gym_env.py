@@ -52,6 +52,8 @@ _register_suite()
 
 STATE_DIM = 7
 SCENE_SEED_KEY = "scene_seed"
+# The largest integer float32 holds exactly: LeRobot casts the observation to float32.
+MAX_SCENE_SEED = 2**24
 
 
 def resolve_tasks(task: str) -> tuple[str, list[str]]:
@@ -136,7 +138,7 @@ class PraxisSimGymEnv(gym.Env):
                     low=-np.inf, high=np.inf, shape=(STATE_DIM,), dtype=np.float32
                 ),
                 SCENE_SEED_KEY: spaces.Box(
-                    low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
+                    low=0, high=MAX_SCENE_SEED, shape=(1,), dtype=np.int64
                 ),
             }
         )
@@ -168,7 +170,7 @@ class PraxisSimGymEnv(gym.Env):
         return {
             "pixels": {"exterior": obs.exterior, "wrist": obs.wrist},
             "agent_pos": pose8_to_droid7(pose8).astype(np.float32),
-            SCENE_SEED_KEY: np.array([self._scene_seed], dtype=np.float32),
+            SCENE_SEED_KEY: np.array([self._scene_seed], dtype=np.int64),
         }
 
     def _info(self) -> dict[str, Any]:
@@ -194,7 +196,14 @@ class PraxisSimGymEnv(gym.Env):
     ):
         super().reset(seed=seed)
         env = self._ensure_env()
-        self._scene_seed = int(seed) if seed is not None else int(self._scene_seed)
+        scene_seed = int(seed) if seed is not None else int(self._scene_seed)
+        if not 0 <= scene_seed <= MAX_SCENE_SEED:
+            # LeRobot carries every non-image observation as float32, which holds integers
+            # exactly up to 2**24: a larger seed would reach the policy changed.
+            raise ValueError(
+                f"the scene seed must be in [0, {MAX_SCENE_SEED}], got {scene_seed}"
+            )
+        self._scene_seed = scene_seed
         self._obs = env.reset(self._scene_seed)
         self.task_description = env.prompt
         self._ticks = 0

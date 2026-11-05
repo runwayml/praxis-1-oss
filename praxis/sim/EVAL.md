@@ -2,7 +2,7 @@
 
 This page describes the fixed evaluation scenarios of the single-arm DROID
 checkpoint, how to run them and how to compare two checkpoints. The
-scenarios are in `praxis/sim/eval_suites.py`. `scripts/run_sim_eval.py` runs
+scenarios are in `packages/praxis-sim/src/praxis_sim/eval_suites.py`. `scripts/run_sim_eval.py` runs
 a suite and `scripts/compare_sim_eval.py` compares two runs.
 
 ## The scenarios
@@ -77,7 +77,7 @@ loads the model once and runs its episodes in turn. The harder suite takes
 about 45 minutes on two H100 GPUs (one sampler seed on each).
 
 ```bash
-pip install -e ".[sim]"
+pip install -e ".[sim]"   # pulls in the praxis-sim package (see praxis/sim/README.md)
 
 # One GPU, both sampler seeds.
 MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard \

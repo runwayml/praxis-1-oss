@@ -36,10 +36,13 @@ evaluation with a run of `scripts/run_sim_eval.py`.
 ## Install
 
 ```bash
-pip install -e ".[sim]" -e packages/praxis-sim   # the simulator package (mujoco 3.16, gymnasium) + imageio, imageio-ffmpeg
+pip install -e ".[sim]"   # the praxis-sim package (mujoco 3.16, gymnasium) + imageio, imageio-ffmpeg
 ```
 
 Use the `sim` extra in addition to the install steps of the top README. The
+extra installs the simulator package from this repository's git URL; to work on
+the simulator itself, install the checkout's copy editable on top:
+`pip install -e packages/praxis-sim`. The
 scripted policy needs no GPU and no model weights. The model policy needs the
 weights of the top README and one GPU with 80 GB of memory.
 
@@ -56,7 +59,7 @@ commit `62ab00f2bc44f6f20c1c9b7a13f3fb1dd41a4e35`:
 
 This repository does not contain the model files. At the first run, the code
 downloads the 71 files (36 MB) of the two models from the pinned commit. It
-checks the SHA-256 of each file (`praxis/sim/assets.py`). The download
+checks the SHA-256 of each file (`praxis_sim.assets`). The download
 includes the LICENSE file of each model. The cache directory is
 `$PRAXIS_SIM_CACHE`, or `$XDG_CACHE_HOME/praxis/sim`, or
 `~/.cache/praxis/sim`.
@@ -214,7 +217,7 @@ Tasks:
 - `cube_on_plate`, prompt "Put the red cube on the blue plate.". Success:
   the cube is on the plate for 0.25 s, and the gripper does not touch it.
   Time limit: 16 s.
-- The DROID task families of `praxis/sim/suite.py`: `block_in_bowl`,
+- The DROID task families of `praxis_sim.suite`: `block_in_bowl`,
   `block_out_of_bowl`, `move_block`, `stack_block` and `press_button`. Each
   task has a prompt in the style of the DROID instructions, a success check
   and a dense progress value (`metrics.progress`).
@@ -222,15 +225,15 @@ Tasks:
   above, so these tasks make it fail in part of the episodes. Each has a
   seeded start, a prompt in the DROID style, a success check, a dense
   progress value and a scripted oracle (`Task.oracle_steps`).
-  - `praxis/sim/suite_place.py`: `cube_in_tray` (an 8 cm open tray) and
+  - `praxis_sim.suite_place`: `cube_in_tray` (an 8 cm open tray) and
     `cube_on_color` (three colour squares, the seed names the target colour).
-  - `praxis/sim/suite_insert.py`: `peg_in_hole_6mm`, `peg_in_hole_4mm` and
+  - `praxis_sim.suite_insert`: `peg_in_hole_6mm`, `peg_in_hole_4mm` and
     `peg_in_hole_2mm` (a 3 cm square peg in a square hole with this
     clearance per side, one prompt for all three).
-  - `praxis/sim/suite_hard.py`: `pick_color_block`, `color_block_in_bowl`
+  - `praxis_sim.suite_hard`: `pick_color_block`, `color_block_in_bowl`
     and `stack_color_blocks` (five blocks of different colours, the seed
     names the target block).
-  - `praxis/sim/suite_multi.py`: `block_in_small_bowl`,
+  - `praxis_sim.suite_multi`: `block_in_small_bowl`,
     `cube_on_small_plate`, `stack_small_block` (smaller targets, wider
     starts), `two_blocks_in_bowl` and `stack_three_blocks` (two and three
     pick-and-place steps).

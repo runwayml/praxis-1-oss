@@ -7,9 +7,18 @@ torch. The model loop (`praxis.sim.loop`), the video writer and the live viewer 
 `praxis` package, which runs the simulation through this one.
 
 ```bash
-pip install "praxis-sim @ git+https://github.com/runwayml/praxis-1-oss.git#subdirectory=packages/praxis-sim"
-# or, from a checkout of this repository:
+pip install "praxis-sim @ git+https://github.com/runwayml/praxis-1.git#subdirectory=packages/praxis-sim"
+# or, from a checkout of this repository (the `sim` extra of praxis pulls the package in too):
 pip install -e packages/praxis-sim
+```
+
+Python 3.10 or newer (the praxis package itself needs 3.12). The package has no torch and
+imports no core praxis module; `tests/test_isolation.py` checks that, and the tests run in an
+environment that holds only the package:
+
+```bash
+python -m venv /tmp/praxis-sim-venv && /tmp/praxis-sim-venv/bin/pip install "./packages/praxis-sim[dev]"
+MUJOCO_GL=egl /tmp/praxis-sim-venv/bin/pytest packages/praxis-sim/tests
 ```
 
 The robot models (MuJoCo Menagerie, pinned commit) download on first use into a cache
