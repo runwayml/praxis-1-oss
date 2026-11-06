@@ -87,7 +87,7 @@ CAUSAL_CONV1D_FORCE_BUILD=TRUE MAX_JOBS=16 \
   pip install --no-cache-dir --no-build-isolation causal-conv1d==1.6.1
 pip install -e ".[kernels,sim]"   # the sim extra pulls in the praxis-sim package, see "Simulation"
 pip install --no-deps nvidia-cudnn-cu13==9.24.0.43
-python -c "import causal_conv1d_cuda; print('causal-conv1d OK')"
+python -c "import torch, causal_conv1d_cuda; print('causal-conv1d OK')"
 ```
 
 - `transformers` needs torchvision to load the processor of Qwen3.5.
@@ -166,6 +166,7 @@ results with this backend. It needs the `flash-attn-4` package:
 
 ```bash
 pip install "flash-attn-4[cu13]==4.0.0b36"
+pip install --no-deps nvidia-cudnn-cu13==9.24.0.43   # the install above resolves torch again
 ```
 
 Without this package, set the backend to `triton`. Then the trunk uses the
@@ -238,6 +239,104 @@ model inputs and the decoded frames:
 
 With `output.save_video: true` the script also writes the predicted video as
 `.npy` and `.mp4`. The mp4 needs the `video` extra.
+
+## Profile inference
+
+Quick start, after "Install" and "Get the weights":
+
+```bash
+python scripts/benchmark_inference.py --config configs/serve_droid.yaml --out outputs/bench
+```
+
+The script prints a table of p50, p90 and max per stage and writes
+`outputs/bench/summary.json`. The details:
+
+`scripts/benchmark_inference.py` times the policy calls on a local GPU, per
+stage. It needs no server. It loads the pipeline with the settings of a
+config (default `configs/serve_droid.yaml`, the recommended settings) and
+runs sessions on synthetic observations at the shapes of a robot client:
+
+```bash
+# Video guidance off (one pass per sampler step instead of two):
+python scripts/benchmark_inference.py --set sampler.cfg_video_scale=1.0 --out outputs/bench_nocfg
+# With a torch.profiler trace (trace.json) and a kernel table (kernels.txt):
+python scripts/benchmark_inference.py --trace --out outputs/bench_trace
+```
+
+Each session sends a first call with one frame (context depth 0, 21 command
+rows) and then calls with a stack of 25 frames (24 rows). The first session
+is a warm-up: it compiles the attention kernels of each context depth, so
+its calls are not counted. The script writes the time of each call and of
+its stages to `calls.jsonl`, and `summary.json` with the median (p50), the
+p90 and the max, the GPU, the dtype, the sampler settings and the package
+versions. The stages (`praxis/profiling.py`) are:
+
+| Stage | What it holds |
+|---|---|
+| `text_encode` | The text encoder. The pipeline caches each prompt, so this is 0 after the first call. |
+| `vae_encode` | The video encodes of the canvas: the current frame, and with context the executed frames and the window anchor. |
+| `backbone` | The video backbone calls: one per sampler pass, two passes per step with video guidance. |
+| `expert` | The action expert calls on the taps of the backbone. |
+| `total_staged` | The whole policy call of the same sessions, with the canvas, the pose conversions and the command decode. |
+| `total` | The whole policy call in one more session without the stage timers: one synchronize before and one after the call. This is the call time a server sees. |
+
+Each stage time includes a device synchronize before and after it. The sync
+also stops the CPU from queuing the next stage while the GPU runs this one,
+so `total_staged` is higher than `total`. The sampler loop has no host
+synchronize between its backbone and expert calls, so without the stage
+timers the CPU queues the next kernels while the GPU runs; the stage syncs
+take that overlap away. Compare `total`, not the sum of the stages.
+The trace marks each stage as a named range. A trace of 10 calls is about
+0.8 GB. The stages are NVTX ranges too, so under Nsight Systems
+(`nsys profile -t cuda,nvtx`) the timeline shows them.
+
+`python -m praxis.serve.latency --url <session URL>` measures a running
+policy server end to end: the request encode, the round trip and the
+server's own times (see `praxis/serve/README.md`, "Measure the latency").
+
+### Measured times
+
+We ran the script on one NVIDIA H100 80GB HBM3 (Modal), with the image of
+`docker/Dockerfile`: PyTorch 2.13.0, CUDA 13.0, cuDNN 9.24, `flash-attn-4`
+4.0.0b36, bfloat16 weights, the `flash` attention backend and no
+`torch.compile` beyond the flex attention kernels. The checkpoint was
+`praxis-1-droid` with the settings of `configs/serve_droid.yaml`
+(2 steps, flow shift 12.5, 1 context chunk) and synthetic 416x234 views.
+Each row had a warm-up session of 10 calls, then staged sessions of 10
+calls (3 with video guidance 4.0, 2 with 1.0) and one plain session of 10
+calls. `Total` comes from the plain session, the other columns from the
+staged sessions. Each step runs one expert call, so a call has two. Times
+in ms as p50 / p90 / max:
+
+| Video guidance | Calls | Total | Total (staged) | Backbone | Expert | VAE encode | Text encode |
+|---|---|---|---|---|---|---|---|
+| `cfg_video_scale` 4.0 (default): 2 passes per step | first of a session (n=1; staged n=3) | 342 / 342 / 342 | 375 / 375 / 375 | 312 / 312 / 312 | 52 / 53 / 53 | 5 / 5 / 5 | 0 |
+| | later (n=9; staged n=27) | 701 / 729 / 742 | 730 / 733 / 734 | 589 / 590 / 591 | 53 / 54 / 55 | 58 / 58 / 58 | 0 |
+| `cfg_video_scale` 1.0: 1 pass per step | first of a session (n=1; staged n=2) | 189 / 189 / 189 | 218 / 218 / 218 | 157 / 157 / 157 | 52 / 52 / 52 | 5 / 5 / 5 | 0 |
+| | later (n=9; staged n=18) | 406 / 407 / 407 | 437 / 441 / 441 | 295 / 296 / 296 | 53 / 55 / 55 | 58 / 59 / 59 | 0 |
+
+A run from a fresh clone of this repository, with the steps of "Install"
+and "Get the weights" on another H100, took 17 minutes from the clone to
+the numbers: 13 to install (most of it the `causal-conv1d` compile), 3 to
+download the weights, 1.5 to load and run. The `flash-attn-4` install
+resolves torch again, so the step above re-pins cuDNN 9.24 after it.
+
+- The first call of a session has no context (one chunk in the window).
+  The later calls hold one context chunk, so the backbone runs on twice the
+  tokens and the VAE encodes the 24 executed frames.
+- The warm-up calls compile the attention kernels: the first call of the
+  process took 35.6 s (25.3 s with guidance off), the first call with
+  context 1.2 s (1.0 s).
+- A later call gives 24 command rows, 1.6 s of motion at 15 Hz. With the
+  default settings a call takes about half of that time.
+- The inputs are synthetic. The routed experts of the backbone depend on
+  the tokens, so real camera frames can give other times.
+- A robot client adds the image encode, the network and the server around
+  the call. In RoboLab runs against a hosted server of this checkpoint
+  with these sampler settings (another server implementation, not `praxis/serve`, on
+  one H100 or with the two guidance passes on two H100s), the client saw a
+  median of 1.1 to 1.4 s per call. Measure your own path
+  with `praxis.serve.latency`.
 
 ## Use the pipeline in code
 

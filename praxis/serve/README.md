@@ -163,6 +163,30 @@ requests of the Positronic client on 32 recorded episodes. Each episode
 has 4 calls, and the client used its default JPEG quality 90. The largest
 request was 1.74 MiB. No request of the 128 was above 2 MiB.
 
+### Measure the latency
+
+`praxis.serve.latency` runs sessions against a running server, like a robot
+client on the chunk grid, and times each call. It works against a local
+server and against a Modal app:
+
+```bash
+python -m praxis.serve.latency --url ws://<host>:8000/api/v1/session
+python -m praxis.serve.latency \
+    --url wss://<workspace>--praxis-serve-policyserver-web.modal.run/api/v1/session \
+    --headers-file ~/.config/praxis/modal_headers.json --out outputs/latency.jsonl
+```
+
+The headers file holds the proxy auth token:
+`{"Modal-Key": "<id>", "Modal-Secret": "<secret>"}`. Keep it outside the
+checkout and readable only by you (`chmod 600`); `.gitignore` also skips
+`modal_headers.json` in case a copy lands in the repository. The client sends JPEG
+frames at the image size of the handshake. It reports p50, p90 and max of
+the client encode, the round trip, the request decode and the policy call of
+the server (`server_timing`), and the rest (network and answer). The first
+session of the run is not counted: it warms each context depth of the
+server, also when the server skipped its startup warm-up. To time the model alone on a local GPU, use
+`scripts/benchmark_inference.py` (top README, "Profile inference").
+
 ## Connect a Positronic client
 
 The server declares the rig-side pipeline in its handshake. The client then

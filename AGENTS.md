@@ -39,6 +39,8 @@ results reproducible. `README.md` is the user guide.
 | An evaluation suite | `MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard --checkpoint CKPT --out OUT` |
 | Compare two suite runs | `python scripts/compare_sim_eval.py OUT_A OUT_B` |
 | The policy server | `python -m praxis.serve --config configs/serve_droid.yaml` |
+| Inference speed, per stage, on a local GPU | `python scripts/benchmark_inference.py --config configs/serve_droid.yaml` |
+| Latency of a running server | `python -m praxis.serve.latency --url ws://<host>:8000/api/v1/session` |
 | A DROID fine-tune | `torchrun --nproc_per_node 6 scripts/finetune.py --config configs/finetune_droid.yaml` |
 
 The extras of `pyproject.toml`: `kernels` (the text encoder kernels of the

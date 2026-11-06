@@ -182,7 +182,8 @@ for 1.6 s of robot time. We measured this time with
 call of a process took about 22 s, because it compiles the model. The loop
 stops the physics during a call, so the live view stops during each call.
 The current settings (`cfg_video_scale` 4.0) also run the decoder on the
-unguided pass. We have not measured the call time of `praxis-1-droid` yet. Set `policy.decode_video: false` to save the video decode time. Then the
+unguided pass. For the call time of `praxis-1-droid` with the serve settings, see
+"Profile inference" in the top README. Set `policy.decode_video: false` to save the video decode time. Then the
 human view has no predicted video. The decode time increases with the
 context depth.
 

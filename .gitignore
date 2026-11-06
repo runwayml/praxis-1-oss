@@ -4,3 +4,5 @@ outputs/
 *.egg-info/
 build/
 dist/
+# Proxy auth tokens of praxis.serve.latency (keep them outside the checkout).
+modal_headers.json

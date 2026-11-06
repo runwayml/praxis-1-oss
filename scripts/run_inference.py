@@ -51,6 +51,32 @@ def load_config(path: str, overrides: list[str]) -> dict:
     return cfg
 
 
+def build_pipeline(cfg: dict) -> PraxisPipeline:
+    """Load the pipeline with the ``model`` and ``sampler`` settings of a config."""
+    m, s = cfg["model"], cfg["sampler"]
+    return PraxisPipeline(
+        checkpoint=m["checkpoint"],
+        vae_weights=m["vae_weights"],
+        text_encoder=m["text_encoder"],
+        device=m.get("device", "cuda"),
+        vae_norm_block_c=(
+            {int(k): int(v) for k, v in m["vae_norm_block_c"].items()}
+            if m.get("vae_norm_block_c")
+            else None
+        ),
+        sampler=SamplerSettings(
+            num_steps=int(s["num_steps"]),
+            t_shift=float(s["t_shift"]),
+            solver=str(s["solver"]),
+            action_steps=s.get("action_steps"),
+            layout=str(s.get("layout", "window_joint")),
+            cfg_scale=float(s.get("cfg_scale", 1.0)),
+            cfg_video_scale=float(s.get("cfg_video_scale", 4.0)),
+            cfg_batched=bool(s.get("cfg_batched", False)),
+        ),
+    )
+
+
 def _load_frames(path: Path, views: list[str] | dict[str, str]) -> dict:
     frames = {}
     for view in views:
@@ -180,28 +206,7 @@ def main() -> None:
     args = ap.parse_args()
     cfg = load_config(args.config, args.set)
 
-    m, s = cfg["model"], cfg["sampler"]
-    pipe = PraxisPipeline(
-        checkpoint=m["checkpoint"],
-        vae_weights=m["vae_weights"],
-        text_encoder=m["text_encoder"],
-        device=m.get("device", "cuda"),
-        vae_norm_block_c=(
-            {int(k): int(v) for k, v in m["vae_norm_block_c"].items()}
-            if m.get("vae_norm_block_c")
-            else None
-        ),
-        sampler=SamplerSettings(
-            num_steps=int(s["num_steps"]),
-            t_shift=float(s["t_shift"]),
-            solver=str(s["solver"]),
-            action_steps=s.get("action_steps"),
-            layout=str(s.get("layout", "window_joint")),
-            cfg_scale=float(s.get("cfg_scale", 1.0)),
-            cfg_video_scale=float(s.get("cfg_video_scale", 4.0)),
-            cfg_batched=bool(s.get("cfg_batched", False)),
-        ),
-    )
+    pipe = build_pipeline(cfg)
     root = Path(cfg["input"]["episodes_dir"])
     names = cfg["input"]["episodes"]
     dirs = (
