@@ -60,6 +60,7 @@ from praxis.layers import (
     RotaryEmbedding,
     _compiled_flex_attention_dynamic,
     apply_rope,
+    to_device_async,
 )
 
 __all__ = [
@@ -990,8 +991,8 @@ def run_expert_on_taps_k(
 
     g_pos = [p for kind in expert.global_order for p in positions(global_spans[kind])]
     s_pos = positions(clean_span) + positions(noised_span)
-    g_idx = torch.tensor(g_pos, dtype=torch.long).to(device)
-    s_idx = torch.tensor(s_pos, dtype=torch.long).to(device)
+    g_idx = to_device_async(torch.tensor(g_pos, dtype=torch.long), device)
+    s_idx = to_device_async(torch.tensor(s_pos, dtype=torch.long), device)
     ids = rope_ids.to(device)
     kv_rope_ids = torch.cat([ids.index_select(1, g_idx), ids.index_select(1, s_idx)], 1)
     dtype = embeddings.dtype

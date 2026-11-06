@@ -63,6 +63,19 @@ _compiled_flex_attention_dynamic = torch.compile(
 _ROUTER_CHUNK_ROWS = 65536
 
 
+def to_device_async(t: Tensor, device: torch.device) -> Tensor:
+    """Copy a small CPU tensor to ``device`` without a host synchronize.
+
+    A ``.to(device)`` of a pageable CPU tensor waits until the GPU has run
+    every queued kernel. The CPU then cannot queue the next kernels ahead of
+    the GPU. This copy goes through pinned memory with ``non_blocking=True``.
+    The values are those of ``t.to(device)``.
+    """
+    if device.type != "cuda" or t.device.type != "cpu":
+        return t.to(device)
+    return t.pin_memory().to(device, non_blocking=True)
+
+
 # ---------------------------------------------------------------------------
 # Modulation
 # ---------------------------------------------------------------------------
@@ -205,6 +218,9 @@ class RotaryEmbedding(nn.Module):
         theta = 1.0 / (base**exponent)
         pad = torch.zeros((dim - effective_dim) // 2, device="cpu")
         self.theta = torch.cat([theta, pad], dim=0)
+        # The float64 copy of ``theta`` on each device, made on first use. A
+        # copy per call is a host synchronize (see :func:`to_device_async`).
+        self._theta_on: dict[torch.device, Tensor] = {}
 
     @staticmethod
     def _cos_sin(angle: Tensor) -> tuple[Tensor, Tensor]:
@@ -213,7 +229,10 @@ class RotaryEmbedding(nn.Module):
 
     def forward(self, positions: Tensor) -> Tensor:
         """Map ``positions`` (B, N) to a float32 table (B, N, dim // 2, 2)."""
-        theta = self.theta.to(positions.device).double()
+        theta = self._theta_on.get(positions.device)
+        if theta is None:
+            theta = self.theta.to(positions.device).double()
+            self._theta_on[positions.device] = theta
         high = positions // self.table_size
         low = positions % self.table_size
         # Table rows hold float32 positions. Both casts below are exact.

@@ -34,7 +34,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from praxis.layers import Attention, Transformer
+from praxis.layers import Attention, Transformer, to_device_async
 from praxis.layers import modulate as layer_modulate
 
 ROW_STRIDE = 360
@@ -664,7 +664,7 @@ class EncoderTower(nn.Module):
             n_clean_frames,
             rope_shifts,
         )
-        positions = positions.unsqueeze(0).to(x.device)
+        positions = to_device_async(positions.unsqueeze(0), x.device)
         slots = [
             ("global", 1, n_reg),
             ("global", 1, n_anchor),
@@ -783,7 +783,7 @@ class DecoderTower(nn.Module):
             torch.zeros(n_reg, dtype=torch.int64),
             video_positions(frames, height, width, rope_shift),
         ]
-        positions = torch.cat(pos).unsqueeze(0).to(x.device)
+        positions = to_device_async(torch.cat(pos).unsqueeze(0), x.device)
         slots = [("global", 1, n_reg), ("noised", frames, tpf)]
         mask = self._tf_masks.get(
             slots, chunk, False, x.device, _full_blocks(self.core)

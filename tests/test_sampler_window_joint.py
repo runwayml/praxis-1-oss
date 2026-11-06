@@ -351,6 +351,9 @@ CASES = [
     (3, 1, 2, 8.0, 1.0, 1.0),
     (0, 0, 2, 1.0, 3.0, 1.0),
     (2, 7, 2, 1.0, 3.0, 2.0),
+    # The recommended settings: video guidance only.
+    (0, 4, 2, 12.5, 1.0, 4.0),
+    (1, 2, 2, 12.5, 1.0, 4.0),
 ]
 
 
@@ -384,8 +387,10 @@ def test_window_joint_equals_the_reference_loop(
 
     kk = depth + 1
     guided = cfg != 1.0 or cfg_v != 1.0
+    # The unguided pass runs the expert only when the action scale reads it.
+    act_uncond = guided and cfg != 1.0
     assert len(calls.trunk) == steps * (2 if guided else 1)
-    assert len(calls.expert) == len(calls.trunk)
+    assert len(calls.expert) == steps * (2 if act_uncond else 1)
     ts = window_time_grid(steps, shift)
     for i, call in enumerate(calls.trunk):
         step, uncond = (i // 2, i % 2) if guided else (i, 0)
@@ -401,7 +406,7 @@ def test_window_joint_equals_the_reference_loop(
         # The unguided video is decoded only when its scale needs it.
         assert call["decode"] is (not uncond or cfg_v != 1.0)
     for i, call in enumerate(calls.expert):
-        step = i // 2 if guided else i
+        step = i // 2 if act_uncond else i
         assert call["n_chunks"] == kk and call["frames_per_chunk"] == LAT
         assert call["noised_actions"].dtype == torch.float32
         assert call["noised_actions"].shape == (1, kk * LAT, A_DIM)
@@ -412,6 +417,8 @@ def test_window_joint_equals_the_reference_loop(
     if guided:
         for j in range(0, len(calls.trunk), 2):
             assert torch.equal(calls.trunk[j]["noised"], calls.trunk[j + 1]["noised"])
+    if act_uncond:
+        for j in range(0, len(calls.expert), 2):
             assert torch.equal(
                 calls.expert[j]["noised_actions"], calls.expert[j + 1]["noised_actions"]
             )
@@ -451,6 +458,31 @@ def test_window_joint_trace_names(monkeypatch: pytest.MonkeyPatch) -> None:
         "out.video_last",
         "out.action_last",
     ]
+
+
+@pytest.mark.parametrize("depth", [0, 1])
+def test_unguided_actions_are_skipped_with_the_same_bits(
+    monkeypatch: pytest.MonkeyPatch, depth: int
+) -> None:
+    """With cfg_scale 1.0 the unguided pass runs no expert and changes no bit.
+
+    A trace keeps the unguided actions, so a traced call is the reference.
+    """
+    settings = SamplerSettings(num_steps=2, cfg_scale=1.0, cfg_video_scale=4.0)
+    out, n_expert = {}, {}
+    for traced in (False, True):
+        calls = Calls()
+        monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(calls))
+        out[traced] = _policy(calls).sample_window_joint(
+            seed=5,
+            settings=settings,
+            trace=(lambda n, t: None) if traced else None,
+            **_inputs(depth),
+        )
+        n_expert[traced] = len(calls.expert)
+    assert n_expert == {False: 2, True: 4}
+    assert torch.equal(out[False][0], out[True][0])
+    assert torch.equal(out[False][1], out[True][1])
 
 
 def test_window_joint_refusals(monkeypatch: pytest.MonkeyPatch) -> None:
