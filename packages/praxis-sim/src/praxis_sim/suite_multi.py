@@ -24,9 +24,9 @@ from collections.abc import Callable
 import mujoco
 import numpy as np
 
-from praxis.sim.scene import ObjectSpec
-from praxis.sim.suite import BlockInBowl, StackBlock, _Container
-from praxis.sim.tasks import CubeOnPlate, PickPlace, Task, TaskConfig
+from praxis_sim.scene import ObjectSpec
+from praxis_sim.suite import BlockInBowl, StackBlock, _Container
+from praxis_sim.tasks import CubeOnPlate, PickPlace, Task, TaskConfig
 
 GREEN = "green_block"
 BLUE = "blue_block"

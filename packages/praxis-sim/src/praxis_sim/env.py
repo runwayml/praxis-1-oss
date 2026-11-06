@@ -10,7 +10,7 @@ Use it like this::
 
 ``obs.exterior`` and ``obs.wrist`` are the two model views (uint8 RGB).
 ``obs.ee_pose`` and ``obs.grip`` are in the policy convention of
-:mod:`praxis.sim.robot`. ``obs.overview`` is the view for people.
+:mod:`praxis_sim.robot`. ``obs.overview`` is the view for people.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import mujoco
 import numpy as np
 
-from praxis.sim.robot import (
+from praxis_sim.robot import (
     DROID_HOME,
     Cameras,
     FrameConfig,
@@ -29,8 +29,8 @@ from praxis.sim.robot import (
     IkResult,
     SimArm,
 )
-from praxis.sim.scene import TABLE_GEOM, SceneConfig, build_model
-from praxis.sim.tasks import Task, TaskConfig, TaskStatus, make_task
+from praxis_sim.scene import TABLE_GEOM, SceneConfig, build_model
+from praxis_sim.tasks import Task, TaskConfig, TaskStatus, make_task
 
 
 @dataclass

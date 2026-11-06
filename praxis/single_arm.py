@@ -122,7 +122,7 @@ def _rows(m: np.ndarray) -> tuple[tuple[float, ...], ...]:
 
 
 # The flange origin with the rotation R_flange @ Rz(-45 deg): the ``ee`` site
-# of the sim (praxis/sim/scene.py).
+# of the sim (praxis_sim.scene, packages/praxis-sim).
 TURNED_FLANGE = RigFrame(0.0, _rows(FLANGE_TURN))
 # The FR3 ``end_effector`` (the Franka hand frame): 103.4 mm along the flange z.
 FR3_HAND = RigFrame(0.1034, _rows(FLANGE_TURN))

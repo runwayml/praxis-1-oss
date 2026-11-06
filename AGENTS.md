@@ -22,8 +22,9 @@ results reproducible. `README.md` is the user guide.
 | `praxis/vae.py`, `praxis/text_encoder.py` | the video autoencoder and the text encoder |
 | `praxis/kernels/` | Triton kernels (forward and backward) that keep the bits of the checkpoint |
 | `praxis/serve/` | the policy server (WebSocket, Positronic protocol) and the Modal app. See `praxis/serve/README.md` |
-| `praxis/sim/` | the MuJoCo simulation: the single-arm DROID rig, tasks, scripted oracles, the closed loop. See `praxis/sim/README.md` |
-| `praxis/sim/eval_suites.py`, `praxis/sim/EVAL.md` | the fixed evaluation scenarios of the single-arm checkpoint |
+| `praxis/sim/` | the closed loop of the MuJoCo simulation (the model loop, the video writer, the live viewer). See `praxis/sim/README.md` |
+| `packages/praxis-sim/` | the simulator as its own package, `praxis_sim` (no torch): the single-arm DROID rig, tasks, scripted oracles, the Gymnasium wrapper. `praxis.sim.<module>` names still resolve to it |
+| `packages/praxis-sim/src/praxis_sim/eval_suites.py`, `praxis/sim/EVAL.md` | the fixed evaluation scenarios of the single-arm checkpoint |
 | `praxis/train/` | the DROID fine-tune: data windows, objective, MoE balance, FSDP trainer. See `praxis/train/README.md` |
 | `configs/` | the YAML settings of inference, serving, simulation and fine-tuning |
 | `scripts/` | the command-line entry points |

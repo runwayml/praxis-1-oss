@@ -85,7 +85,7 @@ pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytor
 pip install packaging ninja wheel
 CAUSAL_CONV1D_FORCE_BUILD=TRUE MAX_JOBS=16 \
   pip install --no-cache-dir --no-build-isolation causal-conv1d==1.6.1
-pip install -e ".[kernels,sim]"
+pip install -e ".[kernels,sim]"   # the sim extra pulls in the praxis-sim package, see "Simulation"
 pip install --no-deps nvidia-cudnn-cu13==9.24.0.43
 python -c "import causal_conv1d_cuda; print('causal-conv1d OK')"
 ```
@@ -104,7 +104,7 @@ The extras of `pyproject.toml`:
 |---|---|---|
 | (none) | torch, torchvision, triton, transformers, safetensors, numpy, pillow, pyyaml | the model |
 | `kernels` | flash-linear-attention, causal-conv1d | the text encoder kernels of the validation results (see below) |
-| `sim` | mujoco, imageio, imageio-ffmpeg | the MuJoCo simulation |
+| `sim` | praxis-sim (mujoco, gymnasium; `packages/praxis-sim` of this repository), imageio, imageio-ffmpeg | the MuJoCo simulation |
 | `video` | imageio, imageio-ffmpeg | mp4 export of `scripts/run_inference.py` |
 | `serve` | the web server, the image decoders and the cloud host client | the policy server (`praxis/serve/README.md`) |
 | `train` | huggingface_hub, av, pyarrow | the fine-tune (`praxis/train/README.md`) |
@@ -463,6 +463,23 @@ and `scripts/compare_sim_eval.py` compares two runs (see
 See [praxis/sim/README.md](praxis/sim/README.md) for the install, the assets
 and their licenses, the live view on a remote machine, the settings, the
 tasks and the results.
+
+### Install a simulator
+
+Each simulator is its own package under `packages/`, with only its own
+dependencies and its own Python range, so it installs on its own (in a LeRobot
+environment, or next to a sim stack on another Python). The `sim` extra of
+`praxis` pulls in the one that shares praxis's Python.
+
+| Sim | Package | Python | Install | Reaches the model |
+| --- | --- | --- | --- | --- |
+| MuJoCo rig (this repository) | `praxis-sim` | >= 3.10 | `pip install -e ".[sim]"`, or on its own `pip install "praxis-sim @ git+https://github.com/runwayml/praxis-1-oss.git#subdirectory=packages/praxis-sim"` | in process (`praxis.sim.loop`), or as Gymnasium environments (`praxis_sim.gym_env`) |
+
+A simulator that cannot share praxis's Python or numpy reaches the model through
+the policy server of the `serve` extra (two processes: the server in the praxis
+environment, the sim client in its own), as the RoboLab client of `eval/robolab`
+does. Such a simulator gets its own `packages/praxis-<sim>` and a row here when
+it lands.
 
 ## Determinism
 

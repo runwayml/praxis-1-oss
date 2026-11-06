@@ -3,7 +3,7 @@
 The scene has these parts:
 
 * A Franka Emika Panda arm without its hand, and a Robotiq 2F-85 gripper on
-  the flange (MuJoCo Menagerie models, see :mod:`praxis.sim.assets`). The
+  the flange (MuJoCo Menagerie models, see :mod:`praxis_sim.assets`). The
   robot base is at the world origin, so the world frame is the base frame of
   the policy.
 * A table with its top near the height of the robot base, a floor and walls.
@@ -32,7 +32,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from praxis.sim import assets
+from praxis_sim import assets
 
 # ---------------------------------------------------------------------------
 # Names and constants

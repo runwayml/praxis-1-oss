@@ -19,8 +19,8 @@ from collections.abc import Callable
 import mujoco
 import numpy as np
 
-from praxis.sim.scene import PAD_GEOMS, PINCH_SITE, ObjectSpec
-from praxis.sim.tasks import PickPlace, Task, TaskConfig, yaw_quat
+from praxis_sim.scene import PAD_GEOMS, PINCH_SITE, ObjectSpec
+from praxis_sim.tasks import PickPlace, Task, TaskConfig, yaw_quat
 
 PEG = "blue_peg"
 BOARD = "board"

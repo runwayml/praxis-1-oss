@@ -14,7 +14,8 @@ the loop runs. After the run, the same page plays the MP4 of the last
 episode. The viewer stays open for ``viewer.keep_open_s`` seconds, or until
 Ctrl-C.
 
-The script needs the ``sim`` extra: ``pip install -e ".[sim]"``.
+The script needs the ``sim`` extra: ``pip install -e ".[sim]"`` (it pulls in the
+``praxis-sim`` package of ``packages/praxis-sim``).
 """
 
 from __future__ import annotations

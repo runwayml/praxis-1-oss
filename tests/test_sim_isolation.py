@@ -6,8 +6,9 @@ Rules:
   ``scripts/run_sim_eval.py`` and ``scripts/compare_sim_eval.py`` import
   ``praxis.sim``.
 * ``praxis.sim`` imports only the standard library, numpy, Pillow, PyYAML,
-  MuJoCo (with PyOpenGL, a MuJoCo dependency), imageio-ffmpeg, torch and the
-  core ``praxis`` modules (not ``praxis.serve``). Relative imports count too.
+  MuJoCo (with PyOpenGL, a MuJoCo dependency), imageio-ffmpeg, torch, the
+  simulator package ``praxis_sim`` and the core ``praxis`` modules (not
+  ``praxis.serve``). Relative imports count too.
 * The core modules do not import the packages of the ``sim`` extra.
 """
 
@@ -20,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SIM_DIR = ROOT / "praxis" / "sim"
 ALLOWED_THIRD_PARTY = {
+    "praxis_sim",  # the simulator package (packages/praxis-sim)
     "numpy",
     "PIL",
     "yaml",
@@ -91,7 +93,7 @@ def test_only_sim_files_import_praxis_sim() -> None:
 
 def test_sim_imports_only_allowed_packages() -> None:
     files = sorted(SIM_DIR.glob("*.py"))
-    assert len(files) >= 10
+    assert len(files) >= 4  # __init__, loop, video, viewer
     bad = []
     for path in files:
         for name in _imports(path):
@@ -125,3 +127,24 @@ def test_relative_imports_resolve() -> None:
         assert isinstance(node, ast.ImportFrom)
         names |= _resolve_relative(loop, node)
     assert {"praxis.sim.env", "praxis.model", "praxis.pipeline.x"} <= names
+
+
+PACKAGE_DIR = ROOT / "packages" / "praxis-sim" / "src" / "praxis_sim"
+# The simulator package installs without the model: no torch, no core praxis modules.
+PACKAGE_ALLOWED = {"numpy", "mujoco", "OpenGL", "yaml", "gymnasium", "PIL"}
+
+
+def test_praxis_sim_package_imports_no_model_code() -> None:
+    files = sorted(PACKAGE_DIR.glob("*.py"))
+    assert len(files) >= 14
+    for path in files:
+        for name in _imports(path):
+            top = name.split(".")[0]
+            # relative imports resolve to the repository path of the package
+            if (
+                top in sys.stdlib_module_names
+                or top in PACKAGE_ALLOWED
+                or top in ("praxis_sim", "packages")
+            ):
+                continue
+            raise AssertionError(f"{path.relative_to(ROOT)} imports {name}")
