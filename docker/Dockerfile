@@ -57,7 +57,8 @@ RUN pip install --no-cache-dir ".[serve,kernels]" \
 # We made the validation results with cuDNN 9.24. PyTorch 2.13 asks for
 # cuDNN 9.20, so this step must come after each install that resolves torch.
 # The convolutions of the video autoencoder run in cuDNN.
-RUN pip install --no-cache-dir --no-deps nvidia-cudnn-cu13==9.24.0.43
+RUN pip install --no-cache-dir --no-deps nvidia-cudnn-cu13==9.24.0.43 \
+    && python -c "import torch; v = torch.backends.cudnn.version(); assert v == 92400, v"
 
 # Remove the start banner of the CUDA base image.
 ENTRYPOINT []

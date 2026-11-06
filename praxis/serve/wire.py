@@ -32,12 +32,16 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 import msgpack
 import numpy as np
 from PIL import Image
 
 IMAGE_CODECS: tuple[str, ...] = ("h264", "jpeg")
+MAX_IMAGE_FRAMES = 25
+# Match the WebSocket message limit; apply across all cameras in a request.
+MAX_DECODED_BYTES = 256 * 1024 * 1024
 
 # The standard luminance quantization table of the IJG JPEG library (JPEG
 # Annex K.1, natural order).
@@ -64,6 +68,7 @@ class DecodeStats:
     video_ms: float = 0.0
     codecs: set[str] = field(default_factory=set)
     jpeg_quality: int | None = None
+    _decoded_bytes: int = field(default=0, repr=False)
 
 
 # The statistics of the request that this thread decodes now, or None.
@@ -117,12 +122,35 @@ def _safe_dtype(dtype: np.dtype) -> np.dtype:
     return dtype
 
 
+def _charge(size: int) -> None:
+    stats = _stats()
+    total = size + (stats._decoded_bytes if stats is not None else 0)
+    if total > MAX_DECODED_BYTES:
+        raise ValueError("Decoded arrays exceed the request byte limit")
+    if stats is not None:
+        stats._decoded_bytes = total
+
+
+def _image_ndim(obj: dict) -> int:
+    ndim = obj[b"ndim"]
+    if type(ndim) is not int or ndim not in (3, 4):
+        raise ValueError("Image ndim must be 3 or 4")
+    return ndim
+
+
 def _decode_jpeg(obj: dict) -> np.ndarray:
     t0 = time.monotonic()
     stats = _stats()
+    ndim = _image_ndim(obj)
+    buffers = obj[b"frames"]
+    if not isinstance(buffers, list) or not 1 <= len(buffers) <= MAX_IMAGE_FRAMES:
+        raise ValueError("JPEG stack must contain 1 to 25 frames")
+    if ndim == 3 and len(buffers) != 1:
+        raise ValueError("A 3D image must contain one frame")
     frames = []
-    for buf in obj[b"frames"]:
-        im = Image.open(io.BytesIO(buf))
+    for buf in buffers:
+        im = Image.open(io.BytesIO(buf), formats=["JPEG"])
+        _charge(im.width * im.height * 3)
         if stats is not None and stats.jpeg_quality is None:
             with contextlib.suppress(Exception):
                 tables = getattr(im, "quantization", None) or {}
@@ -132,19 +160,34 @@ def _decode_jpeg(obj: dict) -> np.ndarray:
     if stats is not None:
         stats.jpeg_ms += (time.monotonic() - t0) * 1e3
         stats.codecs.add("jpeg")
-    return stacked if int(obj[b"ndim"]) == 4 else stacked[0]
+    return stacked if ndim == 4 else stacked[0]
 
 
 def _decode_h264(obj: dict) -> np.ndarray:
     import av  # only H.264 requests need PyAV
 
     t0 = time.monotonic()
-    shape = [int(x) for x in obj[b"shape"]]
-    ndim = int(obj[b"ndim"])
+    ndim = _image_ndim(obj)
+    shape = obj[b"shape"]
+    if (
+        len(shape) != ndim
+        or any(type(x) is not int or x <= 0 for x in shape)
+        or shape[-1] != 3
+    ):
+        raise ValueError("H.264 shape must describe positive RGB dimensions")
     t, h, w = (shape[0], shape[1], shape[2]) if ndim == 4 else (1, shape[0], shape[1])
+    if not 1 <= t <= MAX_IMAGE_FRAMES:
+        raise ValueError("H.264 stack must contain 1 to 25 frames")
+    _charge(t * h * w * 3)
     frames = []
     with av.open(io.BytesIO(obj[b"data"]), mode="r", format="h264") as container:
         for frame in container.decode(video=0):
+            if len(frames) == t:
+                raise ValueError(f"H.264 stack exceeds expected {t} frames")
+            if (frame.height, frame.width) != (h + h % 2, w + w % 2):
+                raise ValueError(
+                    "H.264 frame dimensions do not match the declared shape"
+                )
             frames.append(frame.to_ndarray(format="rgb24")[:h, :w])
     if len(frames) != t:
         raise ValueError(f"H.264 stack decoded to {len(frames)} frames, expected {t}")
@@ -163,6 +206,7 @@ def unpack_numpy(obj: dict) -> object:
     match the data raises ``ValueError``.
     """
     if b"__ndarray__" in obj:
+        _charge(len(obj[b"data"]))
         dtype = _safe_dtype(np.dtype(obj[b"dtype"]))
         return np.frombuffer(obj[b"data"], dtype=dtype).reshape(obj[b"shape"])
     if b"__npgeneric__" in obj:
@@ -176,15 +220,30 @@ def unpack_numpy(obj: dict) -> object:
 
 
 serialise = functools.partial(msgpack.packb, default=pack_numpy)
-deserialise = functools.partial(msgpack.unpackb, object_hook=unpack_numpy)
 
 
-def deserialise_request(message: bytes) -> tuple[dict, DecodeStats]:
+def _unpack_pairs(pairs: list[tuple]) -> object:
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"Duplicate msgpack key: {key!r}")
+        obj[key] = value
+    markers = (b"__ndarray__", b"__npgeneric__", b"__jpeg__", b"__h264__")
+    if sum(key in obj for key in markers) > 1:
+        raise ValueError("Conflicting wire markers")
+    return unpack_numpy(obj)
+
+
+def deserialise(message: bytes) -> Any:
+    return deserialise_request(message)[0]
+
+
+def deserialise_request(message: bytes) -> tuple[Any, DecodeStats]:
     """Decode one request. Return the value and the statistics of its image decode."""
     stats = DecodeStats()
     _ACTIVE.stats = stats
     try:
-        return deserialise(message), stats
+        return msgpack.unpackb(message, object_pairs_hook=_unpack_pairs), stats
     finally:
         _ACTIVE.stats = None
 

@@ -30,6 +30,11 @@ section of the top README tells. Then serve the checkpoint on one GPU:
   `wss://<workspace>--praxis-serve-policyserver-web.modal.run/api/v1/session`.
   The client also sends a proxy auth token.
 
+The handshake includes `action_fps`, the checkpoint's action grid rate in Hz.
+Each image marker holds 1–25 frames; a 3D JPEG marker holds exactly one.
+Duplicate map keys and conflicting markers are rejected. Decoded array data
+across all cameras is limited to 256 MiB per request.
+
 The sections below give the steps for each host and the client settings.
 
 ## Run the server on a local machine

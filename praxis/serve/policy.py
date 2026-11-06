@@ -380,6 +380,7 @@ class ServedPolicy:
             "wire_commands": list(f.wire["wire_commands"]),
             "wan_pattern": "contiguous-window-144444",
             "chunk_rows": robot_io.ACTION_CHUNK,
+            "action_fps": f.fps,
             "prompt": self.session.state.prompt,
             "prompt_overridable": True,
             "pad_start": False,

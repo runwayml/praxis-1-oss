@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 # The server tests need the [serve] extra.
 pytest.importorskip("fastapi")
@@ -351,6 +351,61 @@ def test_jpeg_stacks_and_quality() -> None:
     assert raw.codecs == set() and raw.jpeg_quality is None
 
 
+@pytest.mark.parametrize(
+    "ndim,count", [(2, 1), ("3", 1), (True, 1), (3, 2), (4, 0), (4, 26)]
+)
+def test_invalid_jpeg_stack(ndim: object, count: int) -> None:
+    marker = _jpeg(np.zeros((8, 8, 3), np.uint8))
+    marker[b"ndim"] = ndim
+    marker[b"frames"] *= count
+    with pytest.raises(ValueError):
+        wire.deserialise(msgpack.packb(marker))
+
+
+def test_non_jpeg_payload_is_refused() -> None:
+    buf = io.BytesIO()
+    Image.fromarray(np.zeros((8, 8, 3), np.uint8)).save(buf, format="PNG")
+    marker = {b"__jpeg__": True, b"frames": [buf.getvalue()], b"ndim": 3}
+    with pytest.raises(UnidentifiedImageError):
+        wire.deserialise(msgpack.packb(marker))
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_duplicate_keys_are_refused(nested: bool) -> None:
+    # A literal map preserves duplicate keys that a Python dict cannot represent.
+    data = b"\x82\xa1x\x01\xa1x\x02"
+    if nested:
+        data = b"\x81\xa5outer" + data
+    with pytest.raises(ValueError, match="Duplicate"):
+        wire.deserialise(data)
+
+
+def test_conflicting_markers_are_refused() -> None:
+    marker = {b"__ndarray__": True, b"__jpeg__": True}
+    with pytest.raises(ValueError, match="Conflicting"):
+        wire.deserialise(msgpack.packb(marker))
+
+
+def test_request_decode_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = np.zeros((8, 8, 3), np.uint8)
+    marker = _jpeg(image)
+    monkeypatch.setattr(wire, "MAX_DECODED_BYTES", image.nbytes)
+    for value in ({"a": marker, "b": marker}, {"raw": image, "jpeg": marker}):
+        with pytest.raises(ValueError, match="byte limit"):
+            wire.deserialise(wire.serialise(value))
+    # A failed request does not consume the next request's budget.
+    assert wire.deserialise(msgpack.packb(marker)).shape == image.shape
+    monkeypatch.setattr(wire, "MAX_DECODED_BYTES", image.nbytes - 1)
+    with pytest.raises(ValueError, match="byte limit"):
+        wire.deserialise(msgpack.packb(marker))
+
+
+def test_three_camera_stacks() -> None:
+    marker = _jpeg(np.zeros((25, 8, 8, 3), np.uint8))
+    obs = wire.deserialise(msgpack.packb({k: marker for k in ("a", "b", "c")}))
+    assert all(value.shape == (25, 8, 8, 3) for value in obs.values())
+
+
 def test_h264_stack() -> None:
     av = pytest.importorskip("av")
     t, h, w = 5, 21, 33
@@ -379,6 +434,17 @@ def test_h264_stack() -> None:
     obs, stats = wire.deserialise_request(msgpack.packb({"v": marker}))
     assert obs["v"].shape == (t, h, w, 3) and stats.codecs == {"h264"}
     assert np.abs(obs["v"].astype(int) - frames).mean() < 8
+    for ndim, shape, error in (
+        (2, [h, w, 3], "ndim"),
+        (3, [h, w, 3], "exceeds expected 1"),
+        (4, [26, h, w, 3], "1 to 25"),
+        (4, [t, 0, w, 3], "positive RGB"),
+        (4, [t, h, w, 1], "positive RGB"),
+        (4, [t, h, w - 2, 3], "dimensions"),
+    ):
+        invalid = {**marker, b"ndim": ndim, b"shape": shape}
+        with pytest.raises(ValueError, match=error):
+            wire.deserialise(msgpack.packb(invalid))
     marker[b"shape"] = [t + 1, h, w, 3]
     with pytest.raises(ValueError, match="expected 6"):
         wire.deserialise(msgpack.packb({"v": marker}))
@@ -480,7 +546,7 @@ META_KEYS = [
     "solver", "num_evals", "cfg_scale", "cfg_video_scale", "cfg_batched",
     "context_mode", "max_context_chunks", "carry_mode", "record_denoised",
     "compile", "skip_video_decoder", "action_steps", "embodiment", "control_mode",
-    "action_layout", "wire_commands", "wan_pattern", "chunk_rows", "prompt",
+    "action_layout", "wire_commands", "wan_pattern", "chunk_rows", "action_fps", "prompt",
     "prompt_overridable", "pad_start", "prompt_style", "prompt_rewritten",
     "sample_seed_base", "seed_source", "local_stack", "compress_images",
     "image_codecs", "rollout_id", "rollout_id_source", "session_overrides",
@@ -534,6 +600,7 @@ def test_handshake_meta(server: tuple[str, InferenceServer]) -> None:
         "wire_commands": ["robot_command", "target_grip"],
         "wan_pattern": "contiguous-window-144444",
         "chunk_rows": 24,
+        "action_fps": 15.0,
         "prompt": "",
         "prompt_overridable": True,
         "pad_start": False,
