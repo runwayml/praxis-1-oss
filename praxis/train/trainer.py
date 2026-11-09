@@ -75,7 +75,7 @@ from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.tensor import DTensor
 from torch.utils.checkpoint import checkpoint
 
-from praxis.checkpoint import save_checkpoint
+from praxis.checkpoint import BASE_HEAD_TENSORS, save_checkpoint
 from praxis.model import PraxisPolicy
 from praxis.train.lora import LoRALinear, merged_state_dict
 
@@ -120,9 +120,26 @@ class TrainSettings:
     (``lr_schedule`` "flat") or falls on a cosine curve from ``lr`` to
     ``min_lr`` at the last step (``lr_schedule`` "cosine").
     ``clip_grad_norm`` None turns the gradient clipping off. ``save`` false
-    turns off all saves, also the save after the last step. The defaults of
-    ``steps``, ``lr`` and ``save_every`` are the values of
-    ``configs/finetune_droid.yaml``.
+    turns off all saves, also the save after the last step. The configs set
+    their own values (``configs/finetune_base.yaml``,
+    ``configs/finetune_droid_lora.yaml``).
+
+    Two settings are for new action heads (a checkpoint of
+    ``scripts/init_heads.py``). They act on the tensors of
+    ``praxis.checkpoint.BASE_HEAD_TENSORS``:
+
+    * ``head_lr_scale``: the heads get ``head_lr_scale`` times the learning
+      rate of the schedule above.
+    * ``head_only_steps``: for the first ``head_only_steps`` steps only the
+      heads train. The trainer drops the gradients of all other weights
+      before the clip and the optimizer step, so the clip norm (and the
+      logged ``grad_norm``) is the norm of the heads, and AdamW leaves the
+      other weights and their moments as they are. Then the schedule of the
+      other weights starts: its warmup and its cosine run from step
+      ``head_only_steps`` to the last step.
+
+    With the defaults (1.0 and 0) all weights get the same learning rate,
+    and a run gives the same bits as before these settings.
     """
 
     steps: int = 1_200
@@ -142,14 +159,22 @@ class TrainSettings:
     log_every: int = 1
     save_every: int = 100
     save: bool = True
+    head_lr_scale: float = 1.0
+    head_only_steps: int = 0
 
     def __post_init__(self) -> None:
         # A value from the command line can be a string ("1e-4" is a string
         # in YAML). Convert each value to the type of its field.
-        for name in ("lr", "min_lr", "weight_decay", "eps"):
+        for name in ("lr", "min_lr", "weight_decay", "eps", "head_lr_scale"):
             setattr(self, name, float(getattr(self, name)))
-        for name in ("steps", "grad_accum", "warmup_steps", "seed"):
+        for name in ("steps", "grad_accum", "warmup_steps", "seed", "head_only_steps"):
             setattr(self, name, int(getattr(self, name)))
+        if self.head_lr_scale <= 0:
+            raise ValueError(f"head_lr_scale must be > 0, got {self.head_lr_scale}")
+        if not 0 <= self.head_only_steps < max(self.steps, 1):
+            raise ValueError(
+                f"head_only_steps must be in [0, steps), got {self.head_only_steps}"
+            )
         for name in ("log_every", "save_every"):
             setattr(self, name, int(getattr(self, name)))
         if self.clip_grad_norm is not None:
@@ -169,12 +194,32 @@ class TrainSettings:
 
     def lr_at(self, step: int) -> float:
         """Return the learning rate of step ``step`` (0-based)."""
-        if self.warmup_steps > 0 and step < self.warmup_steps:
-            return self.lr * (step + 1) / self.warmup_steps
+        return self._schedule(step, 0)
+
+    @property
+    def split_heads(self) -> bool:
+        """True when the heads get their own learning rate."""
+        return self.head_lr_scale != 1.0 or self.head_only_steps > 0
+
+    def trunk_lr_at(self, step: int) -> float:
+        """The learning rate of the weights other than the heads at ``step``."""
+        if step < self.head_only_steps:
+            return 0.0
+        return self._schedule(step, self.head_only_steps)
+
+    def head_lr_at(self, step: int) -> float:
+        """The learning rate of the heads at ``step``."""
+        return self.lr_at(step) * self.head_lr_scale
+
+    def _schedule(self, step: int, start: int) -> float:
+        """The warmup and the decay of a schedule that starts at step ``start``."""
+        k = step - start
+        if self.warmup_steps > 0 and k < self.warmup_steps:
+            return self.lr * (k + 1) / self.warmup_steps
         if self.lr_schedule == "flat":
             return self.lr
-        span = max(self.steps - 1 - self.warmup_steps, 1)
-        frac = min(max(step - self.warmup_steps, 0) / span, 1.0)
+        span = max(self.steps - 1 - start - self.warmup_steps, 1)
+        frac = min(max(k - self.warmup_steps, 0) / span, 1.0)
         return self.min_lr + 0.5 * (self.lr - self.min_lr) * (
             1.0 + math.cos(math.pi * frac)
         )
@@ -286,6 +331,9 @@ class AdamW(torch.optim.Optimizer):
         super().__init__(params, defaults)
         self.seed = int(seed)
         self._generators: dict[torch.device, torch.Generator] = {}
+        #: The learning rate of single parameters, by their index in the
+        #: order of the param groups. It replaces the lr of the group.
+        self.index_lr: dict[int, float] = {}
         # All parameters get their state now, also the parameters that never
         # get a gradient. Thus every save holds the same state keys.
         for group in self.param_groups:
@@ -316,6 +364,7 @@ class AdamW(torch.optim.Optimizer):
         step = int(state["step"].item())
         lr, eps, wd = float(group["lr"]), float(group["eps"]), group["weight_decay"]
         beta1, beta2 = group["betas"]
+        lr = self.index_lr.get(index, lr)
         step_size = lr / (1 - beta1**step)
         bias_correction2_sqrt = math.sqrt(1 - beta2**step)
         assert p.grad is not None
@@ -437,8 +486,10 @@ class Trainer:
     has it (a policy from ``from_pretrained``), the trainer sets it on all
     parameters.
 
-    ``post_step(model)`` runs after each optimizer step, for example the
-    update of the MoE routing biases.
+    ``post_step(model)`` runs after each optimizer step from step
+    ``head_only_steps`` on, for example the update of the MoE routing
+    biases. ``frozen_step(model)`` runs instead in the head-only steps, for
+    example to clear the routing counts of those steps without a bias update.
 
     ``fixed_draws`` true seeds the noise generator of a window from
     ``(settings.seed, FIXED_DRAWS_KEY, batch.window_id)``. Each window from
@@ -454,12 +505,14 @@ class Trainer:
         device: torch.device,
         post_step: Callable[[nn.Module], None] | None = None,
         fixed_draws: bool = False,
+        frozen_step: Callable[[nn.Module], None] | None = None,
     ) -> None:
         self.settings = settings
         self.device = device
         self.rank = dist.get_rank()
         self.world = dist.get_world_size()
         self.post_step = post_step
+        self.frozen_step = frozen_step
         self.fixed_draws = bool(fixed_draws)
         self.step = 0
         self.micro = 0
@@ -487,14 +540,27 @@ class Trainer:
             fully_shard(block, mesh=mesh, mp_policy=mp)
         self.fsdp = fully_shard(model, mesh=mesh, mp_policy=mp)
         self.model = model
+        trained = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
         self.optimizer = AdamW(
-            [p for p in model.parameters() if p.requires_grad],
+            [p for _, p in trained],
             lr=settings.lr,
             betas=settings.betas,
             eps=settings.eps,
             weight_decay=settings.weight_decay,
             seed=settings.seed,
         )
+        # The optimizer index of each head tensor (TrainSettings.head_lr_scale).
+        self.head_indices = [
+            i
+            for i, (n, _) in enumerate(trained)
+            if any(n.endswith(t) for t in BASE_HEAD_TENSORS)
+        ]
+        if settings.split_heads and not self.head_indices:
+            raise ValueError(
+                "train.head_lr_scale and train.head_only_steps need trainable head "
+                f"tensors {list(BASE_HEAD_TENSORS)} (with LoRA: lora.train_also)"
+            )
+        self._head_ids = {id(trained[i][1]) for i in self.head_indices}
 
     def window_index(self) -> int:
         """Return the global index of the window of the current micro-step.
@@ -541,6 +607,14 @@ class Trainer:
                 part = value.detach().float().reshape(()) / n
                 sums[key] = sums[key] + part if key in sums else part
         params = [p for p in self.model.parameters() if p.grad is not None]
+        if self.step < s.head_only_steps:
+            # Only the heads train. Drop the other gradients: the clip then
+            # uses the norm of the heads (the frozen trunk would dominate a
+            # joint norm), and AdamW skips the other weights and their moments.
+            for p in params:
+                if id(p) not in self._head_ids:
+                    p.grad = None
+            params = [p for p in params if p.grad is not None]
         grads = [g for p in params if (g := p.grad) is not None]
         norm = torch.nn.utils.get_total_norm(grads)
         if isinstance(norm, DTensor):
@@ -549,13 +623,23 @@ class Trainer:
             raise FloatingPointError(f"step {self.step}: the gradient norm is {norm}")
         if s.clip_grad_norm is not None:
             torch.nn.utils.clip_grads_with_norm_(params, s.clip_grad_norm, norm)
-        lr = s.lr_at(self.step)
+        if s.split_heads:
+            lr = s.trunk_lr_at(self.step)
+            head_lr = s.head_lr_at(self.step)
+            self.optimizer.index_lr = dict.fromkeys(self.head_indices, head_lr)
+        else:
+            lr = head_lr = s.lr_at(self.step)
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
-        if self.post_step is not None:
-            self.post_step(self.model)
+        # the head-only steps leave every other weight as it is, the MoE routing
+        # biases of the trunk too
+        if self.step >= s.head_only_steps:
+            if self.post_step is not None:
+                self.post_step(self.model)
+        elif self.frozen_step is not None:
+            self.frozen_step(self.model)
         self.step += 1
         self.micro = 0
 
@@ -575,6 +659,7 @@ class Trainer:
         out.update(
             step=float(self.step),
             lr=lr,
+            **({"head_lr": head_lr} if s.split_heads else {}),
             grad_norm=float(norm),
             tokens=counts[0].item(),
             windows=counts[1].item(),
@@ -648,16 +733,26 @@ class Trainer:
 
         The weights do not come from this call: build the model from
         ``path/model`` first. The optimizer settings (betas, eps, weight
-        decay) come from ``settings``, not from the save.
+        decay) come from ``settings``, not from the save. ``head_only_steps``
+        and ``head_lr_scale`` must equal those of the save: a change would
+        move the schedule in the middle of the run.
         """
         path = Path(path)
+        meta = json.loads((path / "trainer_state.json").read_text())
+        saved = meta.get("settings", {})
+        for key, default in (("head_only_steps", 0), ("head_lr_scale", 1.0)):
+            was, now = saved.get(key, default), getattr(self.settings, key)
+            if float(was) != float(now):
+                raise ValueError(
+                    f"train.{key} is {now}, but the save {path} was made with {was}"
+                )
         state = {"optimizer": get_optimizer_state_dict(self.model, self.optimizer)}
         dcp.load(state, checkpoint_id=path / "optimizer")
         set_optimizer_state_dict(self.model, self.optimizer, state["optimizer"])
         s = self.settings
         for group in self.optimizer.param_groups:
             group.update(betas=s.betas, eps=s.eps, weight_decay=s.weight_decay)
-        self.step = int(json.loads((path / "trainer_state.json").read_text())["step"])
+        self.step = int(meta["step"])
 
     def fit(self, next_batch: Callable[[], EncodedWindow], out_dir: str | Path) -> None:
         """Train until ``settings.steps`` steps. Log and save on the way.

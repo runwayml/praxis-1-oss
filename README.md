@@ -10,8 +10,9 @@ action chunk. The robot then executes the action chunk.
 
 This repository holds the inference code and the instructions to run it. The
 code needs PyTorch and a few small packages. It does not need any other code
-base. `praxis/train/README.md` tells how to fine-tune the checkpoint on the
-DROID dataset. `praxis/sim/EVAL.md` tells how to measure a checkpoint on the
+base. `praxis/train/README.md` tells how to fine-tune `praxis-1-base` for
+your rig, with DROID as the worked example, and how to adapt `praxis-1-droid`
+to a task with LoRA on one 80 GB GPU. `praxis/sim/EVAL.md` tells how to measure a checkpoint on the
 simulated DROID tasks.
 
 ## What the model does
@@ -159,6 +160,14 @@ The tests also use the config of the earlier single-arm checkpoint `praxis-1-dro
 `f09961f066aa9fde871cd5032daedfd986dfd1f4b1901ada15f97a858b4ba6b9`): the same
 architecture with 256x416 tiles and a resize without antialias. The
 recommended sampler settings were measured on `praxis-1-droid`.
+
+To train a policy for your own single-arm rig, start from the base
+checkpoint `praxis-1-base` (54.4 GB) in `checkpoints/praxis-1-base`. It is the
+pretrained model without the action heads of a rig, so it does not run on a robot by
+itself. The SHA-256 of its `config.json` is
+`07afcef905b5120763309041d5ddd9e0edabfa6274d3c0faf4d788c6d6d16110`
+(`tests/data/praxis-1-base.json` is a copy). `praxis/train/README.md`,
+"Fine-tune the base checkpoint", tells how to make a policy from it.
 
 The checkpoint asks for the `flash` attention backend of the trunk
 (`backbone.attention.backend` in `config.json`). We made the validation
@@ -461,7 +470,8 @@ The data of the rig:
   reports its pose in its own frame, named by the `descriptor` of the
   observation (`RIG_FRAMES` in `praxis/single_arm.py`). The FR3 rig (no
   descriptor) and RoboLab report the Franka hand frame: 103.4 mm along the
-  flange z, turned -45 deg about it. The session converts the observed poses
+  flange z, turned -45 deg about it. A rig fine-tuned from the base sends
+  `"flange"`: the model frame itself. The session converts the observed poses
   to the flange and the commands back to the frame of the client. With
   `robot_state.q`, it refuses a pose more than 5 mm from the flange forward
   kinematics. On recorded FR3 requests, the converted pose is 0.18 mm

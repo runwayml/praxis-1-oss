@@ -50,7 +50,7 @@ error over the windows, per chunk and for the mean of chunks 1 to 3. Chunk
 The episodes (``droid_val_episodes.json``) are 19 successful DROID 1.0.1
 episodes of the ``"val"`` split of
 :class:`praxis.train.data.DroidWindowDataset` (``episode_index % 50 == 0``),
-so a fine-tune on the default split (``configs/finetune_droid.yaml``) has
+so a fine-tune on the default split (the default ``data.spec``) has
 not trained on them. They are the val episodes that the training data of the
 checkpoint also held out, less episode 50050: the original implementation cannot
 start a window at its frame 24, the window of the parity checks. The list

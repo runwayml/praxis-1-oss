@@ -136,7 +136,10 @@ RIG_FRAMES: dict[str, RigFrame] = {
     # with the robot base 0.58 m up.
     "remote.molmo_spaces.droid": RigFrame(0.155, _rows(NO_TURN), (0.0, 0.0, 0.58)),
     "praxis.sim": TURNED_FLANGE,
-    # A client that reports the flange itself is RigFrame(0.0, _rows(NO_TURN)).
+    # A client that reports the pose of the model frame itself: the flange (or
+    # the fixed point of the hand that its training data logged) with no
+    # turn. A rig fine-tuned from praxis-1-base sends this descriptor.
+    "flange": RigFrame(0.0, _rows(NO_TURN)),
 }
 # A converted pose must be this close to the flange forward kinematics (metres).
 FK_TOLERANCE = 0.005

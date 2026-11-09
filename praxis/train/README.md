@@ -1,49 +1,464 @@
 # Fine-tuning
 
-`scripts/finetune.py` fine-tunes the single-arm checkpoint
-`praxis-1-droid` on DROID. The script uses PyTorch FSDP and runs
-on one node with `torchrun`. The data module reads only DROID, and the
-objective needs the chunk-causal layout of the checkpoint.
+`scripts/finetune.py` fine-tunes a praxis checkpoint with PyTorch FSDP on one
+node (`torchrun`). The objective needs the chunk-causal layout of the
+checkpoint.
 
-## Run a fine-tune
+## Which recipe?
 
-1. Install the `train` extra (`huggingface_hub`, `av` and `pyarrow`):
+There are two recipes. Pick by your rig first, then by your GPUs:
 
-   ```bash
-   pip install -e ".[train]"
-   ```
+| Your case | Recipe | Start | Trains | Config | GPUs |
+|---|---|---|---|---|---|
+| **A new rig** (another arm, other cameras, other poses or gripper) | full fine-tune | the base `praxis-1-base` + new action heads | all weights | `configs/finetune_base.yaml` | one node of 8 80 GB GPUs, about 15 hours measured |
+| **The DROID rig, a new task** | LoRA | the single-arm `praxis-1-droid` | LoRA adapters of the action expert | `configs/finetune_droid_lora.yaml` | one 80 GB GPU (65 GiB measured), about 5 hours; more GPUs optional |
 
-2. Make the local DROID tree `droid_hires` (see "Data").
+- A new rig needs the full fine-tune. Its action heads and its normalization
+  are new, and the trunk must learn its cameras and its motion. LoRA keeps
+  the trunk frozen, so it is not a recipe for a new rig.
+- LoRA adapts a checkpoint that already acts on its rig. Use it only when
+  your data comes from the DROID rig: the Franka with an exterior and a wrist
+  camera, the DROID poses and gripper. It keeps the heads and the
+  normalization of `praxis-1-droid`.
+- The DROID rig with enough GPUs: either recipe fits. The full fine-tune
+  from the base is the worked example of this file.
 
-3. Set the paths of the three sets of weights in
-   `configs/finetune_droid.yaml` (see "Get the weights" in the main README). The run starts
-   from the weights of `model.checkpoint`.
+Both configs read the public Hugging Face copy of DROID (`cadene/droid_1.0.1`)
+by default, so each step runs as written; point `data.source` at your data.
+The sections "Fine-tune the base checkpoint" and "LoRA on praxis-1-droid"
+give the steps of each recipe. The sections after them are common to both.
 
-4. Run the script. The full model needs at least 4 GPUs with 80 GB. The
-   default config uses 16 micro-steps per step. We ran it on 6 GPUs (see
-   "GPUs and memory"). For N GPUs, set `--nproc_per_node N`:
+## Install
 
-   ```bash
-   torchrun --nproc_per_node 6 scripts/finetune.py --config configs/finetune_droid.yaml
-   ```
+Install the `train` extra (`huggingface_hub`, `av` and `pyarrow`) and get the
+weights ("Get the weights" in the main README):
+
+```bash
+pip install -e ".[train]"
+```
 
 To change one value without an edit of the file, use `--set`, for example
 `--set train.steps=100`. To continue a run, give a save directory with
 `--resume`.
 
+## Fine-tune the base checkpoint
+
+`praxis-1-base` is the pretrained model before any rig: the video backbone
+and the action expert, trained on the videos and the actions of many
+robots. It has no action heads and no normalization, so it does not run on
+a robot. A fine-tune makes it a policy for one rig.
+
+What the base has, and what it does not have:
+
+| Part | In the base | Comes from |
+|---|---|---|
+| Backbone (encoder, decoder) | yes | the pretraining |
+| Action expert blocks, taps, timestep and text layers | yes | the pretraining |
+| Action input layer `action_expert.action_encoder.w1` | no | `scripts/init_heads.py` |
+| Proprio input layer `action_expert.embed_proprio` | no | `scripts/init_heads.py` |
+| Action output layer `action_expert.head` | no | `scripts/init_heads.py` |
+| `normalization` of the config | no | `scripts/compute_norm_stats.py` |
+| Camera canvas (tile size, antialias) | no | the `rig` section of the run config |
+
+`load_config` refuses the base (`"embodiment": "base"`) with a message that
+points here. `praxis.checkpoint.load_base_config` reads it.
+
+### Your rig
+
+This version supports the rig of the single-arm checkpoint:
+
+- One arm. The action is the pose of the flange (or of a fixed point of
+  the hand) and one gripper value. The model sees 10 values per row:
+  `xyz`, the rotation as `rot6d` and the gripper.
+- Two cameras: an exterior camera (the left tile) and a wrist camera (the
+  right tile).
+- 15 Hz control.
+
+A rig with two arms, joint actions or other cameras needs new code in
+`praxis/single_arm.py` and in the data module.
+
+### Your data
+
+The data module reads a local LeRobot v2.x tree (`data.source`), the same
+layout as DROID. `data.spec` names its columns
+(`praxis.train.data.DatasetSpec`; the defaults are the DROID columns):
+
+| Key | Content |
+|---|---|
+| `views` | the video keys of the exterior and the wrist camera |
+| `observed_pose`, `observed_gripper` | the measured pose and gripper of each row |
+| `commanded_pose`, `commanded_gripper` | the commanded pose and gripper of each row (the action) |
+| `rotation` | the rotation format of the pose columns: `euler_xyz` (extrinsic x-y-z, radians), `quat_xyzw` or `quat_wxyz` |
+| `gripper_range` | the raw gripper values `[open, closed]`; the data module maps them to 0 and 1 |
+| `success` | a boolean column; episodes with a false row are dropped. `null` keeps all episodes |
+| `val_every` | episode `i` is a validation episode when `i % val_every == 0` |
+
+A column can be a slice of a wider column: `commanded_pose: "action[0:7]"`
+and `commanded_gripper: "action[7]"`.
+
+The data must follow these rules. The data module checks the first two;
+the other rules are your part:
+
+- 15 fps: row `i` of an episode has the timestamp `i / 15` s, and frame `i`
+  of each video belongs to row `i`. Resample other rates before.
+- Each episode has a task in `meta/episodes.jsonl` and at least 102 rows
+  (6.7 s).
+- Poses are absolute, in metres, in one fixed base frame: the same frame
+  for every episode and for the robot at serve time (the proprio is the
+  absolute pose, and the relative actions are in the axes of this frame).
+  The commanded pose is the target pose of the row (absolute, not a delta).
+- The gripper is open at `gripper_range[0]` and closed at
+  `gripper_range[1]`.
+- The camera frames are RGB. With `antialias: true` (the template) the
+  canvas code crops each frame to the DROID view aspect 16:9, resizes it to
+  the fit size (234x416 for 416-wide tiles) and trims it to the tile; a 4:3
+  camera loses about a quarter of its height. With `antialias: false` it
+  crops to the tile aspect and resizes. Tile sides are multiples of 32.
+
+### Steps
+
+All steps read one run config. `configs/finetune_base.yaml` is the
+template: set the paths, the `rig` section and `data.spec`.
+
+1. Compute the normalization statistics. The script draws
+   `rig.stats_windows` training windows (poses only, no video) and writes
+   the quantiles and the moments to `rig.stats`
+   (`praxis/train/norm_stats.py`):
+
+   ```bash
+   python scripts/compute_norm_stats.py --config configs/finetune_base.yaml
+   ```
+
+   Look at the printed vectors. The `xyz` quantiles of the actions are the
+   motion within one chunk (1.6 s): about 0.15 to 0.2 m on DROID. The gripper
+   always gets q01 = 0 and q99 = 1 (`gripper_range` maps it to [0, 1]).
+
+2. Make the checkpoint of your rig. The script adds the six head tensors
+   and the rig fields of the config, checks the result with a strict load,
+   and writes `model.checkpoint` (about 55 GB of CPU memory):
+
+   ```bash
+   python scripts/init_heads.py --config configs/finetune_base.yaml
+   ```
+
+   The new heads are random: the init of a new `ActionExpert`. The output
+   head starts small (std 1e-3), so the first predicted action velocities
+   are near zero. The sampled actions of an untrained head are then near
+   the start noise, not near a zero motion: do not serve the checkpoint
+   before the fine-tune.
+   `rig.heads` can name a safetensors file with the six tensors instead
+   (the names of `BASE_HEAD_TENSORS`), for example the heads of an earlier
+   fine-tune of the same rig saved with `safetensors.torch.save_file`.
+
+3. Run the overfit check on your data (see "Overfit check"):
+
+   ```bash
+   torchrun --nproc_per_node 4 scripts/finetune.py --config configs/finetune_base.yaml \
+     --set data.overfit_windows=10 --set objective.fixed_draws=true \
+     --set objective.text_dropout=0.0 --set objective.proprio_dropout=0.0 \
+     --set train.steps=600 --set train.grad_accum=1 --set train.lr=5e-5 \
+     --set train.warmup_steps=10 --set train.lr_schedule=flat \
+     --set train.weight_decay=0.0 --set train.save=false
+   ```
+
+   The pass rule is that of "Overfit check": the mean loss of the last 10
+   steps is below 5 % of step 1. A fail with new heads points to the data
+   first: the columns, the rotation format, the gripper range or the frame
+   rate.
+
+4. Run the fine-tune:
+
+   ```bash
+   torchrun --nproc_per_node 8 scripts/finetune.py --config configs/finetune_base.yaml
+   ```
+
+The saves under `output.dir` are full single-arm checkpoints. The policy
+server, the inference script and the simulation load them like
+`praxis-1-droid`: set their `checkpoint` path.
+
+### The recipe of a fine-tune from the base
+
+The heads are new and the rest of the model is pretrained. Two settings of
+the `train` section give the heads time first (`TrainSettings`):
+
+- `head_only_steps`: in the first steps only the heads train. The trainer
+  drops the gradients of the other weights, so the gradient clip and the
+  logged `grad_norm` use the norm of the heads, and the other weights, their
+  AdamW moments and the MoE routing biases stay as they are. Their warmup
+  and their cosine decay start after these steps.
+- `head_lr_scale`: the heads train at this multiple of the learning rate,
+  during the whole run.
+
+A resume (`--resume`) must keep both values: the trainer refuses a save
+made with other values.
+
+`configs/finetune_base.yaml` leaves both off and trains all weights at one
+learning rate: AdamW at a flat 2.5e-5 after 200 warmup steps, 32 windows per
+step (8 GPUs with `grad_accum` 4), 5,000 steps. On 8 H100 it took 10.6 s per
+step and 53.3 GiB per GPU, 15.7 hours in all. With the two settings on,
+the log shows `lr` (the trunk) and `head_lr`. The trainer refuses them when
+no head tensor trains.
+
+### What to expect
+
+We ran `configs/finetune_base.yaml` on 8 H100 (with `train.save_every=500` and
+`data.source` a local copy of the hub dataset), on all of the hub
+copy of DROID (`cadene/droid_1.0.1`, 320x180 videos, 69,932 train episodes
+before the success filter), and ran the simulation suites of
+`praxis/sim/EVAL.md` on its saves:
+
+| | `hard` (352 episodes) | `droid_guard` (56 episodes) |
+|---|---|---|
+| step 2,000 | 54/352 (15.3 %) | 24/56 (42.9 %) |
+| step 4,000 | 81/352 (23.0 %) | 35/56 (62.5 %) |
+| step 5,000 (the last save) | 67/352 (19.0 %) | 35/56 (62.5 %) |
+| `praxis-1-droid` | 199/352 (56.5 %) | 51/56 (91.1 %) |
+
+- The recipe turns the base into a working policy in one node-day: the new
+  heads start from nothing (action loss 1.31) and the policy picks, places
+  and stacks in the simulation.
+- It does not reach `praxis-1-droid`, and it is not meant to. That
+  checkpoint was fine-tuned on DROID with far more compute, on the raw
+  1280x720 videos. Most of the gap is on stacking and `peg_in_hole_6mm`.
+- The training loss is flat from about step 2,000 (action loss 0.035 to
+  0.040), while the simulation scores still move by several points from save
+  to save. Judge a fine-tune by closed-loop runs, not by the loss.
+
+### Serve a fine-tune
+
+The fine-tuned checkpoint is a single-arm checkpoint: serve it with
+`configs/serve_droid.yaml` and its path in `model.checkpoint`. The
+`data.spec` transforms (`gripper_range`, `rotation`, the column slices) apply
+only in training and are not in the checkpoint, so your robot client must
+send what the model trained on:
+
+- `descriptor: "flange"`. The server converts each pose from the frame of
+  the client's `descriptor` (`RIG_FRAMES` in `praxis/single_arm.py`) to the
+  model frame, and each command back. `"flange"` is the model frame itself,
+  the frame your training data used. With no descriptor the server takes the
+  FR3 hand frame (103.4 mm past the flange, turned -45 deg): your poses would
+  then reach the model out of distribution, and your commands would come
+  back moved;
+- `robot_state.ee_pose`: `[x, y, z, qw, qx, qy, qz]` in metres, in the same
+  base frame and for the same tool point as your data;
+- `grip`: the gripper in [0, 1], 0 = open, after your `gripper_range` map;
+- `image.exterior` and `image.wrist`: RGB frames of the two cameras.
+
+Two more settings of the serve path are for the Franka of DROID:
+
+- Do not send `robot_state.q` unless the arm is a Franka and your poses are
+  its flange. With it, the server checks the pose against the Franka flange
+  forward kinematics (5 mm) and refuses any other tool point.
+- Set `session.control_mode: none` unless your arm takes the DROID
+  impedance gains (`configs/serve_droid.yaml` sets `droid_impedance`).
+
+With an antialiased canvas the server asks the client to bound each view
+to the fit size (416x234) with its aspect kept, and then crops to 16:9.
+Training crops the full frame to 16:9 first. For 16:9 cameras the two
+orders give the same tile; for other aspects they do not (a 640x480
+frame: about 4 levels of 255, mean absolute). With a non-16:9 camera,
+crop it to 16:9 on the robot before you send it.
+
+The commands come back in the same spaces: map the gripper back with your
+`gripper_range` before you send it to the hand.
+
+### Measure a fine-tune
+
+- The action loss of the log. There is no script for a validation loss
+  yet: `scripts/finetune.py` with `data.split=val` would train on it.
+- Closed-loop runs on your robot: the only measure of a policy. For a
+  DROID-like setup, the simulation suites of `praxis/sim/EVAL.md` also
+  work.
+
+## LoRA on praxis-1-droid (one 80 GB GPU)
+
+`configs/finetune_droid_lora.yaml` adapts the single-arm checkpoint
+`praxis-1-droid` to your task on the DROID rig: the Franka with an exterior
+camera and a wrist camera, the frames and the poses of DROID. The weights of
+the checkpoint stay frozen (`praxis/train/lora.py`). Each target `nn.Linear`
+layer gets a trainable low-rank update `(alpha / rank) * B @ A`. `B` starts
+at zero, so at step 0 the model is the checkpoint. The heads and the
+normalization of the checkpoint stay, so your data must use the DROID
+columns, frames and gripper. For another rig, use the full fine-tune of the
+base ("Fine-tune the base checkpoint").
+
+This section is a worked example: it teaches `praxis-1-droid` one
+simulation task on one 80 GB GPU, end to end. The steps are the same for a
+task on a real DROID rig; there you bring your own demonstrations instead of
+step 1 and judge the result on the robot instead of in the simulation.
+
+### Your data
+
+The data is a LeRobot v2.x tree with the DROID columns (the defaults of
+`data.spec`), in the flange frame of the checkpoint, at 15 fps. The rules
+are those of "Your data" above, with two more:
+
+- The cameras, the poses and the gripper must be those of DROID: LoRA keeps
+  the heads and the normalization of `praxis-1-droid`.
+- Keep the scenes you measure on out of the training data. The worked
+  example records on scene seeds 1000 and up; the evaluation uses seeds 0
+  to 15.
+
+For the worked example, `scripts/record_sim_demos.py` records the data: a
+scripted oracle solves the task in the simulation and the recorder writes
+each successful episode as a LeRobot v2.1 tree with the DROID columns, so
+the config reads it with only `data.source` changed. `--vary` draws the
+oracle speed, approach height and timing per seed.
+
+### Steps
+
+The commands use `block_in_small_bowl`, one of the `hard` tasks of
+`praxis/sim/EVAL.md`; any task of the simulation works the same way.
+
+1. Record the demonstrations: 3,000 episodes, 1 to 2 hours on one GPU (the
+   GPU renders the views). The recorder keeps the lowest successful seeds
+   and skips the seeds the oracle fails.
+
+   ```bash
+   MUJOCO_GL=egl python scripts/record_sim_demos.py --task block_in_small_bowl \
+       --episodes 3000 --first-seed 1000 --vary --workers 64 \
+       --out data/sim_block_in_small_bowl
+   ```
+
+2. Measure the start: `praxis-1-droid` on the task, and on `droid_guard`,
+   the seven easy DROID tasks that show forgetting.
+
+   ```bash
+   MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard --tasks block_in_small_bowl \
+       --checkpoint checkpoints/praxis-1-droid --out outputs/eval/start --no-video
+   MUJOCO_GL=egl python scripts/run_sim_eval.py --suite droid_guard \
+       --checkpoint checkpoints/praxis-1-droid --out outputs/eval/start_guard --no-video
+   ```
+
+   Expect about **14 of 32** on `block_in_small_bowl` (most failures get
+   close: mean progress 0.92) and **51 of 56** on `droid_guard`. Another
+   machine can move these by a few episodes (the simulation is not bit-equal
+   across machines), so compare only runs made on the same setup.
+
+3. Train the adapters: 1,200 steps of 16 windows, about 5 hours on one
+   H100. A save is 54 GB, so save every 200 steps (or 400) rather than the
+   config's 100.
+
+   ```bash
+   torchrun --nproc_per_node 1 scripts/finetune.py --config configs/finetune_droid_lora.yaml \
+       --set data.source=data/sim_block_in_small_bowl --set train.save_every=200 \
+       --set output.dir=outputs/lora_block_in_small_bowl
+   ```
+
+4. Measure several saves (400, 800 and 1,200), each on the task and on
+   `droid_guard`, and pair each with the start:
+
+   ```bash
+   MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard --tasks block_in_small_bowl \
+       --checkpoint outputs/lora_block_in_small_bowl/step-001200/model \
+       --out outputs/eval/step1200 --no-video
+   MUJOCO_GL=egl python scripts/run_sim_eval.py --suite droid_guard \
+       --checkpoint outputs/lora_block_in_small_bowl/step-001200/model \
+       --out outputs/eval/step1200_guard --no-video
+   python scripts/compare_sim_eval.py outputs/eval/start outputs/eval/step1200
+   python scripts/compare_sim_eval.py outputs/eval/start_guard outputs/eval/step1200_guard
+   ```
+
+   Expect about **19, 16 and 20 of 32** for saves 400, 800 and 1,200 (14 at
+   the start), and `droid_guard` at **54, 51 and 50 of 56**: the task goes
+   up and the easy tasks hold. These are our runs on sampler seeds 0 and 1;
+   on seeds 0 to 3 (64 episodes) the same saves gave 34, 35 and 38 of 64
+   against 27 ("What to expect" below).
+
+   Read the mean of the saves, not the best one: a single save on 32 or 64
+   episodes moves by 10 to 25 points by chance. The stock `hard` suite runs
+   sampler seeds 0 and 1 (32 episodes per task); our runs added seeds 2 and
+   3 for 64 (`run_sim_eval.py` runs only the sampler seeds of the suite, so
+   these runs used a copy of the `hard` suite with `sampler_seeds` 0 to 3).
+
+The saves are full checkpoints (see "The `lora` section" below): serve one
+with `configs/serve_droid.yaml` like `praxis-1-droid`.
+
+### The `lora` section
+
+| Key | Default | Meaning |
+|---|---|---|
+| `rank` | 0 | The rank of the update. 0 turns LoRA off (a full fine-tune). |
+| `alpha` | 16.0 | The scale of the update is `alpha / rank`. |
+| `dropout` | 0.0 | Dropout on the input of the update. |
+| `targets` | `[expert]` | Group names of `LORA_TARGETS` or `fnmatch` patterns of `nn.Linear` module names. `expert` is the attention and MLP projections of the action expert. `backbone_attention` is the attention output projections of both towers. |
+| `train_also` | `[]` | `fnmatch` patterns of parameter names that train in full next to the adapters, for example `action_expert.head.*`. |
+
+- With `rank: 16` on the `expert` targets, 80 layers get adapters with
+  5.5 M weights in total.
+- **GPUs:** on one H100 80 GB (`--nproc_per_node 1`, 16 windows per step
+  through `train.grad_accum: 16`) the peak is **65 GiB** (one GPU holds the
+  whole frozen 27B checkpoint, so it needs an 80 GB card) and a step takes
+  **14 to 15 s**, of which about 5.5 s encode the windows: about 5 hours
+  for 1,200 steps. This is the default and the recipe of the results below.
+  The adapters have few weights, so gradient accumulation adds little
+  memory. More GPUs are an option (N GPUs x `grad_accum` windows per step):
+  on 6 GPUs (96 windows per step) it needs about 27 GB per GPU and 21 s per
+  step; on 4 GPUs with one window per GPU per step, 30 GiB per GPU and
+  1.15 s per step. The larger batches were not measured in the simulation.
+- The routers of the MoE layers are frozen, so the config sets
+  `objective.moe_balance_speed: 0`.
+- The adapters start at zero and need larger steps than full weights. The
+  config uses a peak learning rate of 1e-4 and no weight decay.
+- A save holds the merged weights in `model/`: a full praxis checkpoint with
+  the names of the start checkpoint. `PraxisPolicy.from_pretrained`, the
+  pipeline, the server and the simulation load it as they load any other
+  checkpoint. Only the target layers differ from the start checkpoint.
+- `trainable.safetensors` holds the adapters (and the `train_also`
+  weights). A LoRA run resumes from the start checkpoint, these tensors and
+  `optimizer/`: give the save with `--resume`, as for a full fine-tune.
+
+### What to expect
+
+We ran the steps above on four `hard` tasks, one adapter per task, each on
+one H100, with 64 episodes per task (sampler seeds 0 to 3). The number is
+the mean of saves 400, 800 and 1,200 minus `praxis-1-droid`, paired per
+episode, with a 95 % bootstrap interval.
+
+| Task | `praxis-1-droid` | step 400 | step 800 | step 1,200 | mean of the saves − start | `droid_guard`, start → mean of the saves |
+|---|---|---|---|---|---|---|
+| `block_in_small_bowl` | 27/64 | 34/64 | 35/64 | 38/64 | +13.5 points [−1.0, +28.1] | 51/56 → 51.7/56 |
+| `two_blocks_in_bowl` | 33/64 | 40/64 | 40/64 | 41/64 | +11.5 points [−3.1, +26.0] | 51/56 → 49.7/56 |
+| `peg_in_hole_6mm` | 30/64 | 25/64 | 42/64 | 37/64 | +7.3 points [−7.8, +21.9] | 51/56 → 50.3/56 |
+| `stack_three_blocks` | 12/64 | 13/64 | 11/64 | 11/64 | −0.5 points [−10.4, +8.9] | 51/56 → 53.0/56 |
+| **all four tasks** (256 episodes) | | | | | **+7.9 points [+1.3, +14.8]** | |
+| **the first three** (192 episodes) | | | | | **+10.8 points [+2.4, +19.3]** | |
+
+- **The adapters help on three of the four tasks: about +10 points**, for
+  example `block_in_small_bowl` from 42 % to 53 to 59 %, and 8 of the 9
+  saves of those tasks are above the start. Pooled over the tasks the
+  interval excludes 0; the pooling was chosen after the evaluation (the
+  rule fixed before it was per task), so read it as a post-hoc check. One
+  task alone on 64 episodes is too small to show a gain of this size, so
+  each per-task interval still includes 0.
+- `stack_three_blocks`, the hardest of the four (19 % at the start), does
+  not move. A task that far from the checkpoint needs more than adapters on
+  3,000 demonstrations.
+- **The easy tasks hold:** `droid_guard` stays at 48 to 54 of 56 for every
+  save (51 at the start).
+- **It does not overfit the demonstrations.** On 50 held-out demonstrations
+  (other scene seeds) the action loss falls through step 1,200 and stays
+  within 6 % of the loss on the training demonstrations, for every task.
+  The success does not follow the loss: the loss falls at every save while
+  `peg_in_hole_6mm` goes 25, 42, 37 of 64. As for the full fine-tune, judge
+  the adapters by closed-loop runs, not by the loss.
+
 ## Data
 
-The data module reads a local copy of DROID in the LeRobot v2 layout
-(`data.source`). The videos of the copy must be the raw DROID videos: MP4
-files with 1280x720 frames. The checkpoint was trained on these frames.
+The data module reads DROID in the LeRobot v2 layout (`data.source`): a
+Hugging Face dataset id or a local directory. The configs use the public
+Hugging Face copy `cadene/droid_1.0.1`, read from the hub, so anyone can
+reproduce a run. Its videos have 320x180 frames; the checkpoints were
+trained on the raw DROID videos (MP4 files with 1280x720 frames), so with
+the hub copy the tiles are upscales with less detail.
 
-The Hugging Face copy of DROID (`cadene/droid_1.0.1`) has the same layout,
-but its videos have 320x180 frames. With these videos the tiles are
-upscales with less detail. The data module can read the Hugging Face copy
-from the hub (`--set data.source=cadene/droid_1.0.1`). Use this only for a
-quick test.
+With many loader processes (8 GPUs x 12), reads from the hub hit its rate
+limit for anonymous users. For a long run, download the dataset first
+(`huggingface-cli download cadene/droid_1.0.1 --repo-type dataset
+--local-dir <dir>`, about 290,000 files) and set `data.source` to the
+directory.
 
-Make the local tree as follows:
+For the full resolution, make a local tree with the raw videos as follows:
 
 1. Download the metadata and the parquet files of the Hugging Face copy.
    Do not download its videos:
@@ -168,8 +583,8 @@ the chunks before it. Thus one window trains every context depth from 0 to
 - The MoE layers dispatch the tokens to the experts in chunks of 65,536
   tokens.
 
-`configs/finetune_droid.yaml` holds these values in the `objective`
-section. The docstring of the module gives each term in detail.
+The `objective` section of the configs holds these values (the LoRA config
+sets `moe_balance_speed: 0`, see "LoRA on praxis-1-droid"). The docstring of the module gives each term in detail.
 
 ## The recipe
 
@@ -178,8 +593,9 @@ The training loop:
 - Each GPU holds a shard of the policy. The autoencoder and the text
   encoder are frozen. Each GPU holds a full copy of them.
 - The optimizer is AdamW with betas (0.9, 0.95), eps 1e-8 and weight decay
-  1e-4 on all trained parameters. With the learning rates below,
-  `lr * weight_decay` is less than 3e-8. Then the float32 decay factor is
+  1e-4 on all trained parameters (the LoRA config: 0). With the learning
+  rate of `configs/finetune_base.yaml` (2.5e-5), `lr * weight_decay` is less
+  than 3e-8. Then the float32 decay factor is
   1.0, and the decay has no effect.
 - The weights and the AdamW moments stay in bfloat16. The update runs in
   float32. Then a stochastic rounding writes it back to bfloat16. A plain
@@ -187,23 +603,10 @@ The training loop:
 - The gradient clip is 1.0 on the norm of all gradients.
 - Activation checkpointing is on (`train.activation_checkpointing`).
 
-The defaults of `configs/finetune_droid.yaml` are the recipe of our
-fine-tune runs on one node with 6 GPUs:
-
-- 96 windows per step: 6 GPUs and 16 micro-steps (`train.grad_accum`).
-- A learning rate of 3e-6 after 50 steps of linear warmup. Then a cosine
-  decay to 3e-7 at step 1,200 (`train.lr_schedule: cosine`).
-- 1,200 steps and a save every 100 steps.
-
-We use a small learning rate that decays for two reasons:
-
-- After a new start, AdamW moves each weight by about the learning rate in
-  each of the first steps.
-- The checkpoint is already trained on DROID. A short run must not move it
-  far.
-
-`train.lr_schedule: flat` keeps the learning rate constant after the
-warmup.
+The values of each recipe are in its section: "The recipe of a fine-tune
+from the base" and "LoRA on praxis-1-droid". `train.lr_schedule: flat` keeps
+the learning rate constant after the warmup; `cosine` decays it to
+`train.min_lr` at the last step.
 
 ## GPUs and memory
 
@@ -217,9 +620,9 @@ with `praxis-1-droid-k` (`praxis-1-droid` has the same model and a smaller canva
 |---|---|---|---|---|
 | 4 | 1 | 4 | 73.0 GiB | 3.7 s (the overfit check: no data loading) |
 | 6 | 16 | 96 | 64.1 GiB | 43 s (about 11 s of it is the wait for data) |
+| 8 | 4 | 32 | 53.3 GiB | 10.6 s (`configs/finetune_base.yaml` from `praxis-1-base`, the 320x180 hub videos; 2.4 s of it is data) |
 
-The 6-GPU row used 12 loader processes per GPU. On 6 GPUs, 1,200 steps
-take about 14 hours, plus the saves.
+The 6-GPU row used 12 loader processes per GPU and the raw 1280x720 videos.
 
 The script turns on the expandable segments of the CUDA memory allocator.
 Without them, the GPU memory can fragment, and a run can stop when the
@@ -230,8 +633,9 @@ memory is full. To use other allocator settings, set
 
 One micro-step reads one window on each GPU. `train.grad_accum` sets the
 number of micro-steps of one optimizer step. Thus one step uses
-`N * train.grad_accum` windows on N GPUs. To keep 96 windows per step on 8
-GPUs, set `train.grad_accum=12`.
+`N * train.grad_accum` windows on N GPUs. `configs/finetune_base.yaml` uses
+32 windows per step on 8 GPUs (`grad_accum` 4); on 16 GPUs, set
+`train.grad_accum=2`.
 
 After each micro-step, FSDP reduce-scatters the gradients and adds them to
 the sharded gradients. The sharded gradients stay in bfloat16 between the
@@ -244,43 +648,6 @@ gradient accumulation.
 With `train.no_sync: true`, each GPU keeps the full float32 gradients until
 the last micro-step. For this model they take 109 GB per GPU. Thus use
 `no_sync` only for small models.
-
-## LoRA
-
-`configs/finetune_droid_lora.yaml` runs a LoRA fine-tune
-(`praxis/train/lora.py`). The weights of the checkpoint stay frozen. Each
-target `nn.Linear` layer gets a trainable low-rank update
-`(alpha / rank) * B @ A`. `B` starts at zero, so at step 0 the model is the
-checkpoint.
-
-```bash
-torchrun --nproc_per_node 6 scripts/finetune.py --config configs/finetune_droid_lora.yaml
-```
-
-The `lora` section of the config:
-
-| Key | Default | Meaning |
-|---|---|---|
-| `rank` | 0 | The rank of the update. 0 turns LoRA off (a full fine-tune). |
-| `alpha` | 16.0 | The scale of the update is `alpha / rank`. |
-| `dropout` | 0.0 | Dropout on the input of the update. |
-| `targets` | `[expert]` | Group names of `LORA_TARGETS` or `fnmatch` patterns of `nn.Linear` module names. `expert` is the attention and MLP projections of the action expert. `backbone_attention` is the attention output projections of both towers. |
-| `train_also` | `[]` | `fnmatch` patterns of parameter names that train in full next to the adapters, for example `action_expert.head.*`. |
-
-- With `rank: 16` on the `expert` targets, 80 layers get adapters with
-  5.5 M weights in total. The run needs about 27 GB per GPU on 6 GPUs, and
-  one step takes about 21 s (a full fine-tune: 64 GB and 43 s).
-- The routers of the MoE layers are frozen, so the config sets
-  `objective.moe_balance_speed: 0`.
-- The adapters start at zero and need larger steps than full weights. The
-  config uses a peak learning rate of 1e-4 and no weight decay.
-- A save holds the merged weights in `model/`: a full praxis checkpoint with
-  the names of the start checkpoint. `PraxisPolicy.from_pretrained`, the
-  pipeline, the server and the simulation load it as they load any other
-  checkpoint. Only the target layers differ from the start checkpoint.
-- `trainable.safetensors` holds the adapters (and the `train_also`
-  weights). A LoRA run resumes from the start checkpoint, these tensors and
-  `optimizer/`: give the save with `--resume`, as for a full fine-tune.
 
 ## Outputs
 
@@ -295,8 +662,9 @@ steps and after the last step, it writes a save directory `step-NNNNNN`:
 - `optimizer/` (109 GB) and `trainer_state.json` hold the state to continue
   the run. To continue, give the save directory with `--resume`.
 
-One save takes 163 GB. The script does not delete old saves. The default
-config (1,200 steps, a save every 100 steps) writes 12 saves, about 2 TB.
+One save takes 163 GB. The script does not delete old saves.
+`configs/finetune_base.yaml` (5,000 steps, a save every 1,000 steps) writes 5
+saves, about 815 GB.
 Make sure that the disk has space for all saves of the run, or set a larger
 `train.save_every`. Only `--resume` reads `optimizer/`. Thus you can delete
 `optimizer/` of the old saves and keep `model/`. `train.save: false` turns
@@ -308,11 +676,15 @@ Before a long run, do the overfit check. It trains on the same 10 windows
 again and again, so the model learns them by heart:
 
 ```bash
-torchrun --nproc_per_node 4 scripts/finetune.py --config configs/finetune_droid_overfit.yaml
+torchrun --nproc_per_node 4 scripts/finetune.py --config configs/finetune_base.yaml \
+  --set data.overfit_windows=10 --set objective.fixed_draws=true \
+  --set objective.text_dropout=0.0 --set objective.proprio_dropout=0.0 \
+  --set train.steps=600 --set train.grad_accum=1 --set train.lr=5e-5 \
+  --set train.warmup_steps=10 --set train.lr_schedule=flat \
+  --set train.weight_decay=0.0 --set train.save=false
 ```
 
-`configs/finetune_droid_overfit.yaml` is the default config with these
-changes:
+The overrides change these values of `configs/finetune_base.yaml`:
 
 - `data.overfit_windows: 10`: rank 0 draws the first 10 windows of the
   `train` split and encodes them once. All GPUs then use only these windows.
@@ -339,7 +711,9 @@ hardware. Pass rule:
 If the loss still falls at the last step, run more steps
 (`--set train.steps=1200`).
 
-We ran the check on 4 H100 GPUs with `praxis-1-droid-k`:
+We ran the check on 4 H100 GPUs from `praxis-1-droid-k`, a single-arm checkpoint with
+trained heads. From the base, the new heads start with a larger action loss,
+so the loss of step 1 is larger; the pass rule is the same.
 
 | | 4 H100 GPUs |
 |---|---|

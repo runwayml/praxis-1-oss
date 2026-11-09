@@ -26,7 +26,8 @@ results reproducible. `README.md` is the user guide.
 | `packages/praxis-sim/` | the simulator as its own package, `praxis_sim` (no torch): the single-arm DROID rig, tasks, scripted oracles, the Gymnasium wrapper. `praxis.sim.<module>` names still resolve to it |
 | `packages/praxis-sim/src/praxis_sim/eval_suites.py`, `praxis/sim/EVAL.md` | the fixed evaluation scenarios of the single-arm checkpoint |
 | `praxis/eval/` | the offline action error on fixed DROID windows (oracle and deployment legs) |
-| `praxis/train/` | the DROID fine-tune: data windows, objective, MoE balance, FSDP trainer. See `praxis/train/README.md` |
+| `praxis/train/` | the fine-tune: data windows (`DatasetSpec` for other single-arm rigs), objective, MoE balance, FSDP trainer, normalization statistics. See `praxis/train/README.md` |
+| `praxis/rig.py` | the base checkpoint `praxis-1-base` to a single-arm checkpoint: rig config fields and new head tensors (`scripts/init_heads.py`) |
 | `configs/` | the YAML settings of inference, serving, simulation and fine-tuning |
 | `scripts/` | the command-line entry points |
 | `tests/` | the CPU unit tests; `tests/tiny_model.py` builds a small model without weights |
@@ -44,7 +45,8 @@ results reproducible. `README.md` is the user guide.
 | The offline action error | `python scripts/run_action_error_eval.py --checkpoint CKPT --vae VAE --text-encoder TEXT --data DROID --out OUT` |
 | Inference speed, per stage, on a local GPU | `python scripts/benchmark_inference.py --config configs/serve_droid.yaml` |
 | Latency of a running server | `python -m praxis.serve.latency --url ws://<host>:8000/api/v1/session` |
-| A DROID fine-tune | `torchrun --nproc_per_node 6 scripts/finetune.py --config configs/finetune_droid.yaml` |
+| A fine-tune of the base on your rig (full, 8 GPUs) | `scripts/compute_norm_stats.py`, `scripts/init_heads.py`, then `scripts/finetune.py`, all with `--config configs/finetune_base.yaml` |
+| A LoRA fine-tune of `praxis-1-droid` on the DROID rig (one 80 GB GPU) | `torchrun --nproc_per_node 1 scripts/finetune.py --config configs/finetune_droid_lora.yaml` |
 
 The extras of `pyproject.toml`: `kernels` (the text encoder kernels of the
 validation results), `video`, `serve`, `sim`, `train`, `dev`.
@@ -104,7 +106,7 @@ the start is a check of the setup.
 `praxis/train/README.md` describes the data, the objective, the recipe, the
 memory, the overfit check and the step-0 checks of the training
 objective. A change to the objective or the data must keep those
-checks: run the overfit check (`configs/finetune_droid_overfit.yaml`) and the
+checks: run the overfit check (`praxis/train/README.md`, "Overfit check") and the
 tests of `tests/test_train_*.py`.
 
 ## Writing style

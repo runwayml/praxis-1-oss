@@ -78,8 +78,9 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -94,7 +95,12 @@ from huggingface_hub.errors import RemoteEntryNotFoundError
 from torch.utils.data import IterableDataset, get_worker_info
 
 from praxis.robot_io import ASPECT_TOL, contiguous_chunk_geometry, pose8_to_10d
-from praxis.single_arm import canvas_size, matrix_to_quat_xyzw, tile_clip
+from praxis.single_arm import (
+    canvas_size,
+    matrix_to_quat_xyzw,
+    quat_xyzw_to_matrix,
+    tile_clip,
+)
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +136,138 @@ MAX_FAILURES = 20
 # Tries of a hub download, and the longest wait between two tries (s).
 HUB_TRIES = 12
 HUB_MAX_WAIT = 120.0
+
+
+#: The rotation formats of a pose column (after the 3 position values).
+ROTATIONS: dict[str, int] = {"euler_xyz": 3, "quat_xyzw": 4, "quat_wxyz": 4}
+#: A quaternion with a smaller norm has no rotation: its episode is dropped.
+MIN_QUAT_NORM = 1e-6
+_COLUMN_REF = re.compile(r"^(?P<name>[^\[\]]+?)(?:\[(?P<a>\d*)(?::(?P<b>\d*))?\])?$")
+
+
+@dataclass(frozen=True)
+class ColumnRef:
+    """A column of the parquet files, or a slice of its values.
+
+    ``"name"`` is the whole column. ``"name[i]"`` is value ``i`` and
+    ``"name[a:b]"`` the values ``a`` to ``b - 1`` of each row.
+    """
+
+    name: str
+    start: int | None = None
+    stop: int | None = None
+
+    @classmethod
+    def parse(cls, ref: str) -> ColumnRef:
+        m = _COLUMN_REF.match(str(ref).strip())
+        if m is None:
+            raise ValueError(f"bad column reference {ref!r}")
+        a, b = m.group("a"), m.group("b")
+        if a is None:
+            return cls(m.group("name"))
+        start = int(a) if a else 0
+        if b is None and ":" not in str(ref):
+            return cls(m.group("name"), start, start + 1)
+        return cls(m.group("name"), start, int(b) if b else None)
+
+
+@dataclass
+class DatasetSpec:
+    """The columns of a single-arm LeRobot v2.x dataset (``data.spec`` of the run config).
+
+    The defaults are the columns of DROID. For another single-arm rig, give
+    the columns of your dataset:
+
+    * ``views``: the video keys of the exterior camera and the wrist camera,
+      in this order (left tile, right tile).
+    * ``observed_pose`` and ``commanded_pose``: the flange pose of each row,
+      3 position values (metres) and the rotation in the format ``rotation``.
+      ``observed_*`` is the measured state, ``commanded_*`` the action. A
+      column reference can take a slice of a column: ``"action[0:6]"``.
+    * ``observed_gripper`` and ``commanded_gripper``: one gripper value per
+      row (``"action[6]"`` for value 6 of a column).
+    * ``rotation``: ``"euler_xyz"`` (extrinsic x-y-z Euler angles, radians,
+      as DROID), ``"quat_xyzw"`` or ``"quat_wxyz"``.
+    * ``gripper_range``: the raw gripper values ``[open, closed]``. The data
+      code maps them to 0 (open) and 1 (closed) and clips to [0, 1].
+    * ``success``: a boolean column. An episode with a false row leaves the
+      pool. None keeps every episode.
+    * ``val_every``: the episodes with ``episode_index % val_every == 0`` are
+      the ``"val"`` split.
+
+    The pose must be the pose of the flange (or of a fixed point of the
+    hand) in one fixed base frame, the same for every episode and for the
+    robot at serve time: the proprio is the absolute pose, and the axes of
+    the relative actions are those of the base frame.
+    """
+
+    views: tuple[str, ...] = VIEWS
+    observed_pose: str = OBSERVED[0]
+    observed_gripper: str = OBSERVED[1]
+    commanded_pose: str = COMMANDED[0]
+    commanded_gripper: str = COMMANDED[1]
+    rotation: str = "euler_xyz"
+    gripper_range: tuple[float, float] = (0.0, 1.0)
+    success: str | None = SUCCESS
+    val_every: int = VAL_EVERY
+
+    def __post_init__(self) -> None:
+        self.views = tuple(str(v) for v in self.views)
+        if len(self.views) != 2:
+            raise ValueError(f"spec.views needs 2 video keys, got {self.views}")
+        if self.rotation not in ROTATIONS:
+            raise ValueError(
+                f"spec.rotation must be one of {sorted(ROTATIONS)}, got {self.rotation!r}"
+            )
+        lo, hi = (float(x) for x in self.gripper_range)
+        if lo == hi:
+            raise ValueError("spec.gripper_range needs two different values")
+        self.gripper_range = (lo, hi)
+        self.val_every = int(self.val_every)
+        if self.val_every < 1:
+            raise ValueError(f"spec.val_every must be >= 1, got {self.val_every}")
+        for ref in self.pose_refs():
+            ColumnRef.parse(ref)
+
+    def pose_refs(self) -> tuple[str, str, str, str]:
+        """The observed pose, observed gripper, commanded pose and commanded gripper."""
+        return (
+            self.observed_pose,
+            self.observed_gripper,
+            self.commanded_pose,
+            self.commanded_gripper,
+        )
+
+    def check_widths(self, features: Mapping[str, Mapping[str, object]]) -> None:
+        """Check the values per row of each pose column against ``rotation``.
+
+        ``features`` is ``features`` of ``meta/info.json``. A pose column must
+        give ``3 + ROTATIONS[rotation]`` values per row and a gripper column 1.
+        A feature without a ``shape`` is not checked. Raises ``ValueError``
+        with the column, so a wrong slice or rotation fails at the start, not
+        in every episode.
+        """
+        pose = 3 + ROTATIONS[self.rotation]
+        wants = (pose, 1, pose, 1)
+        for ref, want in zip(self.pose_refs(), wants, strict=True):
+            col = ColumnRef.parse(ref)
+            shape = features.get(col.name, {}).get("shape")
+            if not isinstance(shape, list | tuple):
+                continue
+            n = math.prod(int(x) for x in shape)
+            got = n if col.start is None else len(range(n)[col.start : col.stop])
+            if got != want:
+                raise ValueError(
+                    f"spec column {ref!r} gives {got} values per row; it needs "
+                    f"{want} (rotation {self.rotation!r})"
+                )
+
+    def columns(self) -> list[str]:
+        """The parquet columns that the dataset reads, without the timestamp."""
+        names = [ColumnRef.parse(r).name for r in self.pose_refs()]
+        if self.success is not None:
+            names.append(self.success)
+        return list(dict.fromkeys(names))
 
 
 @dataclass
@@ -240,6 +378,41 @@ def droid_pose8(cartesian: np.ndarray, gripper: np.ndarray) -> np.ndarray:
     )
 
 
+def rig_pose8(
+    pose: np.ndarray,
+    gripper: np.ndarray,
+    rotation: str = "euler_xyz",
+    gripper_range: tuple[float, float] = (0.0, 1.0),
+) -> np.ndarray:
+    """Convert dataset poses to pose8 rows ``[xyz3, quat_wxyz4, grip1]`` (float32).
+
+    ``pose`` is ``(T, 3 + r)``: the position and the rotation in the format
+    ``rotation`` (:data:`ROTATIONS`). ``gripper`` is ``(T,)`` raw values;
+    ``gripper_range`` ``(open, closed)`` maps them to 0 and 1, then the
+    values are clipped to [0, 1]. ``"euler_xyz"`` with the range ``(0, 1)``
+    is :func:`droid_pose8`, bit for bit. A quaternion goes through the
+    rotation matrix and back, so its sign is the sign of the DROID path.
+    """
+    if rotation not in ROTATIONS:
+        raise ValueError(
+            f"rotation must be one of {sorted(ROTATIONS)}, got {rotation!r}"
+        )
+    width = 3 + ROTATIONS[rotation]
+    p = np.asarray(pose, dtype=np.float64).reshape(-1, width)
+    lo, hi = gripper_range
+    g = np.asarray(gripper, dtype=np.float64).reshape(-1)
+    if (lo, hi) != (0.0, 1.0):
+        g = (g - lo) / (hi - lo)
+    if rotation == "euler_xyz":
+        return droid_pose8(p, g)
+    q = p[:, 3:7] if rotation == "quat_xyzw" else p[:, [4, 5, 6, 3]]
+    if (bad := np.flatnonzero(np.linalg.norm(q, axis=1) < MIN_QUAT_NORM)).size:
+        raise ValueError(f"rows {bad[:5].tolist()} have a zero quaternion")
+    quat = matrix_to_quat_xyzw(quat_xyzw_to_matrix(q))[:, [3, 0, 1, 2]]
+    grip = np.clip(g, 0.0, 1.0)
+    return np.concatenate([p[:, :3], quat, grip[:, None]], axis=1).astype(np.float32)
+
+
 # ---------------------------------------------------------------------------
 # Window start
 # ---------------------------------------------------------------------------
@@ -314,9 +487,15 @@ def read_frames(path: Path, start: int, stop: int) -> np.ndarray:
 
 
 def _column(table: pa.Table, name: str, width: int) -> np.ndarray:
-    """Return a numeric column as float64 ``(T, width)``. Bad values raise ``ValueError``."""
-    x = np.asarray(table.column(name).to_pylist(), dtype=np.float64)
+    """Return a numeric column as float64 ``(T, width)``. Bad values raise ``ValueError``.
+
+    ``name`` can take a slice of the values of each row (:class:`ColumnRef`).
+    """
+    ref = ColumnRef.parse(name)
+    x = np.asarray(table.column(ref.name).to_pylist(), dtype=np.float64)
     x = x.reshape(x.shape[0], -1)
+    if ref.start is not None:
+        x = x[:, ref.start : ref.stop]
     if x.shape[1] != width or not np.isfinite(x).all():
         raise ValueError(f"column {name} has the shape {x.shape} or bad values")
     return x
@@ -370,15 +549,17 @@ class DroidWindowDataset(IterableDataset):
         world_size: int = 1,
         cache_dir: str | None = None,
         max_episodes: int | None = None,
+        spec: DatasetSpec | None = None,
         episodes: list[int] | None = None,
     ) -> None:
         super().__init__()
+        self.spec = spec = DatasetSpec() if spec is None else spec
         if split not in ("train", "val"):
             raise ValueError(f"split must be 'train' or 'val', got {split!r}")
         if not 0 <= rank < world_size:
             raise ValueError(f"rank {rank} is not in [0, {world_size})")
         if int(config["action_space"]["dim"]) != ACTION_DIM:
-            raise ValueError(f"DROID needs a {ACTION_DIM}-D action space")
+            raise ValueError(f"the single-arm rig needs a {ACTION_DIM}-D action space")
         chunking = config["chunking"]
         self.action_chunk = int(chunking["action_chunk"])
         n_chunks = int(chunking["n_chunks"])
@@ -394,11 +575,11 @@ class DroidWindowDataset(IterableDataset):
             raise ValueError(f"chunking.window_frames is not {self.window_frames}")
         self.fps = float(chunking["grid_hz"])
         tile_h, width = canvas_size(config)
-        self.tile = (tile_h, width // len(VIEWS))
+        self.tile = (tile_h, width // len(spec.views))
         self.aspect_tol = float(config["video"].get("aspect_tol", ASPECT_TOL))
         self.antialias = bool(config["video"].get("antialias", False))
         if config.get("pose_frame") != "flange":
-            raise ValueError("DROID windows need the config pose_frame 'flange'")
+            raise ValueError("the windows need the config pose_frame 'flange'")
         self.source = str(source)
         self.seed, self.rank = int(seed), int(rank)
         self.cache_dir = cache_dir
@@ -413,10 +594,9 @@ class DroidWindowDataset(IterableDataset):
             raise ValueError(f"{source} is not a LeRobot v2.x dataset")
         if float(info["fps"]) != self.fps:
             raise ValueError(f"{source} has {info['fps']} fps, the model {self.fps}")
-        if missing := {*VIEWS, *OBSERVED, *COMMANDED, SUCCESS, TIMESTAMP} - set(
-            info["features"]
-        ):
+        if missing := {*spec.views, *spec.columns(), TIMESTAMP} - set(info["features"]):
             raise ValueError(f"{source} has no feature {sorted(missing)}")
+        spec.check_widths(info["features"])
         self.data_path = str(info["data_path"])
         self.video_path = str(info["video_path"])
         self.chunks_size = int(info["chunks_size"])
@@ -434,7 +614,7 @@ class DroidWindowDataset(IterableDataset):
             if episodes is not None:
                 if index not in wanted:
                     continue
-            elif (index % VAL_EVERY == 0) != (split == "val"):
+            elif (index % spec.val_every == 0) != (split == "val"):
                 continue
             if not task or not window_fits(ep["length"], self.window_frames, self.fps):
                 continue
@@ -476,7 +656,7 @@ class DroidWindowDataset(IterableDataset):
 
     def _files(self, index: int) -> list[str]:
         """Return the parquet file and the two video files of an episode."""
-        return [self._data(index), *(self._video(index, v) for v in VIEWS)]
+        return [self._data(index), *(self._video(index, v) for v in self.spec.views)]
 
     def _file(self, rel: str) -> Path:
         """Return the local path of a dataset file. Download the file when necessary.
@@ -522,49 +702,67 @@ class DroidWindowDataset(IterableDataset):
         * Row ``i`` does not have the timestamp ``i / fps``.
         * A pose has bad values.
         """
+        spec = self.spec
         table = pq.read_table(
-            self._file(self._data(index)),
-            columns=[*OBSERVED, *COMMANDED, SUCCESS, TIMESTAMP],
+            self._file(self._data(index)), columns=[*spec.columns(), TIMESTAMP]
         )
-        if not all(table.column(SUCCESS).to_pylist()):
+        if spec.success is not None and not all(table.column(spec.success).to_pylist()):
             raise ValueError(f"episode {index} is not successful")
         t = _column(table, TIMESTAMP, 1)[:, 0]
         if np.abs(t - np.arange(t.shape[0]) / self.fps).max() > TIMESTAMP_TOL:
             raise ValueError(f"episode {index}: row i is not at the time i / fps")
+        width = 3 + ROTATIONS[spec.rotation]
+
+        def pose8(pose: str, grip: str) -> np.ndarray:
+            return rig_pose8(
+                _column(table, pose, width),
+                _column(table, grip, 1),
+                spec.rotation,
+                spec.gripper_range,
+            )
+
         return DroidEpisode(
             index=index,
             prompt=self.prompts[index],
-            observed=droid_pose8(
-                _column(table, OBSERVED[0], 6), _column(table, OBSERVED[1], 1)
-            ),
-            commanded=droid_pose8(
-                _column(table, COMMANDED[0], 6), _column(table, COMMANDED[1], 1)
-            ),
+            observed=pose8(spec.observed_pose, spec.observed_gripper),
+            commanded=pose8(spec.commanded_pose, spec.commanded_gripper),
         )
 
-    def load_window(self, episode: DroidEpisode, anchor: int) -> TrainingWindow:
-        """Build the window of ``episode`` that starts at frame ``anchor``."""
+    def window_poses(
+        self, episode: DroidEpisode, anchor: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return the actions ``(T, 10)`` and the proprio ``(K, 10)`` of a window.
+
+        These are the ``actions_rel`` and ``proprio_abs`` of
+        :meth:`load_window`, without the video.
+        """
         stop = anchor + self.window_frames
         if anchor < 0 or stop > episode.observed.shape[0]:
             raise ValueError(f"episode {episode.index}: no window at frame {anchor}")
-        ext, wrist = (
-            read_frames(self._file(self._video(episode.index, v)), anchor, stop)
-            for v in VIEWS
-        )
-        clip = tile_clip(
-            ext, wrist, *self.tile, self.aspect_tol, antialias=self.antialias
-        )
         obs, cmd = episode.observed, episode.commanded
         starts = [anchor + off for off, _ in self.geometry]
         actions = [
             pose8_to_10d(cmd[sk : sk + ln], anchor8=obs[sk])
             for sk, (_, ln) in zip(starts, self.geometry, strict=True)
         ]
+        return np.concatenate(actions, axis=0), pose8_to_10d(obs[starts])
+
+    def load_window(self, episode: DroidEpisode, anchor: int) -> TrainingWindow:
+        """Build the window of ``episode`` that starts at frame ``anchor``."""
+        actions, proprio = self.window_poses(episode, anchor)
+        stop = anchor + self.window_frames
+        ext, wrist = (
+            read_frames(self._file(self._video(episode.index, v)), anchor, stop)
+            for v in self.spec.views
+        )
+        clip = tile_clip(
+            ext, wrist, *self.tile, self.aspect_tol, antialias=self.antialias
+        )
         return TrainingWindow(
             frames=clip[0].permute(1, 0, 2, 3).to(torch.uint8).contiguous(),
             prompt=episode.prompt,
-            actions_rel=np.concatenate(actions, axis=0),
-            proprio_abs=pose8_to_10d(obs[starts]),
+            actions_rel=actions,
+            proprio_abs=proprio,
             meta={"episode": episode.index, "anchor": anchor, "source": self.source},
         )
 

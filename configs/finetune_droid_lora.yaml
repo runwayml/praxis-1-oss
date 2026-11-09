@@ -1,10 +1,20 @@
-# LoRA fine-tune of the single-arm checkpoint on DROID: the weights of the
-# checkpoint stay frozen; low-rank adapters of the action expert train.
-#   torchrun --nproc_per_node 6 scripts/finetune.py --config configs/finetune_droid_lora.yaml
-# The other sections are those of configs/finetune_droid.yaml, with a larger
-# learning rate (adapters start at zero and need larger steps than full
-# weights). A save holds the merged weights in model/ (a full praxis
-# checkpoint) and the adapters in trainable.safetensors.
+# LoRA fine-tune of the single-arm checkpoint praxis-1-droid on DROID data:
+# the recipe for one 80 GB GPU on the same rig (the DROID Franka with an
+# exterior and a wrist camera). The weights of the checkpoint stay frozen;
+# low-rank adapters of the action expert train. For a new rig, fine-tune the
+# base in full instead (configs/finetune_base.yaml).
+#   torchrun --nproc_per_node 1 scripts/finetune.py --config configs/finetune_droid_lora.yaml
+# One step uses N GPUs x grad_accum windows: 16 on 1 GPU. Measured on one H100
+# 80 GB: 65 GiB peak, 14 to 15 s per step, about 5 hours for 1,200 steps. The
+# adapters have few weights, so gradient accumulation adds little memory. More
+# GPUs are an option: 6 GPUs give 96 windows per step at about 27 GB per GPU,
+# but that larger batch was not measured in the simulation. A save holds the
+# merged weights in model/ (a full praxis checkpoint) and the adapters in
+# trainable.safetensors.
+#
+# data.source is the public Hugging Face copy of DROID, so the file runs as it
+# is. Its videos are 320x180; point data.source at your own LeRobot tree of
+# DROID-rig episodes for your task.
 
 model:
   checkpoint: checkpoints/praxis-1-droid   # the start weights (praxis checkpoint)
@@ -13,7 +23,7 @@ model:
   vae_norm_block_c: null
 
 data:
-  source: droid_hires
+  source: cadene/droid_1.0.1   # a Hugging Face dataset id or a local LeRobot v2.x tree
   split: train
   cache_dir: null
   max_episodes: null

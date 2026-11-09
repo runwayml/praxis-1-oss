@@ -81,17 +81,22 @@ from safetensors.torch import save_file
 from torch import nn
 
 __all__ = [
+    "BASE_EMBODIMENT",
+    "BASE_HEAD_TENSORS",
+    "BASE_REFUSED",
     "EXPERT_TRUNK_ROPE",
     "LAYOUT_STAMP_CHUNK_CAUSAL",
     "CheckpointError",
     "ModelVariant",
     "expected_dtype",
+    "load_base_config",
     "load_checkpoint",
     "load_config",
     "load_state_dict_from_dir",
     "model_variant",
     "save_checkpoint",
     "strict_load",
+    "validate_base_config",
     "validate_config",
     "verify_checksums",
     "weight_map",
@@ -119,9 +124,30 @@ def _listing(title: str, names: list[str]) -> str:
 
 
 def load_config(path: str | Path) -> dict[str, object]:
-    """Read ``config.json`` from a checkpoint directory and validate it."""
+    """Read ``config.json`` from a checkpoint directory and validate it.
+
+    A base checkpoint (``"embodiment": "base"``) raises ``CheckpointError``
+    (``BASE_REFUSED``): it has no action heads. Use ``load_base_config`` to
+    read it, and ``scripts/init_heads.py`` to make a checkpoint that loads.
+    """
     config = json.loads((Path(path) / CONFIG_NAME).read_text())
+    if config.get("embodiment") == BASE_EMBODIMENT:
+        raise CheckpointError(BASE_REFUSED)
     validate_config(config)
+    return config
+
+
+def load_base_config(path: str | Path) -> dict[str, object]:
+    """Read and validate the ``config.json`` of a base checkpoint.
+
+    A base checkpoint holds the backbone and the action expert without the
+    tensors of one rig (``BASE_HEAD_TENSORS``). Its config has
+    ``"embodiment": "base"`` and no ``action_space``, ``normalization``,
+    ``pose_frame``, patch dims or camera canvas. Raises ``CheckpointError``
+    for a config of another embodiment.
+    """
+    config = json.loads((Path(path) / CONFIG_NAME).read_text())
+    validate_base_config(config)
     return config
 
 
@@ -189,6 +215,41 @@ OTHER_RIG_REFUSED = (
     "single-arm or the bimanual checkpoint"
 )
 
+#: The embodiment of a base checkpoint: the backbone and the action expert
+#: without the tensors of one rig.
+BASE_EMBODIMENT = "base"
+
+#: The tensors of one rig. A base checkpoint has none of them.
+#: ``scripts/init_heads.py`` adds them.
+BASE_HEAD_TENSORS = (
+    "action_expert.action_encoder.w1.weight",
+    "action_expert.action_encoder.w1.bias",
+    "action_expert.embed_proprio.weight",
+    "action_expert.embed_proprio.bias",
+    "action_expert.head.weight",
+    "action_expert.head.bias",
+)
+
+#: The error of ``load_config`` for a base checkpoint.
+BASE_REFUSED = (
+    'config: "embodiment": "base" is a base checkpoint without action heads; '
+    "make a checkpoint of your rig with scripts/init_heads.py "
+    "(praxis/train/README.md, 'Fine-tune the base checkpoint')"
+)
+
+#: The config sections of one rig. A base config has none of them.
+_RIG_KEYS = ("action_space", "normalization", "pose_frame")
+_RIG_EXPERT_KEYS = ("action_patch_dim", "proprio_patch_dim")
+_RIG_VIDEO_KEYS = (
+    "height",
+    "width",
+    "views",
+    "tile_bounds_rows_cols",
+    "tile_height",
+    "tile_width",
+    "antialias",
+)
+
 #: The error of a config of another model variant. ``{reason}`` names the
 #: field that differs from the checkpoint.
 OTHER_VARIANT_REFUSED = (
@@ -211,6 +272,8 @@ _TOP_KEYS = frozenset(
         "action_space",
         "normalization",
         "pose_frame",
+        "source",
+        "heads",
     }
 )
 _EXPERT_KEYS = frozenset(
@@ -725,6 +788,8 @@ def validate_config(config: Mapping[str, object]) -> None:
             f"config: format_version {version!r} is unknown; this version reads "
             f"{FORMAT_VERSION}"
         )
+    if "heads" in config:
+        raise CheckpointError("config: only a base config has the section heads")
     _check_single_arm(config, version)
     model_variant(config)
     _check_rig(config, str(embodiment))
@@ -755,6 +820,38 @@ def _check_rig(config: Mapping[str, object], embodiment: str) -> None:
             f"config: action_space.dim {dim} needs proprio_patch_dim {dim} and "
             f"action_patch_dim {dim * FRAMES_PER_TOKEN}, got {proprio} and {action}"
         )
+
+
+def validate_base_config(config: Mapping[str, object]) -> None:
+    """Check the config of a base checkpoint (``"embodiment": "base"``).
+
+    The model fields must be those of the single-arm checkpoint (format
+    version 2 and the variant fields of ``model_variant``). The rig fields
+    (``action_space``, ``normalization``, ``pose_frame``, the patch dims of
+    the expert, the views and the tile size of the canvas) must be absent.
+    Raises ``CheckpointError``.
+    """
+    if config.get("embodiment") != BASE_EMBODIMENT:
+        raise CheckpointError(
+            f'config: a base checkpoint needs "embodiment": "{BASE_EMBODIMENT}", '
+            f"got {config.get('embodiment')!r}"
+        )
+    if config.get("format_version") != FORMAT_VERSION:
+        raise CheckpointError(
+            f"config: a base checkpoint needs format_version {FORMAT_VERSION}, "
+            f"got {config.get('format_version')!r}"
+        )
+    expert = _section(config, "action_expert")
+    video = _section(config, "video")
+    rig = [k for k in _RIG_KEYS if k in config]
+    rig += [f"action_expert.{k}" for k in _RIG_EXPERT_KEYS if k in expert]
+    rig += [f"video.{k}" for k in _RIG_VIDEO_KEYS if k in video]
+    if rig:
+        raise CheckpointError(f"config: a base config has rig fields: {rig}")
+    layout = _section(config, "backbone").get("layout", "chunk_causal")
+    if layout != "chunk_causal":
+        raise CheckpointError(f"config: backbone.layout {layout!r} is unknown")
+    model_variant(config)
 
 
 def expected_dtype(config: Mapping[str, object], name: str) -> torch.dtype:

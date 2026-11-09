@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -31,6 +32,7 @@ from torch.distributed.checkpoint.state_dict import (
 from praxis.action_expert import run_expert_on_taps_k
 from praxis.backbone import TEXT, VIDEO, chunk_causal_positions
 from praxis.checkpoint import (
+    BASE_HEAD_TENSORS,
     CheckpointError,
     load_config,
     save_checkpoint,
@@ -254,54 +256,73 @@ def test_text_cache_keeps_recent_prompts() -> None:
     assert calls == ["a", "bb", "ccc", "bb", "a"]
 
 
-def test_config_holds_the_recipe() -> None:
+CONFIGS = Path(__file__).resolve().parents[1] / "configs"
+TRAIN_README = Path(__file__).resolve().parents[1] / "praxis" / "train" / "README.md"
+
+
+def test_base_config_holds_the_recipe() -> None:
+    """configs/finetune_base.yaml: the full fine-tune of a new rig from the base."""
     import yaml
 
-    path = Path(__file__).resolve().parents[1] / "configs" / "finetune_droid.yaml"
-    cfg = yaml.safe_load(path.read_text())
+    cfg = yaml.safe_load((CONFIGS / "finetune_base.yaml").read_text())
     s = TrainSettings(**cfg["train"])
-    assert cfg["model"]["checkpoint"] == "checkpoints/praxis-1-droid"
-    assert (s.lr, s.warmup_steps, s.betas) == (3e-6, 50, (0.9, 0.95))
-    assert (s.lr_schedule, s.min_lr, s.steps) == ("cosine", 3e-7, 1200)
-    assert (s.grad_accum, s.save_every) == (16, 100)
+    assert cfg["model"]["base"] == "checkpoints/praxis-1-base"
+    assert "lora" not in cfg  # a new rig trains all weights
+    assert (s.lr, s.warmup_steps, s.betas) == (2.5e-5, 200, (0.9, 0.95))
+    assert (s.lr_schedule, s.steps) == ("flat", 5000)
+    assert (s.grad_accum, s.save_every) == (4, 1000)  # 32 windows per step on 8 GPUs
     assert (s.weight_decay, s.eps, s.clip_grad_norm) == (1e-4, 1e-8, 1.0)
-    assert cfg["data"]["source"] == "droid_hires"
-    assert cfg["objective"]["text_dropout"] == 0.1
+    assert not s.split_heads  # the heads train at the trunk learning rate
+    assert cfg["data"]["source"] == "cadene/droid_1.0.1"
+    # The objective of the config is the default of ObjectiveSettings.
+    assert ObjectiveSettings(**cfg["objective"]) == ObjectiveSettings()
     # The overfit options are off.
     assert s.save is True and cfg["data"]["overfit_windows"] is None
     assert ObjectiveSettings(**cfg["objective"]).fixed_draws is False
 
 
-def test_overfit_config() -> None:
+def test_lora_config_adapts_the_droid_checkpoint() -> None:
+    """configs/finetune_droid_lora.yaml: LoRA on praxis-1-droid, the same rig."""
     import yaml
 
-    configs = Path(__file__).resolve().parents[1] / "configs"
-    recipe = yaml.safe_load((configs / "finetune_droid.yaml").read_text())
-    cfg = yaml.safe_load((configs / "finetune_droid_overfit.yaml").read_text())
+    cfg = yaml.safe_load((CONFIGS / "finetune_droid_lora.yaml").read_text())
+    s = TrainSettings(**cfg["train"])
+    lora = LoRASettings(**cfg["lora"])
+    assert cfg["model"]["checkpoint"] == "checkpoints/praxis-1-droid"
+    assert "base" not in cfg["model"]  # the heads of the checkpoint stay
+    assert (lora.rank, lora.alpha, list(lora.targets)) == (16, 32.0, ["expert"])
+    assert not s.split_heads
+    assert cfg["objective"]["moe_balance_speed"] == 0.0  # the routers are frozen
+    assert cfg["data"]["source"] == "cadene/droid_1.0.1"
+    assert s.save is True and cfg["data"]["overfit_windows"] is None
+
+
+def _readme_overfit_overrides() -> list[str]:
+    """The --set values of the command in the "Overfit check" section."""
+    text = TRAIN_README.read_text()
+    section = text.split("## Overfit check", 1)[1].split("\n## ", 1)[0]
+    command = section.split("```bash", 1)[1].split("```", 1)[0]
+    assert "--config configs/finetune_base.yaml" in command
+    return re.findall(r"--set (\S+)", command)
+
+
+def test_overfit_overrides() -> None:
+    """The overfit command of the README changes only the overfit values of the base config."""
+    from praxis.train.run_config import load_run_config
+
+    overrides = _readme_overfit_overrides()
+    recipe = load_run_config(str(CONFIGS / "finetune_base.yaml"), [])
+    cfg = load_run_config(str(CONFIGS / "finetune_base.yaml"), overrides)
     s = TrainSettings(**cfg["train"])
     o = ObjectiveSettings(**cfg["objective"])
     assert cfg["data"]["overfit_windows"] == 10 and o.fixed_draws is True
     assert (o.text_dropout, o.proprio_dropout, s.weight_decay) == (0.0, 0.0, 0.0)
-    assert s.save is False and s.log_every == 1 and 0 < s.warmup_steps < s.steps
-    assert (s.grad_accum, s.lr, s.lr_schedule) == (1, 5e-5, "flat")
+    assert s.save is False and 0 < s.warmup_steps < s.steps
+    assert (s.steps, s.grad_accum, s.lr, s.lr_schedule) == (600, 1, 5e-5, "flat")
+    assert not s.split_heads
     # All other values are the values of the recipe.
-    changed = {
-        ("data", "overfit_windows"),
-        ("objective", "fixed_draws"),
-        ("objective", "text_dropout"),
-        ("objective", "proprio_dropout"),
-        ("train", "steps"),
-        ("train", "grad_accum"),
-        ("train", "lr"),
-        ("train", "warmup_steps"),
-        ("train", "lr_schedule"),
-        ("train", "weight_decay"),
-        ("train", "save"),
-        ("output", "dir"),
-    }
-    assert cfg.keys() == recipe.keys()
+    changed = {tuple(x.split("=", 1)[0].split(".")) for x in overrides}
     for section, values in recipe.items():
-        assert cfg[section].keys() == values.keys(), section
         for key, value in values.items():
             if (section, key) not in changed:
                 assert cfg[section][key] == value, (section, key)
@@ -331,13 +352,15 @@ def test_command_line_values_with_an_exponent_are_numbers(
         "data.max_episodes=1e3",
         "data.source=cadene/droid_1.0.1",
     ]
-    cfg = script.load_config(str(root / "configs" / "finetune_droid.yaml"), overrides)
+    cfg = script.load_run_config(
+        str(root / "configs" / "finetune_base.yaml"), overrides
+    )
     assert cfg["train"]["lr"] == 1e-5
     assert cfg["objective"]["moe_seq_balance_coef"] == 1e-3
     assert cfg["objective"]["text_dropout"] == 0.05
     assert cfg["data"]["max_episodes"] == 1000.0
     assert cfg["data"]["source"] == "cadene/droid_1.0.1"
-    assert cfg["train"]["steps"] == 1200 and cfg["output"]["resume"] is None
+    assert cfg["train"]["steps"] == 5000 and cfg["output"]["resume"] is None
 
 
 def test_settings() -> None:
@@ -413,7 +436,16 @@ def _worker(rank: int, world: int, init: str, job: dict) -> None:
                 assert not policy.load_state_dict(saved, strict=False).unexpected_keys
         model = StandIn(policy)
         settings = _settings(**job.get("settings", {}))
-        trainer = Trainer(model, model.blocks(), settings, torch.device("cpu"))
+        post_steps: list[int] = []
+        frozen_steps: list[int] = []
+        trainer = Trainer(
+            model,
+            model.blocks(),
+            settings,
+            torch.device("cpu"),
+            post_step=lambda _m: post_steps.append(trainer.step),
+            frozen_step=lambda _m: frozen_steps.append(trainer.step),
+        )
         if job.get("resume"):
             trainer.load(job["resume"])
         batches = _batches(trainer, make_windows(8))
@@ -426,6 +458,14 @@ def _worker(rank: int, world: int, init: str, job: dict) -> None:
                 trainer.save(out)
                 result["saved_state"] = _full_state(trainer)
         result["state"] = _full_state(trainer)
+        result["post_steps"] = post_steps
+        result["frozen_steps"] = frozen_steps
+        # the AdamW step count of each trained tensor
+        result["adam_steps"] = {
+            n: int(trainer.optimizer.state[p]["step"].item())
+            for n, p in trainer.model.named_parameters()
+            if p in trainer.optimizer.state
+        }
         if rank == 0:
             torch.save(result, out / "result.pt")
     finally:
@@ -819,3 +859,116 @@ def test_save_checkpoint_format(tmp_path: Path) -> None:
         assert loaded[name].dtype == t.dtype and torch.equal(loaded[name], t)
     with pytest.raises(CheckpointError, match="exists"):
         save_checkpoint(root, tensors, {})
+
+
+# ---------------------------------------------------------------------------
+# New heads: head_lr_scale and head_only_steps
+# ---------------------------------------------------------------------------
+
+
+def test_head_schedule() -> None:
+    s = TrainSettings(
+        lr=1e-4,
+        min_lr=1e-5,
+        warmup_steps=10,
+        steps=110,
+        lr_schedule="cosine",
+        head_lr_scale=10.0,
+        head_only_steps=20,
+    )
+    assert s.split_heads
+    assert [s.trunk_lr_at(i) for i in (0, 19)] == [0.0, 0.0]
+    # The trunk warmup starts at step 20 and its cosine ends at the last step.
+    assert s.trunk_lr_at(20) == pytest.approx(1e-5)
+    assert s.trunk_lr_at(29) == pytest.approx(1e-4)
+    assert s.trunk_lr_at(109) == pytest.approx(1e-5)
+    # The heads follow the plain schedule, times the scale.
+    for i in (0, 9, 15, 60, 109):
+        assert s.head_lr_at(i) == pytest.approx(10.0 * s.lr_at(i))
+    # The defaults keep one learning rate for all weights.
+    plain = TrainSettings(lr=1e-4, warmup_steps=10, steps=110, lr_schedule="cosine")
+    assert not plain.split_heads
+    assert all(plain.trunk_lr_at(i) == plain.lr_at(i) for i in range(110))
+    with pytest.raises(ValueError):
+        TrainSettings(head_lr_scale=0.0)
+    with pytest.raises(ValueError):
+        TrainSettings(steps=10, head_only_steps=10)
+
+
+def test_adamw_index_lr_replaces_the_group_lr() -> None:
+    a = torch.nn.Parameter(torch.ones(4))
+    b = torch.nn.Parameter(torch.ones(4))
+    opt = AdamW([a, b], lr=0.0, weight_decay=0.0, seed=0)
+    opt.index_lr = {1: 1e-1}
+    a.grad = torch.ones(4)
+    b.grad = torch.ones(4)
+    opt.step()
+    assert torch.equal(a.detach(), torch.ones(4))
+    assert torch.allclose(b.detach(), torch.full((4,), 0.9))
+
+
+def test_head_only_steps_train_only_the_heads(tmp_path: Path) -> None:
+    """In the head-only steps every other weight keeps its bits. The heads move."""
+    start = tiny_policy().state_dict()
+    got = _run(
+        1,
+        tmp_path / "h",
+        steps=2,
+        settings={"steps": 10, "head_only_steps": 3, "head_lr_scale": 10.0},
+    )
+    state = got["state"]
+    moved = [k for k in start if not torch.equal(_bytes(state[k]), _bytes(start[k]))]
+    assert moved and set(moved) <= set(BASE_HEAD_TENSORS), moved
+    assert "action_expert.head.weight" in moved
+    # no MoE bias update (post_step) in the head-only steps; frozen_step instead
+    assert got["post_steps"] == []
+    assert got["frozen_steps"] == [0, 1]
+    # AdamW updated only the heads: the gradients of the other tensors were
+    # dropped before the clip and the step, so their moments did not move
+    heads = {n for n in got["adam_steps"] if n.endswith(tuple(BASE_HEAD_TENSORS))}
+    assert heads and all(got["adam_steps"][n] == 2 for n in heads)
+    assert all(v == 0 for n, v in got["adam_steps"].items() if n not in heads)
+    after = _run(
+        1,
+        tmp_path / "h4",
+        steps=5,
+        settings={"steps": 10, "head_only_steps": 3, "head_lr_scale": 10.0},
+    )
+    assert after["post_steps"] == [3, 4]
+    assert after["frozen_steps"] == [0, 1, 2]
+    assert all(after["adam_steps"][n] == 5 for n in heads)
+    # the other tensors train from step 3 on (a tensor without a gradient in
+    # the tiny model never gets a step)
+    trunk = {v for n, v in after["adam_steps"].items() if n not in heads}
+    assert trunk == {0, 2} or trunk == {2}, trunk
+
+
+def test_resume_across_the_head_only_steps(tmp_path: Path) -> None:
+    """A resume inside the head-only steps continues bit for bit past their
+    end. A resume with other head settings is refused."""
+    head = {"steps": 10, "head_only_steps": 3, "head_lr_scale": 10.0}
+    straight = _run(2, tmp_path / "a", steps=5, save_at=2, settings=head)
+    save = tmp_path / "a" / "step-000002"
+    resumed = _run(2, tmp_path / "b", steps=5, resume=str(save), settings=head)
+    _assert_exact(resumed["state"], straight["state"])
+    np.testing.assert_array_equal(resumed["loss"], straight["loss"][2:])
+    for key, value in (("head_only_steps", 4), ("head_lr_scale", 5.0)):
+        with pytest.raises(Exception, match=key):
+            _run(
+                1,
+                tmp_path / f"c-{key}",
+                steps=3,
+                resume=str(save),
+                settings={**head, key: value},
+            )
+
+
+def test_head_settings_need_trainable_heads(tmp_path: Path) -> None:
+    with pytest.raises(Exception, match="head"):
+        _run(
+            1,
+            tmp_path / "x",
+            steps=1,
+            lora=LORA,
+            settings={"head_only_steps": 1},
+        )

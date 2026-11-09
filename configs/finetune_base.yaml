@@ -1,0 +1,102 @@
+# Fine-tuning of the base checkpoint (praxis-1-base) on your single-arm rig.
+# praxis/train/README.md, "Fine-tune the base checkpoint", explains each step.
+# The same file drives three commands, in this order:
+#   python scripts/compute_norm_stats.py --config configs/finetune_base.yaml
+#   python scripts/init_heads.py --config configs/finetune_base.yaml
+#   torchrun --nproc_per_node 8 scripts/finetune.py --config configs/finetune_base.yaml
+#
+# The train values are a simple recipe for one node of 8 GPUs, about 15 hours:
+# AdamW at a flat 2.5e-5 after 200 warmup steps, all weights (the new heads
+# too) at one learning rate, 32 windows per step (8 GPUs x grad_accum 4),
+# 5,000 steps. Measured on 8 H100 with this file (save_every 500, data.source a
+# local copy of the hub dataset): 10.6 s per step, 53.3 GiB per GPU, 15.7 hours
+# in all, setup and save uploads included. On all of the hub copy of DROID the
+# last save scores 19 % on the sim `hard` suite and 62.5 % on `droid_guard`
+# (README, "What to expect"). Measure your run (README, "Measure a
+# fine-tune"). On N GPUs, keep N x grad_accum = 32.
+#
+# data.source is the public Hugging Face copy of DROID, so the file runs as it
+# is. Its videos are 320x180: use it to reproduce the steps, then point
+# data.source at your own LeRobot tree.
+
+model:
+  base: checkpoints/praxis-1-base                    # the base checkpoint, without heads
+  checkpoint: outputs/finetune_base/praxis-1-myrig   # init_heads.py writes it; the fine-tune starts from it
+  vae_weights: weights/Wan2.2_VAE.pth                # public Wan2.2 VAE weights
+  text_encoder: weights/Qwen3.5-2B                   # public Qwen3.5-2B (Hugging Face layout)
+  vae_norm_block_c: null
+
+rig:
+  name: myrig                  # the normalization.domain of the new config
+  # The tile of each camera. The canvas is two tiles wide: exterior left, wrist right.
+  # praxis-1-droid uses 224x416 with antialias. An antialiased tile must be no
+  # taller than tile_width * 720 / 1280.
+  tile_height: 224
+  tile_width: 416
+  antialias: true
+  stats: outputs/finetune_base/norm_stats.json       # compute_norm_stats.py writes it
+  stats_windows: 20000         # random windows of the train split for the statistics
+  seed: 0                      # the window draw of the statistics
+  head_seed: 0                 # the init of the new head tensors
+  heads: null                  # or a safetensors file with the 6 head tensors
+
+data:
+  # A Hugging Face dataset id or a local LeRobot v2.x tree at 15 fps with the
+  # two camera videos, the poses and meta/episodes.jsonl with a task per
+  # episode (README, "Your data"). The default is DROID from the hub.
+  source: cadene/droid_1.0.1
+  split: train
+  cache_dir: null
+  max_episodes: null
+  num_workers: 12
+  text_cache_size: 1024
+  overfit_windows: null
+  # The columns of your dataset (praxis.train.data.DatasetSpec). The values
+  # below are the DROID defaults; change them to the columns of your data.
+  spec:
+    views: [observation.images.exterior_1_left, observation.images.wrist_left]
+    observed_pose: observation.state.cartesian_position   # xyz + rotation, measured
+    observed_gripper: observation.state.gripper_position
+    commanded_pose: action.cartesian_position             # xyz + rotation, commanded
+    commanded_gripper: action.gripper_position
+    rotation: euler_xyz        # euler_xyz | quat_xyzw | quat_wxyz
+    gripper_range: [0.0, 1.0]  # raw [open, closed]
+    success: is_episode_successful   # null = keep all episodes
+    val_every: 50
+
+objective:
+  video_weight: 1.0
+  action_weight: 1.0
+  video_timestep_shift: 5.0
+  text_dropout: 0.1
+  proprio_dropout: 0.1
+  moe_balance_speed: 0.001
+  moe_seq_balance_coef: 0.0001
+  action_guard: 5.0
+  moe_dispatch_chunk_size: 65536
+  fixed_draws: false
+
+train:
+  steps: 5000
+  grad_accum: 4                # 32 windows per step on 8 GPUs (N GPUs x grad_accum)
+  lr: 2.5e-5                   # flat after the warmup
+  warmup_steps: 200
+  lr_schedule: flat
+  min_lr: 2.5e-5
+  head_lr_scale: 1.0           # the new heads train at the same learning rate
+  head_only_steps: 0           # no head-only phase
+  betas: [0.9, 0.95]
+  weight_decay: 1.0e-4
+  eps: 1.0e-8
+  clip_grad_norm: 1.0
+  activation_checkpointing: true
+  no_sync: false
+  reduce_dtype: float32
+  seed: 0
+  log_every: 1
+  save_every: 1000             # one save is 163 GB (54 GB model, 109 GB optimizer state)
+  save: true
+
+output:
+  dir: outputs/finetune_base
+  resume: null

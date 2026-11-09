@@ -1,8 +1,8 @@
-"""Fine-tune a praxis checkpoint on DROID with FSDP on one or more GPUs.
+"""Fine-tune a praxis checkpoint with FSDP on one or more GPUs.
 
 Usage:
-    torchrun --nproc_per_node N scripts/finetune.py --config configs/finetune_droid.yaml [--set key=value ...]
-    torchrun --nproc_per_node N scripts/finetune.py --config configs/finetune_droid.yaml --resume output/step-000500
+    torchrun --nproc_per_node N scripts/finetune.py --config configs/finetune_base.yaml [--set key=value ...]
+    torchrun --nproc_per_node N scripts/finetune.py --config configs/finetune_base.yaml --resume output/step-000500
 
 Each GPU holds a shard of the policy, a full copy of the frozen autoencoder
 and a full copy of the frozen text encoder. Each GPU draws its own training
@@ -24,7 +24,7 @@ fine-tune) and the trainable tensors in ``trainable.safetensors``. A LoRA run
 resumes from the start checkpoint and these tensors.
 
 ``train.save: false`` turns off all saves. The overfit check
-(``configs/finetune_droid_overfit.yaml``) uses it.
+(``praxis/train/README.md``, "Overfit check") uses it.
 
 Overfit check: with ``data.overfit_windows: N``, rank 0 draws the first N
 windows of the ``data.split`` sequence and encodes them once. The draw uses
@@ -46,7 +46,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import re
 import sys
 from collections.abc import Callable
 from dataclasses import fields
@@ -56,7 +55,6 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import torch.distributed as dist
-import yaml
 from safetensors.torch import load_file
 from torch.utils.data import DataLoader
 
@@ -64,7 +62,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from praxis.model import PraxisPolicy
 from praxis.text_encoder import TextEncoder
-from praxis.train.data import DroidWindowDataset, fixed_windows
+from praxis.train.data import DatasetSpec, DroidWindowDataset, fixed_windows
 from praxis.train.lora import LoRASettings, apply_lora, lora_parameters
 from praxis.train.moe import update_expert_biases
 from praxis.train.objective import (
@@ -73,6 +71,7 @@ from praxis.train.objective import (
     ObjectiveSettings,
     encode_window,
 )
+from praxis.train.run_config import load_run_config
 from praxis.train.trainer import (
     TRAINABLE_NAME,
     TextCache,
@@ -85,39 +84,13 @@ from praxis.train.trainer import (
 from praxis.vae import Autoencoder
 
 
-class ConfigLoader(yaml.SafeLoader):
-    """The YAML loader of the run config. It reads ``1e-4`` as a number.
-
-    YAML 1.1 reads a number with an exponent and without a dot as a string.
-    """
-
-
-ConfigLoader.add_implicit_resolver(
-    "tag:yaml.org,2002:float",
-    re.compile(r"^[-+]?[0-9]+(\.[0-9]*)?[eE][-+]?[0-9]+$"),
-    list("-+0123456789"),
-)
-
-
-def load_config(path: str, overrides: list[str]) -> dict:
-    cfg = yaml.load(Path(path).read_text(), Loader=ConfigLoader)
-    for item in overrides:
-        key, value = item.split("=", 1)
-        node = cfg
-        parts = key.split(".")
-        for p in parts[:-1]:
-            node = node.setdefault(p, {})
-        node[parts[-1]] = yaml.load(value, Loader=ConfigLoader)
-    return cfg
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--config", required=True)
     ap.add_argument("--set", action="append", default=[])
     ap.add_argument("--resume", default=None, help="a save directory to continue from")
     args = ap.parse_args()
-    cfg = load_config(args.config, args.set)
+    cfg = load_run_config(args.config, args.set)
     if args.resume:
         cfg["output"]["resume"] = args.resume
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -167,6 +140,9 @@ def main() -> None:
         device,
         post_step=lambda mod: update_expert_biases(mod, objective.moe_balance_speed),
         fixed_draws=objective.fixed_draws,
+        # the head-only steps keep the routing biases: only clear their counts,
+        # so the first bias update sees the counts of one step
+        frozen_step=lambda mod: update_expert_biases(mod, 0.0),
     )
     if resume:
         trainer.load(resume)
@@ -196,6 +172,7 @@ def main() -> None:
             world_size=world,
             cache_dir=d.get("cache_dir"),
             max_episodes=d.get("max_episodes"),
+            spec=DatasetSpec(**d.get("spec") or {}),
         )
         workers = int(d["num_workers"])
         loader = DataLoader(dataset, batch_size=None, num_workers=workers)
@@ -246,6 +223,7 @@ def _overfit_batches(
             seed=settings.seed * 1_000_003,
             cache_dir=d.get("cache_dir"),
             max_episodes=d.get("max_episodes"),
+            spec=DatasetSpec(**d.get("spec") or {}),
         )
         raw = fixed_windows(dataset, int(d["overfit_windows"]))
         picks = [(w.meta["episode"], w.meta["anchor"]) for w in raw]

@@ -134,3 +134,25 @@ def test_a_refused_observation_keeps_the_frame_of_the_session() -> None:
     with pytest.raises(ValueError, match="mm from the flange"):
         sess.prepare(obs)
     assert sess.frame is sa.FR3_HAND
+
+
+def test_flange_descriptor_is_the_model_frame() -> None:
+    """The ``"flange"`` client (a rig fine-tuned from the base) reports the pose
+    of the model frame: the conversion is the identity both ways."""
+    frame = sa.rig_frame({"descriptor": "flange"})
+    rng = np.random.default_rng(0)
+    q = rng.normal(size=(20, 4))
+    q /= np.linalg.norm(q, axis=1, keepdims=True)
+    pose8 = np.concatenate(
+        [rng.uniform(-0.8, 0.8, (20, 3)), q, rng.uniform(0, 1, (20, 1))], axis=1
+    ).astype(np.float32)
+    model = sa.pose8_to_model(pose8, frame)
+    np.testing.assert_allclose(model[:, :3], pose8[:, :3], atol=1e-7)
+    for row, want in zip(model, pose8, strict=True):
+        got = unit_quat_wxyz_to_matrix(row[3:7].astype(np.float64))
+        np.testing.assert_allclose(
+            got, unit_quat_wxyz_to_matrix(want[3:7].astype(np.float64)), atol=1e-6
+        )
+        xyz, rot = sa.pose_to_rig(row[:3].astype(np.float64), got, frame)
+        np.testing.assert_allclose(xyz, want[:3], atol=1e-6)
+        np.testing.assert_allclose(rot, got, atol=1e-12)

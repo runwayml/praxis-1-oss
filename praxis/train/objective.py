@@ -98,7 +98,7 @@ __all__ = [
 class ObjectiveSettings:
     """Settings of the training objective (the ``objective`` section of a run).
 
-    The defaults are the values of ``configs/finetune_droid.yaml``.
+    The defaults are the ``objective`` values of ``configs/finetune_base.yaml``.
     ``moe_balance_speed`` is the step of the routing bias update. When it is
     above 0, the sequence balance loss uses the expert picks without the
     routing bias. ``action_guard`` is the largest

@@ -128,7 +128,11 @@ def _write_video(path: Path, frames: np.ndarray, rate: int) -> None:
 @pytest.fixture(scope="module")
 def root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A LeRobot v2.1 directory with the episodes of ``EPISODES``."""
-    root = tmp_path_factory.mktemp("droid")
+    return make_droid_tree(tmp_path_factory.mktemp("droid"))
+
+
+def make_droid_tree(root: Path) -> Path:
+    """Write a LeRobot v2.1 directory with the episodes of ``EPISODES`` to ``root``."""
     features = {k: {} for k in (*data.VIEWS, *data.OBSERVED, *data.COMMANDED)}
     info = {
         "codebase_version": "v2.1",

@@ -151,8 +151,9 @@ say so with the results.
 
 ## Result: the DROID fine-tune of the checkpoint
 
-We fine-tuned `praxis-1-droid-k` on DROID with
-`configs/finetune_droid.yaml` (see `praxis/train/README.md`) and ran the two
+This is a past measurement: we fine-tuned `praxis-1-droid-k` on DROID in full (3e-6 after
+50 warmup steps, cosine to 3e-7 at step 1,200, 96 windows per step; the repo
+no longer ships that config, see `praxis/train/README.md`) and ran the two
 suites on each save with the settings of that run (`cfg_scale` 1.0,
 `cfg_video_scale` 1.0, `t_shift` 8.0, `max_context_chunks` 3). These are `praxis-1-droid-k`
 results. `praxis-1-droid` has not been fine-tuned and measured this way yet. The best
