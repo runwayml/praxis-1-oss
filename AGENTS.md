@@ -37,6 +37,7 @@ results reproducible. `README.md` is the user guide.
 |---|---|
 | Inference on recorded episodes | `python scripts/run_inference.py --config configs/inference_droid.yaml` |
 | One closed-loop sim episode | `MUJOCO_GL=egl python scripts/run_sim.py --config configs/sim_droid.yaml --set task.name=block_in_bowl` |
+| The bimanual YAM sim | `MUJOCO_GL=egl python scripts/run_sim_yam.py --config configs/sim_yam.yaml --checkpoint CKPT --out OUT` |
 | An evaluation suite | `MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard --checkpoint CKPT --out OUT` |
 | Compare two suite runs | `python scripts/compare_sim_eval.py OUT_A OUT_B` |
 | The policy server | `python -m praxis.serve --config configs/serve_droid.yaml` |

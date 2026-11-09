@@ -1,0 +1,47 @@
+# praxis closed-loop simulation suite with the bimanual checkpoint (two YAM arms).
+# The sampler and session values are the serve defaults of configs/serve_yam.yaml.
+#
+#   MUJOCO_GL=egl python scripts/run_sim_yam.py --config configs/sim_yam.yaml \
+#       --checkpoint checkpoints/praxis-1-yam --out outputs/sim_yam --seeds 2
+#
+# Override single values on the command line: --set sampler.num_steps=4
+
+model:
+  checkpoint: checkpoints/praxis-1-yam  # praxis checkpoint directory (--checkpoint replaces it)
+  vae_weights: weights/Wan2.2_VAE.pth                # public Wan2.2 VAE weights
+  text_encoder: weights/Qwen3.5-2B                   # public Qwen3.5-2B (Hugging Face layout)
+  device: cuda
+
+sampler:
+  num_steps: 2          # Euler steps per chunk (window_joint layout)
+  cfg_scale: 1.0        # text guidance scale of the actions (1.0 = off)
+  cfg_video_scale: 1.0  # text guidance scale of the video (1.0 = off)
+  t_shift: 1.0          # flow shift of the timestep grid
+
+session:
+  max_context_chunks: 1   # executed chunks kept as context
+  exec_horizon: 24        # command rows per call
+  seed: 0                 # chunk k of the episode with seed s: seed + seed_stride * s + k (--sampler-seed replaces it)
+  seed_stride: 1000
+
+episodes:
+  stop_on_success: true
+  after_success_s: 1.0    # time that an episode continues after success
+  time_scale: 1.0         # multiplies the time limit of each task
+
+scene:
+  assets_dir: null        # cache of the robot models (null = ~/.cache/praxis/sim)
+  asset_source: null      # a local MuJoCo Menagerie copy at the pinned commit (no download)
+  download: true
+  image_width: 416        # each model view (the client size of the rig)
+  image_height: 260
+  shadow_size: 2048       # shadow map size (0 = no shadows)
+  msaa_samples: 4
+  rig_profile: null       # JSON profile of a real cell (null = the generic cell; --rig-profile replaces it)
+
+render:
+  egl_device: null        # physical GPU of the renderer (null = a visible GPU that does not run the model, if any)
+
+output:
+  video: true             # one mp4 per episode: top | wrist left | wrist right
+  video_crf: 23

@@ -1,4 +1,5 @@
-"""MuJoCo simulation of the single-arm rig (a Franka arm with a two-finger gripper).
+"""MuJoCo simulation of the single-arm rig (a Franka arm with a two-finger gripper)
+and of the bimanual YAM rig.
 
 The simulation renders the two camera views of the rig and executes the robot
 commands of the policy at 15 Hz. Use it to check a single-arm checkpoint in
@@ -18,6 +19,9 @@ Modules:
 * :mod:`praxis_sim.scripted`: a scripted pick policy that sends the same
   commands as the model.
 * :mod:`praxis_sim.config`: the settings of a run and the YAML loader.
+* :mod:`praxis_sim.yam_scene`, :mod:`praxis_sim.yam_env`,
+  :mod:`praxis_sim.yam_tasks`, :mod:`praxis_sim.yam_scripted`: the bimanual
+  YAM rig (scene and rig profiles, environment, tasks, scripted oracle).
 * :mod:`praxis.sim.loop`: the closed-loop sampling loop and the policies
   (model, scripted, hold).
 * :mod:`praxis.sim.video`: the MP4 writer and the frame layout.

@@ -2,8 +2,9 @@
 
 The MuJoCo simulation of the Praxis-1 single-arm rig (a Franka arm with a Robotiq 2F-85
 gripper, an exterior and a wrist camera, 15 Hz control) and its fixed evaluation suites
-(`droid`, `droid_guard`, `hard`), packaged on their own: MuJoCo, Gymnasium and numpy, no
-torch. The model loop (`praxis.sim.loop`), the video writer and the live viewer stay in the
+(`droid`, `droid_guard`, `hard`), and the bimanual YAM rig (two YAM arms, a top camera and a camera
+per wrist, 11 tasks: `yam_scene`, `yam_env`, `yam_tasks`, `yam_scripted`), packaged on their
+own: MuJoCo, Gymnasium and numpy, no torch. The model loop (`praxis.sim.loop`), the video writer and the live viewer stay in the
 `praxis` package, which runs the simulation through this one.
 
 ```bash
@@ -49,3 +50,4 @@ and reports wins, losses, the exact McNemar p and a bootstrap interval of the me
 | `scripted`, `config` | The scripted pick policy and the run settings (YAML loader) |
 | `pose` | Pose math and command helpers, copies of `praxis.robot_io` / `praxis.single_arm` (checked bit for bit by the praxis tests) |
 | `gym_env`, `compare` | The Gymnasium wrapper and the LeRobot-vs-runner comparison |
+| `yam_scene`, `yam_env`, `yam_tasks`, `yam_scripted` | The bimanual YAM rig: scene (with optional rig profiles), environment, tasks and the scripted oracle |

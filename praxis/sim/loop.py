@@ -36,7 +36,7 @@ import math
 import os
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -74,21 +74,25 @@ BAD_VIEW_TICKS = 15  # stop after this many ticks in a row with a bad view
 # ---------------------------------------------------------------------------
 
 
-def bad_views(obs: Observation) -> list[str]:
-    """Return the names of the model views that are black or one flat color.
+def bad_view_names(views: Mapping[str, np.ndarray | None]) -> list[str]:
+    """Return the names of the views that are black or one flat color.
 
     On some GPUs, an EGL renderer that shares the GPU with CUDA work returns
     black or corrupt frames and gives no error.
     """
     bad = []
-    for name in ("exterior", "wrist"):
-        view = getattr(obs, name)
+    for name, view in views.items():
         if view is None:
             continue
         pixels = np.asarray(view, dtype=np.float32)
         if pixels.mean() < BAD_VIEW_MEAN or pixels.std() < BAD_VIEW_STD:
             bad.append(name)
     return bad
+
+
+def bad_views(obs: Observation) -> list[str]:
+    """Return the names of the model views of ``obs`` that are black or one flat color."""
+    return bad_view_names({"exterior": obs.exterior, "wrist": obs.wrist})
 
 
 class FrameCheck:
@@ -100,7 +104,10 @@ class FrameCheck:
         self.run = 0
 
     def __call__(self, obs: Observation) -> None:
-        bad = bad_views(obs)
+        self.check(bad_views(obs), obs.tick)
+
+    def check(self, bad: list[str], tick: int) -> None:
+        """Count the bad views ``bad`` of tick ``tick``; raise after a run of them."""
         if not bad:
             self.run = 0
             return
@@ -108,7 +115,7 @@ class FrameCheck:
             logger.warning(
                 "tick %d: the %s view is black or one flat color. Set "
                 "render.egl_device to a GPU that does not run the model.",
-                obs.tick,
+                tick,
                 " and ".join(bad),
             )
         self.bad_ticks += 1
@@ -116,7 +123,7 @@ class FrameCheck:
         if self.run >= self.max_bad_ticks:
             raise RuntimeError(
                 f"the {' and '.join(bad)} view was black or one flat color for "
-                f"{self.run} ticks in a row (last tick {obs.tick}). The renderer "
+                f"{self.run} ticks in a row (last tick {tick}). The renderer "
                 "gives bad frames. Set render.egl_device to a GPU that does "
                 "not run the model."
             )

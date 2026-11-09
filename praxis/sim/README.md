@@ -56,9 +56,10 @@ commit `62ab00f2bc44f6f20c1c9b7a13f3fb1dd41a4e35`:
 |---|---|---|
 | Franka Emika Panda arm, no hand (`panda_nohand.xml`) | `franka_emika_panda` | Apache-2.0 |
 | Robotiq 2F-85 gripper (`2f85.xml`) | `robotiq_2f85` | BSD-2-Clause, Copyright (c) 2013, ROS-Industrial |
+| I2RT YAM arm with the `linear_4310` gripper (`yam_linear_4310.xml`), the arm of the bimanual sim | `i2rt_yam` | MIT, Copyright (c) 2025 i2rt robotics |
 
 This repository does not contain the model files. At the first run, the code
-downloads the 71 files (36 MB) of the two models from the pinned commit. It
+downloads the 88 files (40 MB) of the three models from the pinned commit. It
 checks the SHA-256 of each file (`praxis_sim.assets`). The download
 includes the LICENSE file of each model. The cache directory is
 `$PRAXIS_SIM_CACHE`, or `$XDG_CACHE_HOME/praxis/sim`, or
@@ -291,6 +292,64 @@ renderer used the GPU of the model:
 | `press_button`, seeds 0 to 3 | 0/4 successes. Progress 0.25 to 0.58. |
 | Model loop | All 12 episodes: context depth 0, 1, 2, then 3. 0 context restarts. 0 bad view ticks. |
 | Time per call | Mean per episode 0.72 to 0.84 s. Two episodes include the compile. Their means are 3.9 s and 4.1 s. |
+
+## The bimanual YAM sim
+
+`praxis.sim.yam_loop` runs the bimanual checkpoint `praxis-1-yam` on two
+simulated I2RT YAM arms: a top camera and one camera on each wrist, 15 Hz
+control. The simulator is `praxis_sim.yam_scene`, `yam_env`, `yam_tasks` and
+`yam_scripted`. The settings are in `configs/sim_yam.yaml`, and
+`scripts/run_sim_yam.py` runs them.
+
+```bash
+# The scripted oracle (no GPU, no weights): every task, 2 seeds, no video.
+python scripts/run_sim_yam.py --config configs/sim_yam.yaml --policy oracle \
+    --out outputs/sim_yam_oracle --seeds 2 --no-video
+
+# The checkpoint, 2 seeds per task (one GPU).
+MUJOCO_GL=egl python scripts/run_sim_yam.py --config configs/sim_yam.yaml \
+    --checkpoint checkpoints/praxis-1-yam --out outputs/sim_yam --seeds 2
+```
+
+- **Model path.** `YamModelPolicy` opens a session of `PraxisPipeline` with
+  the settings of `configs/serve_yam.yaml`: 2 Euler steps of `window_joint`,
+  flow shift 1, no guidance, 1 context chunk, 24 rows per call. The rendered
+  views (416x260 each) go through the same canvas code as on the robot.
+- **Prompt.** The prompt goes to the model verbatim, as on the server. A
+  pick-and-place task has its prompt in the caption form of the training
+  data, with no closing period ("Pick up the screwdriver from the center of
+  the table, then place the screwdriver in the bin"). The other tasks use
+  their task name. `--prompt` replaces the prompt of every task; the success
+  check of the task still runs. Write a free-text `--prompt` in the same
+  caption form ("Pick up the X from the center of the table, then place the
+  X in the Y").
+- **Tasks.** `screwdriver_in_bin`, `fruit_in_bowl`, `bottles_in_bin`,
+  `cup_by_coaster`, `block_tower`, `mug_upright` and `lego_sort` (tasks of
+  the ABC-130k data), and `dice_in_bag`, `tennis_ball_in_bag`, `apple_in_bag`
+  and `bell_in_bag` (one item into a paper bag). All objects are MuJoCo
+  primitives. The scripted oracle (`--policy oracle`) solves seed 0 of every
+  task. Over seeds 0-39 it solves 40/40 of `apple_in_bag`, `block_tower`,
+  `cup_by_coaster`, `fruit_in_bowl`, `mug_upright` and `tennis_ball_in_bag`,
+  39/40 of `bell_in_bag`, `dice_in_bag`, `lego_sort` and
+  `screwdriver_in_bin`, and 37/40 of `bottles_in_bin`. The bag and bin drops
+  command a carry height the arms cannot reach, so the oracle logs IK misses
+  (`ik_misses`) in those tasks even when it succeeds.
+- **Rig profiles.** The default scene is a generic cell, with the arm mounts
+  and cameras of the ABC-130k stations. `scene.rig_profile` (or
+  `--rig-profile`) takes a JSON file that describes one real cell: the table
+  height and extent, the top camera, a camera per wrist, an image per
+  surface (table and three walls, paths relative to the file) and the light
+  levels, plus an optional `name`. See `praxis_sim.yam_scene.load_rig_profile`
+  for the keys; other keys raise an error, so remove other metadata
+  first. The tasks place their objects at the table height of
+  the profile, in the region of the generic cell (x 0.42-0.82 m, |y| up to
+  0.31 m from the rig centre), so the table of the profile must cover it.
+- **Install.** The YAM modules ship with `praxis-sim` from this checkout:
+  `pip install -e packages/praxis-sim` (the `sim` extra installs the package
+  from the main branch).
+- **Speed.** On the CPU (EGL on Mesa llvmpipe), one tick with the three
+  views takes about 0.2 s. On a GPU it takes about 10 ms. The oracle without
+  rendering runs every task in seconds.
 
 ## Known gaps
 
