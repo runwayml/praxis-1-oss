@@ -255,16 +255,7 @@ def build_factory(cfg: dict) -> PolicyFactory:
         vae_norm_block_c={int(k): int(v) for k, v in block_c.items()}
         if block_c
         else None,
-        sampler=SamplerSettings(
-            num_steps=int(s["num_steps"]),
-            t_shift=float(s["t_shift"]),
-            solver=str(s["solver"]),
-            action_steps=s.get("action_steps"),
-            layout=str(s.get("layout", "window_joint")),
-            cfg_scale=float(s.get("cfg_scale", 1.0)),
-            cfg_video_scale=float(s.get("cfg_video_scale", 4.0)),
-            cfg_batched=bool(s.get("cfg_batched", False)),
-        ),
+        sampler=SamplerSettings.from_config(s),
     )
     if m.get("embodiment") != pipe.embodiment:
         raise ValueError(

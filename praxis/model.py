@@ -118,6 +118,24 @@ class SamplerSettings:
         """True if text guidance is on (a scale is not 1.0)."""
         return check_guidance(self.cfg_scale, self.cfg_video_scale)
 
+    @classmethod
+    def from_config(cls, s: dict) -> SamplerSettings:
+        """Return the settings of the ``sampler`` section of a YAML config.
+
+        The policy server builds its sampler with this function
+        (:func:`praxis.serve.server.build_factory`).
+        """
+        return cls(
+            num_steps=int(s["num_steps"]),
+            t_shift=float(s["t_shift"]),
+            solver=str(s["solver"]),
+            action_steps=s.get("action_steps"),
+            layout=str(s.get("layout", "window_joint")),
+            cfg_scale=float(s.get("cfg_scale", 1.0)),
+            cfg_video_scale=float(s.get("cfg_video_scale", 4.0)),
+            cfg_batched=bool(s.get("cfg_batched", False)),
+        )
+
 
 class PraxisPolicy(nn.Module):
     """Video backbone plus action expert, loaded from a praxis checkpoint."""
@@ -188,6 +206,8 @@ class PraxisPolicy(nn.Module):
         seed: int,
         settings: SamplerSettings,
         trace: TraceFn | None = None,
+        oracle_video: Tensor | None = None,
+        return_window: bool = False,
     ) -> tuple[Tensor, Tensor]:
         """Denoise the window of the chunk at depth ``d = len(cleans)`` jointly.
 
@@ -212,9 +232,19 @@ class PraxisPolicy(nn.Module):
           states stay float32 and enter the models in the model dtype. The
           step is ``x + (t_next - t_cur) * v`` with a Python float step.
         * ``trace`` receives the intermediate tensors by name.
+        * ``oracle_video`` (offline evaluation, ``praxis.eval``) holds the
+          clean latents of all ``K'`` window chunks ``(1, 192, 6 K', h, w)``.
+          Before each step the video state is set to
+          ``(1 - t) * oracle_video + t * noise`` in float32 on the CPU, with
+          the video noise of the call. Only the actions integrate: the
+          actions read the true future video. The returned video is then
+          ``oracle_video``.
+        * ``return_window`` returns all ``K'`` chunks instead of the last.
 
         Returns the video latent of the last chunk ``(1, 192, 6, h, w)`` and
-        its normalized action tokens ``(1, 6, A)``, float32.
+        its normalized action tokens ``(1, 6, A)``, float32. With
+        ``return_window`` the shapes are ``(1, 192, 6 K', h, w)`` and
+        ``(1, 6 K', A)``.
         """
         if settings.layout != "window_joint":
             raise ValueError(f"layout {settings.layout!r} is not 'window_joint'")
@@ -233,6 +263,16 @@ class PraxisPolicy(nn.Module):
             raise ValueError(f"proprio_all {tuple(pro.shape)} for {kk} chunks")
         a_dim = int(self.config["action_expert"]["action_patch_dim"])
         c, h, w = anchor.shape[1], anchor.shape[3], anchor.shape[4]
+        if oracle_video is not None and tuple(oracle_video.shape) != (
+            1,
+            c,
+            kk * lat,
+            h,
+            w,
+        ):
+            raise ValueError(
+                f"oracle_video {tuple(oracle_video.shape)} for {kk} chunks"
+            )
 
         def probe(name: str, t: Tensor) -> None:
             if trace is not None:
@@ -298,8 +338,11 @@ class PraxisPolicy(nn.Module):
         # skipped part changes no bit. A trace keeps both parts.
         decode_uncond = trace is not None or float(settings.cfg_video_scale) != 1.0
         act_uncond = trace is not None or float(settings.cfg_scale) != 1.0
+        x0_v = None if oracle_video is None else oracle_video.float().cpu()
         for step in range(settings.num_steps):
             t_cur, t_next = ts[step], ts[step + 1]
+            if x0_v is not None:
+                xv = ((1 - t_cur) * x0_v + t_cur * noise_v).to(dev)
             probe("pass.marker", torch.tensor([step, 0]))
             v, a = velocity(text_c, xv, xa, t_cur, True)
             assert v is not None and a is not None
@@ -326,8 +369,12 @@ class PraxisPolicy(nn.Module):
             dt = t_next - t_cur
             xv = xv + dt * v
             xa = xa + dt * a
+        if x0_v is not None:
+            xv = x0_v.to(dev)
         probe("out.video", xv)
         probe("out.action", xa)
+        if return_window:
+            return xv, xa[None]
         video = xv[:, :, d * lat :].contiguous()
         actions = xa[d * lat :].contiguous()
         probe("out.video_last", video)

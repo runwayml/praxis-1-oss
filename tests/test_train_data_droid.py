@@ -282,6 +282,21 @@ def test_pool_split_and_ranks(root: Path) -> None:
     ]
     assert shards == [[1, 3, 7], [2, 6]]
     assert data.DroidWindowDataset(str(root), CONFIG, max_episodes=2).episodes == [1, 2]
+    # A list of episodes replaces the split and keeps its order.
+    listed = data.DroidWindowDataset(str(root), CONFIG, episodes=[50, 2, 1])
+    assert listed.episodes == [50, 2, 1]
+    sharded = [
+        data.DroidWindowDataset(
+            str(root), CONFIG, episodes=[50, 2, 1], max_episodes=2, rank=r, world_size=2
+        ).episodes
+        for r in range(2)
+    ]
+    assert sharded == [[50], [2]]
+    with pytest.raises(ValueError, match="more than once"):
+        data.DroidWindowDataset(str(root), CONFIG, episodes=[50, 2, 50])
+    for unusable in (4, 5, 8, 999):  # no task, too short, no wrist file, absent
+        with pytest.raises(ValueError, match="not usable"):
+            data.DroidWindowDataset(str(root), CONFIG, episodes=[1, unusable])
     with pytest.raises(ValueError):
         data.DroidWindowDataset(str(root), CONFIG, split="test")
     with pytest.raises(ValueError):

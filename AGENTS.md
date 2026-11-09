@@ -25,6 +25,7 @@ results reproducible. `README.md` is the user guide.
 | `praxis/sim/` | the closed loop of the MuJoCo simulation (the model loop, the video writer, the live viewer). See `praxis/sim/README.md` |
 | `packages/praxis-sim/` | the simulator as its own package, `praxis_sim` (no torch): the single-arm DROID rig, tasks, scripted oracles, the Gymnasium wrapper. `praxis.sim.<module>` names still resolve to it |
 | `packages/praxis-sim/src/praxis_sim/eval_suites.py`, `praxis/sim/EVAL.md` | the fixed evaluation scenarios of the single-arm checkpoint |
+| `praxis/eval/` | the offline action error on fixed DROID windows (oracle and deployment legs) |
 | `praxis/train/` | the DROID fine-tune: data windows, objective, MoE balance, FSDP trainer. See `praxis/train/README.md` |
 | `configs/` | the YAML settings of inference, serving, simulation and fine-tuning |
 | `scripts/` | the command-line entry points |
@@ -39,6 +40,7 @@ results reproducible. `README.md` is the user guide.
 | An evaluation suite | `MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard --checkpoint CKPT --out OUT` |
 | Compare two suite runs | `python scripts/compare_sim_eval.py OUT_A OUT_B` |
 | The policy server | `python -m praxis.serve --config configs/serve_droid.yaml` |
+| The offline action error | `python scripts/run_action_error_eval.py --checkpoint CKPT --vae VAE --text-encoder TEXT --data DROID --out OUT` |
 | Inference speed, per stage, on a local GPU | `python scripts/benchmark_inference.py --config configs/serve_droid.yaml` |
 | Latency of a running server | `python -m praxis.serve.latency --url ws://<host>:8000/api/v1/session` |
 | A DROID fine-tune | `torchrun --nproc_per_node 6 scripts/finetune.py --config configs/finetune_droid.yaml` |

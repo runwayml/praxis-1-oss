@@ -339,6 +339,9 @@ class DroidWindowDataset(IterableDataset):
     frames for a window plus :data:`MARGIN_S` (:func:`window_fits`). For a directory, the pool holds only the episodes with all three
     files: the parquet file and the two videos. Thus a part of the dataset
     is sufficient. ``max_episodes`` keeps the first episodes of the pool.
+    ``episodes`` replaces the split: the pool holds these episode indices, in
+    this order. Each of them must have a task, enough frames and (for a
+    directory) its three files.
     Rank ``rank`` of ``world_size`` takes every ``world_size``-th episode of
     the pool. The random draws of a worker depend on ``(seed, rank, worker
     id)``.
@@ -367,6 +370,7 @@ class DroidWindowDataset(IterableDataset):
         world_size: int = 1,
         cache_dir: str | None = None,
         max_episodes: int | None = None,
+        episodes: list[int] | None = None,
     ) -> None:
         super().__init__()
         if split not in ("train", "val"):
@@ -417,12 +421,20 @@ class DroidWindowDataset(IterableDataset):
         self.video_path = str(info["video_path"])
         self.chunks_size = int(info["chunks_size"])
 
+        if episodes is not None:
+            episodes = [int(e) for e in episodes]
+            if len(set(episodes)) != len(episodes):
+                raise ValueError("episodes holds an episode index more than once")
+        wanted = set() if episodes is None else set(episodes)
         pool: list[tuple[int, str]] = []
         for line in self._file("meta/episodes.jsonl").read_text().splitlines():
             ep = json.loads(line)
             index = int(ep["episode_index"])
             task = str(ep["tasks"][0]).strip() if ep["tasks"] else ""
-            if (index % VAL_EVERY == 0) != (split == "val"):
+            if episodes is not None:
+                if index not in wanted:
+                    continue
+            elif (index % VAL_EVERY == 0) != (split == "val"):
                 continue
             if not task or not window_fits(ep["length"], self.window_frames, self.fps):
                 continue
@@ -431,6 +443,12 @@ class DroidWindowDataset(IterableDataset):
             ):
                 continue
             pool.append((index, task))
+        if episodes is not None:
+            found = {index for index, _ in pool}
+            if missing := [e for e in episodes if e not in found]:
+                raise ValueError(f"episodes {missing} of {source} are not usable")
+            order = {e: i for i, e in enumerate(episodes)}
+            pool.sort(key=lambda item: order[item[0]])
         if max_episodes is not None:
             pool = pool[: int(max_episodes)]
         self.prompts = dict(pool[rank::world_size])

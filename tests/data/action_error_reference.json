@@ -1,0 +1,112 @@
+{
+ "windows": [
+  0,
+  6,
+  12,
+  18
+ ],
+ "episodes": [
+  600,
+  48100,
+  76900,
+  94500
+ ],
+ "values": {
+  "w00_deployment": {
+   "endpoint_err_cm_chunk0": 3.684054374694824,
+   "endpoint_err_cm_chunk1": 3.0181002616882324,
+   "endpoint_err_cm_chunk2": 4.017953395843506,
+   "endpoint_err_cm_chunk3": 3.5375661849975586,
+   "gt_motion_cm_chunk0": 12.437638282775879,
+   "gt_motion_cm_chunk1": 14.21922492980957,
+   "gt_motion_cm_chunk2": 3.4248902797698975,
+   "gt_motion_cm_chunk3": 22.804990768432617,
+   "rot_endpoint_deg_chunk0": 2.8424187485263857,
+   "grip_mae_rows": 0.16385731101036072
+  },
+  "w00_oracle": {
+   "endpoint_err_cm_chunk0": 1.3777780532836914,
+   "endpoint_err_cm_chunk1": 1.220752239227295,
+   "endpoint_err_cm_chunk2": 0.8252248167991638,
+   "endpoint_err_cm_chunk3": 0.2840251326560974,
+   "gt_motion_cm_chunk0": 12.437638282775879,
+   "gt_motion_cm_chunk1": 14.21922492980957,
+   "gt_motion_cm_chunk2": 3.4248902797698975,
+   "gt_motion_cm_chunk3": 22.804990768432617,
+   "rot_endpoint_deg_chunk0": 1.3309704716140296,
+   "grip_mae_rows": 0.03747504949569702
+  },
+  "w06_deployment": {
+   "endpoint_err_cm_chunk0": 3.2022509574890137,
+   "endpoint_err_cm_chunk1": 4.157232284545898,
+   "endpoint_err_cm_chunk2": 1.2331854104995728,
+   "endpoint_err_cm_chunk3": 1.2679911851882935,
+   "gt_motion_cm_chunk0": 18.041440963745117,
+   "gt_motion_cm_chunk1": 14.892500877380371,
+   "gt_motion_cm_chunk2": 1.251389980316162,
+   "gt_motion_cm_chunk3": 0.857061505317688,
+   "rot_endpoint_deg_chunk0": 5.4845335342557675,
+   "grip_mae_rows": 0.15012341737747192
+  },
+  "w06_oracle": {
+   "endpoint_err_cm_chunk0": 0.6336414217948914,
+   "endpoint_err_cm_chunk1": 1.5154366493225098,
+   "endpoint_err_cm_chunk2": 1.2362034320831299,
+   "endpoint_err_cm_chunk3": 0.5218100547790527,
+   "gt_motion_cm_chunk0": 18.041440963745117,
+   "gt_motion_cm_chunk1": 14.892500877380371,
+   "gt_motion_cm_chunk2": 1.251389980316162,
+   "gt_motion_cm_chunk3": 0.857061505317688,
+   "rot_endpoint_deg_chunk0": 0.5682395645637581,
+   "grip_mae_rows": 0.0385618582367897
+  },
+  "w12_deployment": {
+   "endpoint_err_cm_chunk0": 5.190934658050537,
+   "endpoint_err_cm_chunk1": 3.1011338233947754,
+   "endpoint_err_cm_chunk2": 4.076456069946289,
+   "endpoint_err_cm_chunk3": 2.8100929260253906,
+   "gt_motion_cm_chunk0": 10.305298805236816,
+   "gt_motion_cm_chunk1": 11.841936111450195,
+   "gt_motion_cm_chunk2": 5.183122634887695,
+   "gt_motion_cm_chunk3": 14.21621322631836,
+   "rot_endpoint_deg_chunk0": 2.9539185734109767,
+   "grip_mae_rows": 0.16593904793262482
+  },
+  "w12_oracle": {
+   "endpoint_err_cm_chunk0": 0.8218063116073608,
+   "endpoint_err_cm_chunk1": 1.6433663368225098,
+   "endpoint_err_cm_chunk2": 0.3506825566291809,
+   "endpoint_err_cm_chunk3": 0.5360924601554871,
+   "gt_motion_cm_chunk0": 10.305298805236816,
+   "gt_motion_cm_chunk1": 11.841936111450195,
+   "gt_motion_cm_chunk2": 5.183122634887695,
+   "gt_motion_cm_chunk3": 14.21621322631836,
+   "rot_endpoint_deg_chunk0": 0.8834974679168636,
+   "grip_mae_rows": 0.04171464592218399
+  },
+  "w18_deployment": {
+   "endpoint_err_cm_chunk0": 4.849677562713623,
+   "endpoint_err_cm_chunk1": 5.573760509490967,
+   "endpoint_err_cm_chunk2": 3.914254903793335,
+   "endpoint_err_cm_chunk3": 4.354872703552246,
+   "gt_motion_cm_chunk0": 12.36896800994873,
+   "gt_motion_cm_chunk1": 16.540616989135742,
+   "gt_motion_cm_chunk2": 15.517422676086426,
+   "gt_motion_cm_chunk3": 13.806158065795898,
+   "rot_endpoint_deg_chunk0": 4.796591986735139,
+   "grip_mae_rows": 0.14670686423778534
+  },
+  "w18_oracle": {
+   "endpoint_err_cm_chunk0": 0.9928668737411499,
+   "endpoint_err_cm_chunk1": 0.7956228256225586,
+   "endpoint_err_cm_chunk2": 0.43316614627838135,
+   "endpoint_err_cm_chunk3": 1.0662530660629272,
+   "gt_motion_cm_chunk0": 12.36896800994873,
+   "gt_motion_cm_chunk1": 16.540616989135742,
+   "gt_motion_cm_chunk2": 15.517422676086426,
+   "gt_motion_cm_chunk3": 13.806158065795898,
+   "rot_endpoint_deg_chunk0": 0.3917305419238898,
+   "grip_mae_rows": 0.03811492770910263
+  }
+ }
+}

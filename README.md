@@ -580,6 +580,24 @@ environment, the sim client in its own), as the RoboLab client of `eval/robolab`
 does. Such a simulator gets its own `packages/praxis-<sim>` and a row here when
 it lands.
 
+## Offline action error
+
+`scripts/run_action_error_eval.py` measures the action error of the
+checkpoint on fixed windows of 19 held-out (val) DROID episodes, with no
+robot and no simulation. Each window gives two errors per chunk: the oracle error (the
+actions read the recorded future video) and the deployment error (the video
+and the actions sample jointly from noise). The difference is the cost of the
+video prediction. The simulation suites of `praxis/sim/EVAL.md` measure the
+closed loop; this eval measures the open-loop action readout on real data.
+See the docstring of `praxis/eval/offline_action_error.py` for the windows,
+the sampler and the metrics.
+
+```bash
+python scripts/run_action_error_eval.py --checkpoint checkpoints/praxis-1-droid \
+    --vae weights/Wan2.2_VAE.pth --text-encoder weights/Qwen3.5-2B \
+    --data droid_hires --out outputs/action_error/start
+```
+
 ## Determinism
 
 With the same inputs, the same seed and the same packages, praxis gives the
