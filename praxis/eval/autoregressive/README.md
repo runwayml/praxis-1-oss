@@ -98,8 +98,9 @@ rollout holds:
   (JPEG quality 85), then the last frame at 2.25x.
 
 The answer is strict JSON (at most 8000 tokens). The request sets no
-temperature: the judge model takes only its default (the published runs
-used temperature 0). The call
+temperature, so the endpoint's default applies. Every published verdict
+used the default: the gateway of the published runs ignored the
+`temperature: 0` that their requests carried. The call
 retries 6 times with backoff. It falls back to `json_object` if the
 endpoint refuses a JSON schema. A bad key (HTTP 401), no access (403), an
 unknown model (404) or another 400 stops the call at once, without retries.
@@ -220,7 +221,9 @@ The bar was written before any number of this implementation:
    differences and the within-11.9-s numbers, to the printed digit.
 2. **Judge request, exact (CPU).** For the same video, `judge.py` builds the
    same request as the published judge, byte for byte: system prompt,
-   question, image bytes, schema and call settings.
+   question, image bytes, schema and call settings. The published requests
+   also carried `temperature: 0`, which their gateway ignored; this judge
+   leaves it out.
 3. **Rollout (GPU).** On the DROID set with `praxis-1-droid` (the
    checkpoint of the published DROID results) and the same seeds: the
    rollout is not expected to be bitwise equal. Known sources of

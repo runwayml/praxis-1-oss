@@ -7,10 +7,13 @@ The fixtures come from the published results:
   On DROID (104 rollouts) the baselines were given the second exterior view
   of the set (``frames_ext2/``). The scorer must give the published numbers
   from them.
-* ``autoregressive_judge_requests.json``: for 37 rollouts of the three sets
-  (every feature and level, and 3 time-to-success requests), the SHA-256 of
-  the request that the published judge built on seeded synthetic frames.
+* ``autoregressive_judge_requests.json``: for 10 DROID rollouts (7 adherence
+  and 3 time-to-success requests), the SHA-256 of the request that the
+  published judge built on seeded synthetic frames.
   The judge of this package must build the same request, byte for byte.
+  The published requests carried ``temperature: 0``, which their gateway
+  ignored; the hashes are of the requests without it, the requests as the
+  model received them.
 """
 
 from __future__ import annotations
@@ -181,8 +184,6 @@ def _canonical(req: dict) -> str:
         "content": m[1]["content"],
         "model": req["model"],
         "max_completion_tokens": req["max_completion_tokens"],
-        # The published requests set temperature 0; the judge now sets none.
-        "temperature": req.get("temperature", 0.0),
         "response_format": req["response_format"],
     }
     return hashlib.sha256(

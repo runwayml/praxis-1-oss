@@ -38,7 +38,7 @@
    "scene": "co_e0_AUTOLab_2023-10-27_2001",
    "description": "DROID single-arm cell (AUTOLab); inserted objects: cyan_plate, white_bowl, green_sponge, blue_sponge"
   },
-  "request_sha256": "d671f18f1650e1a4ae47fd8f8f1421c14be73da99047784ce728b436ee0ffcd9"
+  "request_sha256": "80624de7f816d11da2b82a590ee439f3442f3365d69b0915bf7524ea2b6a5f5c"
  },
  {
   "set": "droid",
@@ -79,7 +79,7 @@
    "scene": "co_m0_GuptaLab_2023-04-20_1322",
    "description": "DROID single-arm cell (GuptaLab); inserted objects: pink_plate, white_tray, blue_candle_jar, purple_candle_jar"
   },
-  "request_sha256": "98e5509305726cb6d1722cb4ce6e03c01f60521065ebd6b3586ae4f44ade4ad2"
+  "request_sha256": "0df25950360515ce0b561fd2cd34669dcef20600dcd36b50cbf35d114b42d2ec"
  },
  {
   "set": "droid",
@@ -118,7 +118,7 @@
    "scene": "ct_e1_IPRL_2023-04-21_2149",
    "description": "DROID single-arm cell (IPRL); inserted objects: white_tray, cyan_plate, pink_soap_bar_1, pink_soap_bar_2, blue_sticky_notes"
   },
-  "request_sha256": "4b4d20b460b41aaa1f85fd8e68997411f684e84485ac0fe3deedc413bc09b69b"
+  "request_sha256": "c6b71801fab2d62f7520d8da95bacc25450ea0885d5bc24a27fc773ee558cf7a"
  },
  {
   "set": "droid",
@@ -157,7 +157,7 @@
    "scene": "ct_e1_IPRL_2023-04-21_2149",
    "description": "DROID single-arm cell (IPRL); inserted objects: white_tray, cyan_plate, pink_soap_bar_1, pink_soap_bar_2, blue_sticky_notes"
   },
-  "request_sha256": "0da68cfe209d537fd0f005923ac9e538514a8bc951081de8cf10f0036a620b84"
+  "request_sha256": "46f82a2224168deceb1e4196ae3dc8cba114ae0ca5f319e9bef98ae092a2b52c"
  },
  {
   "set": "droid",
@@ -195,7 +195,7 @@
    "scene": "sp_e1_GuptaLab_2023-04-30_1241",
    "description": "DROID single-arm cell (GuptaLab); inserted objects: white_bowl, purple_plate, pink_donut_robot_left, pink_donut_robot_right"
   },
-  "request_sha256": "bb606bccb405aecabc15053ba0c1db279b5d2407e584cf1798a0d3dfdcc76946"
+  "request_sha256": "c6d0e9e0b795cd59d8038a4818bab72826e12461ee607bec403701ea6c180f63"
  },
  {
   "set": "droid",
@@ -236,7 +236,7 @@
    "scene": "ty_e2_GuptaLab_2023-04-20_1322",
    "description": "DROID single-arm cell (GuptaLab); inserted objects: blue_bowl, white_tray, pink_donut, pink_toy_ball"
   },
-  "request_sha256": "f3bc6191f2310e23eab2e9505bc34b5c722717db52ef84cab030a32d470a4155"
+  "request_sha256": "d65a43bff5d9fae454b20de343d24d342a5cfdd105e74ef473c8fcee6ae5d1bf"
  },
  {
   "set": "droid",
@@ -277,7 +277,7 @@
    "scene": "ty_m0_CLVR_2023-05-18_1746",
    "description": "DROID single-arm cell (CLVR); inserted objects: white_cutting_board, white_plate, yellow_lemon, yellow_toy_ball, red_bell_pepper, lime_sticky_notes"
   },
-  "request_sha256": "654872c7c673259d3834a6315b0cac5a8ec397edfb426c7f852d93de090ab1e3"
+  "request_sha256": "8854743378af59b7d2ebb6be7afd99740ac54599750fb16bdc610a842ee77ffe"
  },
  {
   "set": "droid",
@@ -318,7 +318,7 @@
    "scene": "co_e0_AUTOLab_2023-10-27_2001",
    "description": "DROID single-arm cell (AUTOLab); inserted objects: cyan_plate, white_bowl, green_sponge, blue_sponge"
   },
-  "request_sha256": "403aeffd5356b2e59f4b8fe3aaebf6884f017acc50aba3b59b959924886da857"
+  "request_sha256": "ef44f817fb7d4d4e5157644c34765ffb7da7898eb02e42f9f9e0d0fc54a48c32"
  },
  {
   "set": "droid",
@@ -359,7 +359,7 @@
    "scene": "co_m0_GuptaLab_2023-04-20_1322",
    "description": "DROID single-arm cell (GuptaLab); inserted objects: pink_plate, white_tray, blue_candle_jar, purple_candle_jar"
   },
-  "request_sha256": "13ec173655dc088688001550decc6d048380faefe88bbfea4eba5747d0ddfc1d"
+  "request_sha256": "6329496c28bf54d7a6482f24f1b0010b280298216671ff6051c5bd05a383ff50"
  },
  {
   "set": "droid",
@@ -398,6 +398,6 @@
    "scene": "ct_e1_IPRL_2023-04-21_2149",
    "description": "DROID single-arm cell (IPRL); inserted objects: white_tray, cyan_plate, pink_soap_bar_1, pink_soap_bar_2, blue_sticky_notes"
   },
-  "request_sha256": "57725cdb566fbec96f183f616565431a0f28a8b393d204e4ac98ede9fd62c5d9"
+  "request_sha256": "c248e157e8b9c9d924aecb2df105a0e35f1becd95bb03dcebf84083a12453e1c"
  }
 ]
