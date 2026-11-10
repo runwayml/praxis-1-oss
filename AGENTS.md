@@ -21,6 +21,7 @@ results reproducible. `README.md` is the user guide.
 | `praxis/checkpoint.py` | the checkpoint format: `config.json` validation, strict load, `save_checkpoint`, `SHA256SUMS` |
 | `praxis/vae.py`, `praxis/text_encoder.py` | the video autoencoder and the text encoder |
 | `praxis/kernels/` | Triton kernels (forward and backward) that keep the bits of the checkpoint |
+| `praxis/quantization/`, `praxis/kernels/nvfp4.py` | the optional routed NVFP4 inference on SM120 GPUs (`model.routed_precision: nvfp4`): packing, the cached load and the activation kernels |
 | `praxis/serve/` | the policy server (WebSocket, Positronic protocol) and the Modal app. See `praxis/serve/README.md` |
 | `praxis/sim/` | the closed loop of the MuJoCo simulation (the model loop, the video writer, the live viewer). See `praxis/sim/README.md` |
 | `packages/praxis-sim/` | the simulator as its own package, `praxis_sim` (no torch): the single-arm DROID rig, tasks, scripted oracles, the Gymnasium wrapper. `praxis.sim.<module>` names still resolve to it |
@@ -50,7 +51,8 @@ results reproducible. `README.md` is the user guide.
 | A LoRA fine-tune of `praxis-1-droid` on the DROID rig (one 80 GB GPU) | `torchrun --nproc_per_node 1 scripts/finetune.py --config configs/finetune_droid_lora.yaml` |
 
 The extras of `pyproject.toml`: `kernels` (the text encoder kernels of the
-validation results), `video`, `serve`, `sim`, `train`, `dev`.
+validation results), `video`, `serve`, `sim`, `train`, `nvfp4` (the optional
+routed NVFP4 inference on SM120 GPUs), `dev`.
 
 ## Checks before a commit
 

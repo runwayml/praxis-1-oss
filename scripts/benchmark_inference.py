@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from praxis import single_arm
 from praxis.checkpoint import load_config as checkpoint_config
+from praxis.layers import Attention
 from praxis.pipeline import PraxisPipeline
 from praxis.profiling import (
     STAGES,
@@ -95,6 +96,17 @@ def environment(pipe: PraxisPipeline) -> dict:
         "cuda": torch.version.cuda,
         "cudnn": torch.backends.cudnn.version() if cuda else None,
         "attention_backend": pipe.variant.attention_backend,
+        "attention_backend_effective": next(
+            (
+                m.effective_backend(device)
+                for m in pipe.policy.modules()
+                if isinstance(m, Attention)
+            ),
+            None,
+        ),
+        "routed_precision": getattr(pipe.policy, "routed_quantization", {}).get(
+            "format", "bf16"
+        ),
         "python": platform.python_version(),
     }
 

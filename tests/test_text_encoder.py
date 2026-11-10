@@ -43,3 +43,79 @@ def test_pin_fla_kernels_keeps_one_launch_setting(
     ]
     # A second call keeps the same setting.
     assert text_encoder.pin_fla_kernels() == pinned
+
+
+_STATE_KERNEL = (
+    "fla.ops.common.chunk_delta_h.chunk_gated_delta_rule_fwd_kernel_h_blockdim64"
+)
+
+
+def _install_state_kernel(monkeypatch, settings, *, path=_STATE_KERNEL):
+    triton = pytest.importorskip("triton")
+    tl = pytest.importorskip("triton.language")
+    configs = [
+        triton.Config({"BV": bv}, num_warps=warps, num_stages=stages)
+        for bv, warps, stages in settings
+    ]
+
+    @triton.autotune(configs=configs, key=["D"])
+    @triton.jit
+    def kernel(x, D, BV: tl.constexpr):
+        pass
+
+    module_path, name = path.rsplit(".", 1)
+    module = types.ModuleType(module_path)
+    vars(module)[name] = kernel
+    monkeypatch.setitem(sys.modules, module_path, module)
+    monkeypatch.setattr(text_encoder, "FLA_KERNEL_CONFIGS", {path: ({"BV": 32}, 4, 3)})
+    return kernel, configs, name
+
+
+def test_state_kernel_prefers_original_three_stages(monkeypatch, caplog):
+    kernel, configs, name = _install_state_kernel(monkeypatch, [(32, 4, 2), (32, 4, 3)])
+    with caplog.at_level("INFO", logger="praxis.text_encoder"):
+        pinned = text_encoder.pin_fla_kernels()
+    assert kernel.configs == [configs[1]]
+    assert kernel.configs[0] is configs[1]
+    assert pinned == {name: str(configs[1])}
+    assert "fallback" not in caplog.text
+
+
+def test_state_kernel_fixes_supported_two_stages_idempotently(monkeypatch, caplog):
+    kernel, configs, name = _install_state_kernel(
+        monkeypatch, [(32, 4, 1), (64, 4, 2), (32, 2, 2), (32, 4, 2)]
+    )
+    with caplog.at_level("INFO", logger="praxis.text_encoder"):
+        pinned = text_encoder.pin_fla_kernels()
+        assert text_encoder.pin_fla_kernels() == pinned
+    assert kernel.configs == [configs[3]]
+    assert kernel.configs[0] is configs[3]
+    assert pinned == {name: str(configs[3])}
+    assert "using fixed supported fallback" in caplog.text
+
+
+@pytest.mark.parametrize("settings", [[(32, 4, 1)], [(64, 4, 2)], [(32, 2, 2)]])
+def test_state_kernel_does_not_invent_unsupported_setting(
+    monkeypatch, caplog, settings
+):
+    kernel, configs, _name = _install_state_kernel(monkeypatch, settings)
+    assert text_encoder.pin_fla_kernels() == {}
+    assert kernel.configs is configs
+    assert "no launch setting" in caplog.text
+
+
+def test_two_stage_fallback_is_not_used_for_other_kernels(monkeypatch):
+    kernel, configs, _name = _install_state_kernel(
+        monkeypatch, [(32, 4, 2)], path="fake_kernels.other_state_kernel"
+    )
+    assert text_encoder.pin_fla_kernels() == {}
+    assert kernel.configs is configs
+
+
+def test_two_stage_fallback_requires_the_original_requested_setting(monkeypatch):
+    kernel, configs, _name = _install_state_kernel(monkeypatch, [(32, 4, 2)])
+    monkeypatch.setattr(
+        text_encoder, "FLA_KERNEL_CONFIGS", {_STATE_KERNEL: ({"BV": 32}, 4, 4)}
+    )
+    assert text_encoder.pin_fla_kernels() == {}
+    assert kernel.configs is configs

@@ -238,12 +238,39 @@ class PraxisPolicy(nn.Module):
 
     @classmethod
     def from_pretrained(
-        cls, path: str | Path, device: str | torch.device = "cuda"
+        cls,
+        path: str | Path,
+        device: str | torch.device = "cuda",
+        *,
+        routed_precision: str = "bf16",
+        nvfp4_cache: str | Path | None = None,
     ) -> PraxisPolicy:
-        """Build the model from ``config.json`` and load the weights strictly."""
+        """Load the checkpoint, optionally packing only routed experts as NVFP4.
+
+        ``routed_precision="nvfp4"`` changes the expert output bits. It packs
+        one bank at a time on the CPU, so the BF16 banks never occupy CUDA
+        memory. Shared experts, dense layers and the action expert retain
+        their checkpoint tensors. The default uses the original strict loader.
+        """
+        if routed_precision not in ("bf16", "nvfp4"):
+            raise ValueError("routed_precision must be 'bf16' or 'nvfp4'")
         with torch.device("meta"):
             model = cls.from_config(load_config(path))
-        load_checkpoint(model, path, device=str(device), assign=True)
+        if routed_precision == "nvfp4":
+            from praxis.quantization.loading import (
+                check_nvfp4_device,
+                load_routed_nvfp4,
+            )
+
+            check_nvfp4_device(device)
+            load_routed_nvfp4(
+                model,
+                path,
+                device=device,
+                cache=nvfp4_cache,
+            )
+        else:
+            load_checkpoint(model, path, device=str(device), assign=True)
         return model.eval().requires_grad_(False)
 
     @property

@@ -64,6 +64,8 @@ def build_pipeline(cfg: dict) -> PraxisPipeline:
             if m.get("vae_norm_block_c")
             else None
         ),
+        routed_precision=str(m.get("routed_precision", "bf16")),
+        nvfp4_cache=m.get("nvfp4_cache"),
         sampler=SamplerSettings(
             num_steps=int(s["num_steps"]),
             t_shift=float(s["t_shift"]),

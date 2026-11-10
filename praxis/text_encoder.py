@@ -22,7 +22,9 @@ different rounding. Bitwise parity needs the same package versions:
 The ``flash-linear-attention`` kernels pick their launch settings by timing
 (Triton autotuning) in each new process, and some settings change the output
 bits. :func:`pin_fla_kernels` gives each of these kernels one fixed setting:
-the pick of the validation runs (:data:`FLA_KERNEL_CONFIGS`).
+the pick of the validation runs (:data:`FLA_KERNEL_CONFIGS`). For the recurrent
+state kernel, devices whose supported settings omit three stages use its
+existing two-stage setting with the same tile size and warp count.
 """
 
 from __future__ import annotations
@@ -69,8 +71,9 @@ def pin_fla_kernels() -> dict[str, str]:
 
     A Triton autotuner with one setting runs that setting and times nothing.
     A kernel stays autotuned when this ``flash-linear-attention`` version
-    does not have it or does not offer its setting. Return the fixed settings
-    by kernel name (empty without the package).
+    does not have it or does not offer its setting. The recurrent state kernel
+    uses its supported two-stage setting when the preferred three-stage setting
+    is absent. Return the fixed settings by kernel name (empty without the package).
     """
     from triton.runtime import Autotuner
 
@@ -88,6 +91,26 @@ def pin_fla_kernels() -> dict[str, str]:
             for c in getattr(kernel, "configs", [])
             if (c.kwargs, c.num_warps, c.num_stages) == (kwargs, num_warps, num_stages)
         ]
+        if (
+            not same
+            and path
+            == "fla.ops.common.chunk_delta_h.chunk_gated_delta_rule_fwd_kernel_h_blockdim64"
+            and (kwargs, num_warps, num_stages) == ({"BV": 32}, 4, 3)
+        ):
+            # FLA 0.5.0 omits stage 3 below 166,912 bytes of shared memory.
+            # Use only the supported stage-2 setting; retain stage 3 on H100.
+            same = [
+                c
+                for c in getattr(kernel, "configs", [])
+                if (c.kwargs, c.num_warps, c.num_stages) == ({"BV": 32}, 4, 2)
+            ]
+            if same:
+                logger.info(
+                    "%s: preferred BV=32, num_warps=4, num_stages=3 unavailable; "
+                    "using fixed supported fallback %s",
+                    name,
+                    same[0],
+                )
         if not same:
             logger.warning("%s: no launch setting %s to fix", name, kwargs)
             continue

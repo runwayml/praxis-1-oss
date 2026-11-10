@@ -64,9 +64,17 @@ class PraxisPipeline:
         device: str | torch.device = "cuda",
         sampler: SamplerSettings | None = None,
         vae_norm_block_c: dict[int, int] | None = None,
+        *,
+        routed_precision: str = "bf16",
+        nvfp4_cache: str | Path | None = None,
     ) -> None:
         self.device = torch.device(device)
-        self.policy = PraxisPolicy.from_pretrained(checkpoint, device=self.device)
+        self.policy = PraxisPolicy.from_pretrained(
+            checkpoint,
+            device=self.device,
+            routed_precision=routed_precision,
+            nvfp4_cache=nvfp4_cache,
+        )
         self.vae = Autoencoder.from_pretrained(
             vae_weights, device=self.device, norm_block_c=vae_norm_block_c
         )

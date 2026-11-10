@@ -56,7 +56,11 @@ def test_code_defaults_are_the_droid_config() -> None:
     cfg = yaml.safe_load(DROID.read_text())
     assert dataclasses.asdict(SamplerConfig()) == cfg["sampler"]
     assert dataclasses.asdict(SessionConfig()) == cfg["session"]
-    assert dataclasses.asdict(ModelConfig()) == cfg["model"]
+    model = dataclasses.asdict(ModelConfig())
+    # Inference precision is opt-in; recommended YAML settings stay unchanged.
+    assert model.pop("routed_precision", "bf16") == "bf16"
+    assert model.pop("nvfp4_cache", None) is None
+    assert model == cfg["model"]
     assert (SamplerConfig().layout, SessionConfig().max_context_chunks) == (
         "window_joint",
         1,

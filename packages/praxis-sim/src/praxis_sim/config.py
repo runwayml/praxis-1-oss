@@ -54,6 +54,8 @@ class ModelConfig:
     text_encoder: str = "weights/Qwen3.5-2B"
     device: str = "cuda"
     vae_norm_block_c: dict[int, int] | None = None  # None = the default table
+    routed_precision: str = "bf16"
+    nvfp4_cache: str | None = None
 
 
 @dataclass

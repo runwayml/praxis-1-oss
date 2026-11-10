@@ -315,6 +315,10 @@ class ModelPolicy:
             text_encoder=m.text_encoder,
             device=m.device,
             vae_norm_block_c=m.vae_norm_block_c or None,
+            # An older praxis-sim (the sim extra installs the one of main) has
+            # no NVFP4 fields: those runs keep the default bf16 loader.
+            routed_precision=getattr(m, "routed_precision", "bf16"),
+            nvfp4_cache=getattr(m, "nvfp4_cache", None),
             sampler=SamplerSettings(
                 num_steps=s.num_steps,
                 t_shift=s.t_shift,
