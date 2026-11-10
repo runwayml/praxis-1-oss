@@ -706,9 +706,13 @@ def test_a_real_time_session_predicts_on_the_real_time_grid() -> None:
 def test_the_window_of_each_prediction_is_the_chunked_stack_of_that_call() -> None:
     """The raws that each prediction encodes are the stack rows that the
     chunked recipe would send on the same call, ending right before the
-    current frame: 21 raws, one every 1/15 s."""
+    current frame: 21 raws, one every 1/15 s. Without the precompute each
+    prediction encodes its own window (test_serve_precompute covers the
+    precompute)."""
     factory = _factory()
-    policy = factory({"schedule": "rtc", "sample_seed": 0, "sample_fps": 30})
+    policy = factory(
+        {"schedule": "rtc", "sample_seed": 0, "sample_fps": 30, "precompute": "off"}
+    )
     _answers, at, _ = _drive(policy, DELAYS[:6], 6.0)
     vae = factory.pipe.vae
     assert isinstance(vae, _Encoder)
@@ -1091,9 +1095,12 @@ def test_a_single_arm_session_declares_the_periodic_recipe() -> None:
 
 def test_a_single_arm_session_serves_the_rows_of_the_frame_stack() -> None:
     """Every prediction of a periodic single-arm session encodes the stack rows of
-    that call, and every row keeps the control law and the client frame."""
+    that call, and every row keeps the control law and the client frame.
+    Without the precompute each prediction encodes its own window."""
     factory = _droid_factory()
-    policy = factory({"schedule": "rtc", "sample_seed": 0, "sample_fps": 30})
+    policy = factory(
+        {"schedule": "rtc", "sample_seed": 0, "sample_fps": 30, "precompute": "off"}
+    )
     answers, at, _ = _drive(policy, DELAYS[:6], 6.0, sample=_droid_sample)
     assert len(answers) == 6
     assert np.diff(at).tolist()[0] == 24 + 9 and set(np.diff(at).tolist()[1:]) == {24}
@@ -1163,9 +1170,10 @@ def test_a_debug_session_falls_back_to_the_chunked_schedule() -> None:
 def test_the_default_samples_at_the_action_rate() -> None:
     """The default session samples at 15 Hz: every sample is a row of the window.
     The grid is 12 samples (the stride) after the first answer's delay, and each
-    window is the 21 samples before the prediction's own."""
+    window is the 21 samples before the prediction's own (without the
+    precompute, which encodes it ahead)."""
     factory = _droid_factory()
-    policy = factory({"schedule": "rtc", "sample_seed": 0})
+    policy = factory({"schedule": "rtc", "sample_seed": 0, "precompute": "off"})
     assert policy.periodic is not None and policy.periodic.sample_fps == 15.0
     answers, at, _ = _drive(
         policy, DELAYS[:6], 6.0, sample=_droid_sample, sample_fps=15.0

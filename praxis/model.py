@@ -10,6 +10,7 @@ actions.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -135,6 +136,61 @@ class SamplerSettings:
             cfg_video_scale=float(s.get("cfg_video_scale", 4.0)),
             cfg_batched=bool(s.get("cfg_batched", False)),
         )
+
+
+@dataclass
+class TrunkPlan:
+    """The trunk passes of one ``window_joint`` call, run ahead of the call.
+
+    :meth:`PraxisPolicy.plan_window_joint` makes it and
+    :meth:`PraxisPolicy.finish_window_joint` runs the expert passes on it.
+    The inputs fields hold the tensors that the trunk read. ``taps[s]`` holds
+    the taps of the guided pass of step ``s``, ``taps_uncond[s]`` those of the
+    unguided pass (None when the action scale is 1.0). ``video`` is the video
+    latent of the last chunk, float32, or None for a plan that skipped the
+    video decoder of the last step.
+    """
+
+    text: Tensor
+    text_uncond: Tensor | None
+    anchor: Tensor
+    cleans: list[Tensor]
+    seed: int
+    settings: SamplerSettings
+    taps: list[ChunkCausalTaps]
+    taps_uncond: list[ChunkCausalTaps | None]
+    video: Tensor | None
+
+    def matches(
+        self,
+        text: Tensor,
+        text_uncond: Tensor | None,
+        anchor: Tensor,
+        cleans: list[Tensor],
+        seed: int,
+        settings: SamplerSettings,
+    ) -> bool:
+        """Return whether the trunk read exactly these inputs (``torch.equal``)."""
+        if int(seed) != self.seed or settings != self.settings:
+            return False
+        if len(cleans) != len(self.cleans):
+            return False
+        if (text_uncond is None) != (self.text_uncond is None):
+            return False
+        pairs = [(text, self.text), (anchor, self.anchor)]
+        pairs += list(zip(cleans, self.cleans, strict=True))
+        if text_uncond is not None and self.text_uncond is not None:
+            pairs.append((text_uncond, self.text_uncond))
+        return all(_same_tensor(a, b) for a, b in pairs)
+
+
+def _same_tensor(a: Tensor, b: Tensor) -> bool:
+    """Return whether two tensors have the same shape, dtype, device and values."""
+    if a is b:
+        return True
+    if a.shape != b.shape or a.dtype != b.dtype or a.device != b.device:
+        return False
+    return bool(torch.equal(a, b))
 
 
 class PraxisPolicy(nn.Module):
@@ -403,3 +459,159 @@ class PraxisPolicy(nn.Module):
             probe("out.video_last", video_last)
         probe("out.action_last", actions)
         return video_last, actions[None]
+
+    @torch.no_grad()
+    def plan_window_joint(
+        self,
+        text: Tensor,
+        text_uncond: Tensor | None,
+        anchor: Tensor,
+        cleans: list[Tensor],
+        seed: int,
+        settings: SamplerSettings,
+        skip_last_video: bool = False,
+    ) -> TrunkPlan:
+        """Run the trunk passes of :meth:`sample_window_joint` ahead of the call.
+
+        No trunk pass reads the actions or the proprio: the video Euler state
+        moves with the video velocity only. So every backbone call of a
+        ``window_joint`` call can run once the window frames are known, before
+        the current pose arrives. This runs them, in the order and with the
+        inputs of :meth:`sample_window_joint`, and keeps the taps of each pass
+        that the expert reads. :meth:`finish_window_joint` then runs the
+        expert passes. Together they give the bits of
+        :meth:`sample_window_joint`: the same calls on the same inputs, with
+        only the order between the backbone and the expert changed. A trace
+        is not supported.
+
+        ``skip_last_video`` runs the last step without the video decoder: the
+        last step moves only the actions, which read only the encoder taps.
+        The actions keep their bits, and the plan has no video (None).
+
+        ``settings.cfg_batched`` raises ``ValueError``: the plan runs the
+        guided and the unguided passes one after the other.
+        """
+        if settings.layout != "window_joint":
+            raise ValueError(f"layout {settings.layout!r} is not 'window_joint'")
+        if settings.cfg_batched:
+            raise ValueError(
+                "plan_window_joint runs the guidance passes one after the other; "
+                "it does not plan cfg_batched"
+            )
+        guided = settings.guided
+        if guided and text_uncond is None:
+            raise ValueError("text guidance needs the encoded blank caption")
+        dev, md = self.device, self.dtype
+        lat = int(self.config["chunking"]["latents_per_chunk"])
+        d = len(cleans)
+        kk = d + 1
+        if kk > int(self.config["chunking"]["n_chunks"]):
+            raise ValueError(f"depth {d} is out of range")
+        c, h, w = anchor.shape[1], anchor.shape[3], anchor.shape[4]
+        noise_v = seeded_normal((1, c, kk * lat, h, w), seed, VIDEO_SALT)
+        ts = window_time_grid(settings.num_steps, settings.t_shift)
+        xv = to_device_async(noise_v, dev)
+        anchor_m = anchor.to(dev, md)
+        clean = torch.cat([z.to(dev, md) for z in cleans], dim=2) if d else None
+        text_c = text.to(dev, md)
+        text_u = None if text_uncond is None else text_uncond.to(dev, md)
+        backbone = cast(ChunkCausalBackbone, self.backbone)
+        # The passes of sample_window_joint without a trace.
+        decode_uncond = float(settings.cfg_video_scale) != 1.0
+        act_uncond = float(settings.cfg_scale) != 1.0
+        taps: list[ChunkCausalTaps] = []
+        taps_uncond: list[ChunkCausalTaps | None] = []
+        for step in range(settings.num_steps):
+            t_cur, t_next = ts[step], ts[step + 1]
+            video = not (skip_last_video and step == settings.num_steps - 1)
+            t_trunk = torch.full((1, kk), t_cur, dtype=md, device=dev)
+            out = backbone.forward_chunk_causal(
+                text_c, anchor_m, clean, xv.to(md), t_trunk, decode=video
+            )
+            if video and out.velocity is None:
+                raise RuntimeError(f"the trunk pass of step {step} gave no video")
+            v = None if out.velocity is None else out.velocity.float()
+            taps.append(out.taps)
+            unc_taps = None
+            if guided and (video or act_uncond):
+                assert text_u is not None
+                t_trunk = torch.full((1, kk), t_cur, dtype=md, device=dev)
+                out_u = backbone.forward_chunk_causal(
+                    text_u,
+                    anchor_m,
+                    clean,
+                    xv.to(md),
+                    t_trunk,
+                    decode=video and decode_uncond,
+                )
+                if v is not None and out_u.velocity is not None:
+                    v = guidance_combine(
+                        v, out_u.velocity.float(), settings.cfg_video_scale
+                    )
+                if act_uncond:
+                    unc_taps = out_u.taps
+            taps_uncond.append(unc_taps)
+            if v is not None:
+                xv = xv + (t_next - t_cur) * v
+        # Copies of the inputs that matches() checks: a caller that changes
+        # its tensors or its settings after the plan does not change the plan.
+        return TrunkPlan(
+            text=text.clone(),
+            text_uncond=None if text_uncond is None else text_uncond.clone(),
+            anchor=anchor.clone(),
+            cleans=[z.clone() for z in cleans],
+            seed=int(seed),
+            settings=dataclasses.replace(settings),
+            taps=taps,
+            taps_uncond=taps_uncond,
+            video=None if skip_last_video else xv[:, :, d * lat :].contiguous(),
+        )
+
+    @torch.no_grad()
+    def finish_window_joint(
+        self, plan: TrunkPlan, proprio_all: Tensor
+    ) -> tuple[Tensor | None, Tensor]:
+        """Run the expert passes of a :class:`TrunkPlan` on ``proprio_all``.
+
+        Returns the video latent (None if the plan skipped it) and the actions
+        of :meth:`sample_window_joint` on the inputs of the plan.
+        """
+        settings = plan.settings
+        dev = self.device
+        lat = int(self.config["chunking"]["latents_per_chunk"])
+        d = len(plan.cleans)
+        kk = d + 1
+        pro = proprio_all if proprio_all.ndim == 3 else proprio_all[None]
+        if pro.shape[:2] != (1, kk):
+            raise ValueError(f"proprio_all {tuple(pro.shape)} for {kk} chunks")
+        a_dim = int(self.config["action_expert"]["action_patch_dim"])
+        noise_a = seeded_normal((kk * lat, a_dim), plan.seed, ACTION_SALT)
+        ts = window_time_grid(settings.num_steps, settings.t_shift)
+        xa = to_device_async(noise_a, dev)
+        pro = pro.to(dev, torch.float32)
+
+        def expert(taps: ChunkCausalTaps, x_a: Tensor, t_cur: float) -> Tensor:
+            return run_expert_on_taps_k(
+                self.action_expert,
+                taps.taps,
+                taps.embeddings,
+                taps.rope_ids,
+                global_spans=taps.global_spans,
+                noised_span=taps.noised_span,
+                clean_span=taps.clean_span,
+                n_chunks=kk,
+                frames_per_chunk=taps.frames_per_chunk,
+                tokens_per_frame=taps.tokens_per_frame,
+                noised_actions=x_a[None],
+                action_t_per_chunk=torch.full((1, kk), t_cur, device=dev),
+                proprio_per_chunk=pro,
+            ).float()[0]
+
+        for step in range(settings.num_steps):
+            t_cur, t_next = ts[step], ts[step + 1]
+            a = expert(plan.taps[step], xa, t_cur)
+            unc_taps = plan.taps_uncond[step]
+            if unc_taps is not None:
+                a = guidance_combine(a, expert(unc_taps, xa, t_cur), settings.cfg_scale)
+            xa = xa + (t_next - t_cur) * a
+        return plan.video, xa[d * lat :].contiguous()[None]

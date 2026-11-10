@@ -539,6 +539,7 @@ class FusedEncoder:
     ) -> None:
         self.enc = enc
         self.n_caches = count_causal_convs(enc)
+        self._prepadded: dict[int, Tensor] = {}
         self.norms: dict[int, _FusedNormSiLU] = {}
 
         def fused(norm: nn.Module) -> _FusedNormSiLU:
@@ -758,6 +759,107 @@ class FusedEncoder:
         return z[:, :, : 1 + (video.shape[2] - 1) // 4].to(torch.bfloat16)
 
 
+class StreamEncode:
+    """``Autoencoder.encode`` of a clip whose frames arrive one at a time.
+
+    ``FusedEncoder.encode`` runs the causal encoder chunk by chunk: the first
+    frame alone, then 4-frame chunks, each reading only the caches of the
+    chunks before it. This class runs the same chunks with the same buffers,
+    the same caches and the same autocast in the same order, each chunk as
+    soon as its frames are in. So :meth:`latent` has the bits of one
+    ``encode`` of the whole clip. It shares the fused encoder of the
+    autoencoder (:meth:`Autoencoder.fused_encoder`): the encoder keeps no
+    state between two chunks. The design is the ``StreamEncoder`` of a
+    WebRTC receiver.
+    """
+
+    def __init__(self, fused: FusedEncoder, n_frames: int) -> None:
+        if n_frames < 1:
+            raise ValueError("n_frames must be positive")
+        self.fused = fused
+        self.n = int(n_frames)
+        t_eff = 1 + 4 * ((self.n - 1) // 4)
+        cuts = {1, t_eff}
+        cut = 5
+        while cut < t_eff:
+            cuts.add(cut)
+            cut += 4
+        self.boundaries = sorted(cuts)
+        self.caches = Caches(fused.n_caches)
+        self.added = 0
+        # The frames of the chunk that is not complete yet, in [-1, 1].
+        self._pending: list[Tensor] = []
+        self.chunks: list[Tensor] = []
+        self._prev = 0
+        self._next = 0
+
+    @property
+    def done(self) -> bool:
+        return self._next == len(self.boundaries)
+
+    def add(self, frame: Tensor) -> None:
+        """Append one ``(1, 3, 1, H, W)`` frame in ``[0, 255]``; run each chunk it completes."""
+        if self.added >= self.n:
+            raise ValueError("the clip is complete")
+        self.added += 1
+        if self.done:
+            return  # past the last chunk, as FusedEncoder.encode skips it
+        self._pending.append(Autoencoder._to_unit(frame))
+        while not self.done:
+            cut = self.boundaries[self._next]
+            t_hi = min(cut, self.n)
+            if self.added < t_hi:
+                return
+            with (
+                torch.no_grad(),
+                torch.autocast("cuda", dtype=torch.bfloat16),
+                torch.autocast("cuda", dtype=torch.float16),
+            ):
+                self.chunks.append(self._chunk(cut, t_hi))
+            self._prev = cut
+            self._next += 1
+
+    def _chunk(self, cut: int, t_hi: int) -> Tensor:
+        # The loop body of FusedEncoder.encode on the frames [prev, t_hi).
+        prev = self._prev
+        seg = torch.cat(self._pending[: t_hi - prev], dim=2)
+        del self._pending[: t_hi - prev]
+        h2, w2 = seg.shape[-2] // 2, seg.shape[-1] // 2
+        buf = torch.empty(
+            (1, 12, cut - prev + CACHE_T, h2, w2),
+            dtype=seg.dtype,
+            device=seg.device,
+            memory_format=CL3D,
+        )
+        first = self.caches.items[0]
+        if first is None:
+            buf[:, :, :CACHE_T].zero_()
+        else:
+            buf[:, :, :CACHE_T].copy_(first)  # ty: ignore[invalid-argument-type]
+        body = buf[:, :, CACHE_T:]
+        tlen = t_hi - prev
+        for q in (0, 1):
+            for r in (0, 1):
+                dst = body[:, r * 2 + q :: 4]
+                dst[:, :, :tlen] = seg[:, :, :, q::2, r::2]
+                if tlen < cut - prev:
+                    dst[:, :, tlen:] = seg[:, :, -1:, q::2, r::2]
+        self.caches.index = 0
+        # The prepadded buffers are keyed by tensor id and live within one
+        # _forward. FusedEncoder.encode starts each encode with an empty map.
+        self.fused._prepadded = {}
+        return self.fused._forward(buf, self.caches)
+
+    def latent(self) -> Tensor:
+        """Return the policy latent of the whole clip, as ``Autoencoder.encode`` does."""
+        if not self.done:
+            raise RuntimeError(f"{self.added} of {self.n} frames encoded")
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            z = torch.cat(self.chunks, dim=2)
+            z = z[:, :, : 1 + (self.n - 1) // 4].to(torch.bfloat16)
+            return to_policy_latent(z)
+
+
 # ---------------------------------------------------------------------------
 # Autoencoder
 # ---------------------------------------------------------------------------
@@ -819,18 +921,23 @@ class Autoencoder(nn.Module):
         """Map ``[0, 255]`` frames to ``[-1, 1]`` float32."""
         return (frames.float() / 255) * 2 - 1
 
+    def fused_encoder(self) -> FusedEncoder:
+        """Return the fused encoder of :meth:`encode`, built on the first use."""
+        if self._fused is None:
+            self._fused = FusedEncoder(
+                self.encoder, self.conv1, self.scale, self.norm_block_c
+            )
+        return self._fused
+
     @torch.no_grad()
     def encode(self, frames: Tensor) -> Tensor:
         """Encode ``(1, 3, T, H, W)`` frames in ``[0, 255]`` to the policy latent.
 
         This is the fused path. It needs CUDA and Triton.
         """
-        if self._fused is None:
-            self._fused = FusedEncoder(
-                self.encoder, self.conv1, self.scale, self.norm_block_c
-            )
+        fused = self.fused_encoder()
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            z = self._fused.encode(self._to_unit(frames))
+            z = fused.encode(self._to_unit(frames))
             return to_policy_latent(z)
 
     @torch.no_grad()

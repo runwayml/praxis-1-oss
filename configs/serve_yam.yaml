@@ -46,3 +46,4 @@ session:
   skip_video_decoder: on          # on | off (on skips the video decoder of the last Euler step)
   prompt: ""                      # task string until the robot sends one
   schedule: chunked               # chunked | rtc (real-time chunking, opt-in, positronic 0.4.4+)
+  precompute: on                  # on | off (rtc sessions only; no effect on a chunked session)

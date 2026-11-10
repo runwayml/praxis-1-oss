@@ -312,6 +312,7 @@ The session parameters of real-time chunking:
 | `rtc_reach_max_m` | `auto` | Bimanual rig: reach radius in m, `auto` (0.595 on both arms), `off`, one radius, or `left,right`. |
 | `sample_fps` | 15 | Samples per second, a whole multiple of the 15 Hz action rate. |
 | `max_in_flight` | 16 | Calls that the client may have in flight (1 to 16). |
+| `precompute` | `on` | Runs the window encode and the trunk passes of each prediction on the samples before it (see below). `off` turns it off. Real-time sessions only. |
 
 A real-time session needs `context_mode=observed`, `max_context_chunks`
 of 1 or more, and the full chunk (`exec_horizon` 24 or null). Under the
@@ -319,6 +320,81 @@ of 1 or more, and the full chunk (`exec_horizon` 24 or null). Under the
 stateless context or a shorter `exec_horizon` gets the chunked schedule; with
 an explicit `schedule=rtc` in its query it is refused. These defaults are the junction rule of our robot runs with
 real-time chunking. They can change when we have more robot results.
+
+### Precompute of the next prediction
+
+A real-time prediction encodes its window (the frames that the robot ran
+since the context started), runs the trunk of both Euler steps and runs the
+action expert. The window rows are samples that arrive before the
+prediction, and no trunk pass reads the actions or the current pose. So the
+server does this work on the samples before the prediction
+(`praxis/serve/precompute.py`). It is on by default (`precompute: on` in
+both serve configs), and it applies to real-time sessions only
+(`schedule=rtc`). The default session is chunked: it does not use the
+precompute, and it is not faster with it. A client turns it off with
+`?precompute=off`, and a deploy with `precompute: off` in the `session`
+block of its config.
+
+- Each window row goes into a streamed encode as soon as its sample
+  arrives (`praxis.vae.StreamEncode`: the chunks of `Autoencoder.encode` in
+  the same order on the same buffers).
+- When the last window row is in, one row before the prediction, the server
+  runs the trunk passes (`PraxisPolicy.plan_window_joint`). The prediction
+  then runs only the expert passes (`finish_window_joint`).
+- The prediction checks each value before it uses it: a latent only for an
+  equal clip, the trunk passes only for an equal anchor, cleans, text, seed
+  and settings (`torch.equal`). On any difference it computes everything
+  as without the precompute.
+
+The answers keep their bits: the same model calls run on the same inputs.
+Each prediction reports `rtc_plan` in `server_timing`: `hit` (the trunk
+passes ran ahead), `late` (the sample of the last row was skipped, so the
+prediction finished the window), `miss` (an input differed), `stale` (a
+replan or a skipped prediction sample) or `none` (a cold start, or a session
+that does not plan).
+
+The default applies only where it can: on a chunked session it does
+nothing, with no error. An explicit `precompute=on` on a chunked session is
+refused, as the other real-time parameters are. A session with
+`cfg_batched=on` makes no plan yet: the plan runs the guided and the
+unguided passes one after the other, so those predictions report `none` and
+run the trunk passes in the call (the window encode still runs ahead).
+`cfg_batched` has no effect on the `window_joint` sampler today. When
+batched guidance lands, the plan must run the same batched passes before
+this refusal can go.
+
+The trunk passes need the last window row, so they start at most one row
+(67 ms at 15 Hz) before the prediction, and the prediction waits for the
+rest of them on the inference thread. The gain is the encode plus that head
+start, so it depends on how early the client sends the last row. Most of
+the plan's GPU time stays on the critical path. Measured on one H100, with
+the median over the warm predictions of each session. The columns are both
+off, the precompute alone, and both on (the default of a real-time session):
+
+| Rig | `precompute=off&skip_video_decoder=off` | `precompute=on&skip_video_decoder=off` | both on (default) |
+|---|---|---|---|
+| `praxis-1-yam`, round trip (client) | 638 ms | 523 ms | 397 ms |
+| `praxis-1-yam`, server time with the plan, no head start | 641 ms | 603 ms | 475 ms |
+| `praxis-1-droid`, round trip (client) | 694 ms | 601 ms | 379 ms |
+| `praxis-1-droid`, server time with the plan, no head start | 690 ms | 688 ms | 469 ms |
+
+- The round trip: a recorded episode per rig, replayed on the wall clock by
+  Positronic's client over a loopback WebSocket, 36 warm predictions per
+  session. The client sends each sample on its tick, so the plan gets the
+  one-row head start.
+- The server time: the samples go in back to back with no wall-clock gap,
+  timed from the start of the sample that runs the plan to the end of the
+  answer. With no head start, the precompute alone gains little (YAM
+  -38 ms, DROID -2 ms: the DROID plan, with video guidance 4.0, takes
+  about 580 ms of GPU time).
+- Most of the combined gain comes from `skip_video_decoder`. The
+  precompute alone gains the encode plus up to one row.
+
+The `served_ms` of the answers (YAM: 634 ms to 213 ms) leaves out the wait:
+the server reads the prediction request only after the sample before it,
+which runs the trunk passes. Read the round trip instead. The precompute
+holds the taps of one plan per session (about 0.6 GB on the YAM canvas at
+depth 1), and drops them before a fallback runs.
 
 ## Action clamp
 

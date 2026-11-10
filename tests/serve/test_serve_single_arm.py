@@ -70,13 +70,20 @@ VARIANT_KEYS = [
 ]
 
 
+class _Stream:
+    max_raws = 21
+
+
 class _State:
     prompt = ""
+    stream = _Stream()
 
 
 class _Session:
-    def __init__(self) -> None:
+    def __init__(self, precompute: bool = False) -> None:
         self.state = _State()
+        # A session opened with precompute keeps an encode memo.
+        self.memo = object() if precompute else None
 
 
 class _Policy:
@@ -97,7 +104,7 @@ class _Pipeline:
 
     def session(self, **kwargs: object) -> _Session:
         self.sessions.append(kwargs)
-        return _Session()
+        return _Session(precompute=bool(kwargs.get("precompute")))
 
 
 def _serve_config(name: str = "serve_droid.yaml") -> dict:
@@ -144,6 +151,7 @@ def test_serve_config_has_the_recipe() -> None:
         "skip_video_decoder": True,
         "prompt": "",
         "schedule": "chunked",
+        "precompute": True,
     }
     for key in ("checkpoint", "vae_weights", "text_encoder"):
         assert not Path(cfg["model"][key]).is_absolute(), key
@@ -191,7 +199,8 @@ def test_meta_adds_the_variant() -> None:
     # The serve config's default is the chunked schedule (a chunked session states no
     # schedule key); real-time chunking is opt-in.
     assert "schedule" not in meta
-    assert _factory(SINGLE_ARM)[0]({"schedule": "rtc"}).meta["schedule"] == "rtc"
+    rtc_meta = _factory(SINGLE_ARM)[0]({"schedule": "rtc"}).meta
+    assert rtc_meta["schedule"] == "rtc" and rtc_meta["precompute"] is True
     local_stack = meta["local_stack"]
     assert isinstance(local_stack, dict)
     # The chunked recipe of main: its entries carry no version.

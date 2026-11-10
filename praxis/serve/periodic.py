@@ -97,6 +97,11 @@ class PeriodicConfig:
         return round(r)
 
 
+def history_capacity(rows: int, ratio: int) -> int:
+    """Return the samples that a history keeps for ``rows`` rows back: plus a chunk of slack."""
+    return int(ratio) * (int(rows) + 24) + 4
+
+
 @dataclass
 class SampleHistory:
     """The stack keys of the recent samples by sample index, and the stack rule."""
@@ -112,7 +117,7 @@ class SampleHistory:
 
     def __post_init__(self) -> None:
         if self.capacity <= 0:
-            self.capacity = self.ratio * (self.history_rows + 24) + 4
+            self.capacity = history_capacity(self.history_rows, self.ratio)
 
     def reset(self) -> None:
         self._indices.clear()

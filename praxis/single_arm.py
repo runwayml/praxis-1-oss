@@ -914,6 +914,16 @@ class SingleArmServeSession:
         self._boundary_poses = []
         self.stream.reset()
 
+    def frame_clip(self, obs: dict) -> torch.Tensor:
+        """Return the tile clip ``(1, 3, 1, H, W)`` of the current frames of ``obs``.
+
+        A stack row's tiles do not depend on the other rows, so the clip of
+        one sample equals its row of a stacked clip.
+        """
+        return current_clip(
+            obs, self.device, self.tile_size, self.aspect_tol, self.antialias
+        )
+
     def prepare(
         self, obs: dict, executed_rows: int | None = None
     ) -> SingleArmChunkInputs:

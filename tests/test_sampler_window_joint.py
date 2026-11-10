@@ -715,3 +715,142 @@ def test_a_session_without_skip_overrides_the_policy_flag(
     )
     assert video is not None and ref_video is not None
     assert torch.equal(video, ref_video) and torch.equal(actions, ref_actions)
+
+
+# ---------------------------------------------------------------------------
+# The trunk passes ahead of the call (plan_window_joint, finish_window_joint)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("depth", "seed", "steps", "shift", "cfg", "cfg_v"), CASES)
+def test_plan_and_finish_give_the_bits_of_the_sampler(
+    monkeypatch: pytest.MonkeyPatch,
+    depth: int,
+    seed: int,
+    steps: int,
+    shift: float,
+    cfg: float,
+    cfg_v: float,
+) -> None:
+    """The trunk passes ahead of the call, then the expert passes on the
+    current proprio: the same calls on the same inputs as one sampler call."""
+    settings = SamplerSettings(
+        layout="window_joint",
+        num_steps=steps,
+        t_shift=shift,
+        cfg_scale=cfg,
+        cfg_video_scale=cfg_v,
+    )
+    inp = _inputs(depth)
+    stock, split = Calls(), Calls()
+    monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(stock))
+    want = _policy(stock).sample_window_joint(seed=seed, settings=settings, **inp)
+    monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(split))
+    policy = _policy(split)
+    trunk_inputs = {k: v for k, v in inp.items() if k != "proprio_all"}
+    plan = policy.plan_window_joint(seed=seed, settings=settings, **trunk_inputs)
+    assert split.expert == []
+    video, actions = policy.finish_window_joint(plan, inp["proprio_all"])
+    assert video is not None and want[0] is not None
+    assert torch.equal(video, want[0])
+    assert torch.equal(actions, want[1])
+    assert len(split.trunk) == len(stock.trunk)
+    for a, b in zip(split.trunk, stock.trunk, strict=True):
+        assert a["decode"] is b["decode"]
+        assert torch.equal(a["noised"], b["noised"]) and torch.equal(a["t"], b["t"])
+    assert len(split.expert) == len(stock.expert)
+    for a, b in zip(split.expert, stock.expert, strict=True):
+        assert torch.equal(a["noised_actions"], b["noised_actions"])
+        assert torch.equal(a["action_t_per_chunk"], b["action_t_per_chunk"])
+        assert torch.equal(a["proprio_per_chunk"], b["proprio_per_chunk"])
+
+
+def test_a_plan_matches_only_its_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = Calls()
+    monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(calls))
+    settings = SamplerSettings(num_steps=2, cfg_video_scale=4.0)
+    inp = _inputs(2)
+    text, unc, anchor, cleans = (
+        inp["text"],
+        inp["text_uncond"],
+        inp["anchor"],
+        inp["cleans"],
+    )
+    plan = _policy(calls).plan_window_joint(text, unc, anchor, cleans, 4, settings)
+    assert plan.matches(text, unc, anchor, cleans, 4, settings)
+    # Equal values in other tensors match too: the check is on the values.
+    copies = [z.clone() for z in cleans]
+    assert plan.matches(text.clone(), unc.clone(), anchor.clone(), copies, 4, settings)
+    bumped = anchor.clone()
+    bumped.view(-1)[0] += 1
+    wide = [*cleans[:-1], cleans[-1].float()]
+    assert not plan.matches(text, unc, anchor, cleans, 5, settings)
+    other = SamplerSettings(num_steps=3, cfg_video_scale=4.0)
+    assert not plan.matches(text, unc, anchor, cleans, 4, other)
+    assert not plan.matches(text, unc, bumped, cleans, 4, settings)
+    assert not plan.matches(text, unc, anchor, cleans[:1], 4, settings)
+    assert not plan.matches(text, unc, anchor, wide, 4, settings)
+    assert not plan.matches(text[:, :4], unc, anchor, cleans, 4, settings)
+    assert not plan.matches(text, None, anchor, cleans, 4, settings)
+
+
+@pytest.mark.parametrize(("cfg", "cfg_v"), [(1.0, 1.0), (1.0, 4.0), (3.0, 2.0)])
+def test_a_plan_without_the_last_video_keeps_the_actions(
+    monkeypatch: pytest.MonkeyPatch, cfg: float, cfg_v: float
+) -> None:
+    """``skip_last_video`` runs the last step without the video decoder: the
+    actions keep the bits of the sampler, and the plan has no video."""
+    settings = SamplerSettings(num_steps=2, cfg_scale=cfg, cfg_video_scale=cfg_v)
+    inp = _inputs(1)
+    stock, split = Calls(), Calls()
+    monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(stock))
+    _video, want = _policy(stock).sample_window_joint(seed=2, settings=settings, **inp)
+    monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(split))
+    policy = _policy(split)
+    trunk_inputs = {k: v for k, v in inp.items() if k != "proprio_all"}
+    plan = policy.plan_window_joint(
+        seed=2, settings=settings, skip_last_video=True, **trunk_inputs
+    )
+    video, got = policy.finish_window_joint(plan, inp["proprio_all"])
+    assert video is None and torch.equal(got, want)
+    last = [c for c in split.trunk[-2:] if c["t"][0, 0] == split.trunk[-1]["t"][0, 0]]
+    assert all(c["decode"] is False for c in last)
+
+
+@pytest.mark.parametrize(("cfg", "cfg_v"), [(1.0, 1.0), (3.0, 4.0)])
+def test_a_plan_keeps_what_its_expert_passes_read(
+    monkeypatch: pytest.MonkeyPatch, cfg: float, cfg_v: float
+) -> None:
+    """The real (tiny) backbone and expert. The plan holds the taps, the
+    embeddings and the rope ids that the expert passes read. The expert builds
+    its masks on each call. So the plan needs no cache: with the mask caches of
+    both towers emptied between the plan and the expert passes, the result
+    keeps the bits of one sampler call."""
+    from tiny_model import TINY_HW, tiny_policy
+    from torch.nn.attention.flex_attention import flex_attention
+
+    import praxis.layers
+
+    # The compiled CPU flex kernel of torch 2.13 fails to build for some masks.
+    monkeypatch.setattr(praxis.layers, "_compiled_flex_attention", flex_attention)
+    policy = tiny_policy()
+    h, w = TINY_HW
+    g = torch.Generator().manual_seed(0)
+    text = torch.randn(1, 5, 32, generator=g).to(MD)
+    unc = torch.randn(1, 1, 32, generator=g).to(MD)
+    anchor = torch.randn(1, C, 1, h, w, generator=g).to(MD)
+    cleans = [torch.randn(1, C, LAT, h, w, generator=g).to(MD)]
+    pro = torch.randn(1, 2, 10, generator=g)
+    settings = SamplerSettings(num_steps=2, cfg_scale=cfg, cfg_video_scale=cfg_v)
+    want = policy.sample_window_joint(text, unc, anchor, cleans, pro, 3, settings)
+    plan = policy.plan_window_joint(text, unc, anchor, cleans, 3, settings)
+    towers = (policy.backbone.encoder, policy.backbone.decoder)
+    caches = [getattr(t, "_tf_masks")._entries for t in towers]  # noqa: B009
+    assert all(len(c) for c in caches)
+    for c in caches:
+        c.clear()
+    video, actions = policy.finish_window_joint(plan, pro)
+    assert all(len(c) == 0 for c in caches)  # the expert passes ran no trunk
+    assert video is not None and want[0] is not None
+    assert torch.equal(video, want[0])
+    assert torch.equal(actions, want[1])

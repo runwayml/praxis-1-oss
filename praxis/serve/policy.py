@@ -20,6 +20,10 @@ and adds the session rules of the server:
   (:mod:`praxis.serve.periodic`): the client sends every sample, the server
   keeps the history, predicts every ``rtc_stride`` rows and joins each chunk
   to the plan that the robot runs meanwhile (:mod:`praxis.serve.rtc`).
+  ``precompute`` (on by default; ``precompute=off`` turns it off) runs the
+  window encode and the trunk passes of each prediction on the samples
+  before it (:mod:`praxis.serve.precompute`). It applies to real-time
+  sessions only: a chunked session does not use it.
 
 The server serves the single-arm checkpoint (the ``franka_ee`` wire) and the
 bimanual checkpoint (the ``yam_ee2`` wire). The handshake meta holds the
@@ -42,7 +46,7 @@ from praxis import bimanual, robot_io, single_arm
 from praxis.checkpoint import model_variant
 from praxis.pipeline import PraxisPipeline, StepResult
 from praxis.sampler import action_substep_grid, check_guidance, sampler_num_evals
-from praxis.serve import params, periodic, rtc
+from praxis.serve import params, periodic, precompute, rtc
 from praxis.serve.wire import compress_images, image_codecs
 
 logger = logging.getLogger(__name__)
@@ -68,6 +72,7 @@ SESSION_DEFAULTS: dict = {
     "max_chunks_per_episode": None,
     "schedule": "chunked",
     "skip_video_decoder": None,
+    "precompute": True,
 }
 SCHEDULES: tuple[str, ...] = ("chunked", "rtc")
 # The session parameters of the real-time schedule.
@@ -81,6 +86,7 @@ RTC_PARAMS: frozenset[str] = frozenset(
         "rtc_grip",
         "rtc_grip_rows",
         "rtc_reach_max_m",
+        "precompute",
     }
 )
 
@@ -300,7 +306,13 @@ class ServedPolicy:
             self.schedule = "chunked"
         self.rtc: rtc.RTCConfig | None = None
         self.periodic: periodic.PeriodicConfig | None = None
-        rtc_keys = sorted(k for k in o if k in RTC_PARAMS)
+        # precompute=off asks for nothing, so any session takes it.
+        rtc_keys = sorted(
+            k
+            for k in o
+            if k in RTC_PARAMS
+            and not (k == "precompute" and params.parse_on_off(o[k]) is False)
+        )
         if self.schedule == "rtc":
             self.rtc, self.periodic = _rtc_session(factory, o, context_mode)
         elif rtc_keys:
@@ -367,6 +379,11 @@ class ServedPolicy:
             cfg_video_scale=self.cfg_video_scale,
             cfg_batched=self.cfg_batched,
         )
+        # The precompute serves the real-time schedule. The default (on)
+        # leaves a chunked session without it, and an explicit precompute=on
+        # on a chunked session is refused above, as the other rtc keys are.
+        pre = params.parse_on_off(o.get("precompute", d["precompute"]))
+        self.precompute = bool(pre) and self.periodic is not None
         self.session = factory.pipe.session(
             prompt=prompt,
             seed=self.seed_base,
@@ -376,6 +393,7 @@ class ServedPolicy:
             exec_horizon=None,
             sampler=sampler,
             skip_last_video=self.skip_video_decoder,
+            **({"precompute": True} if self.precompute else {}),
         )
         self._history: periodic.SampleHistory | None = None
         self._grid: periodic.PredictGrid | None = None
@@ -383,16 +401,31 @@ class ServedPolicy:
         self._delay = rtc.DelayEstimate()
         # The sample of the last prediction, and the junction of this call.
         self._last_index: int | None = None
-        self._junction: dict[str, float] = {}
+        self._junction: dict[str, object] = {}
         self._pending_reset = False
         if self.periodic is not None:
             ratio = self.periodic.ratio(factory.fps)
+            # The precompute reads the whole window of the next prediction from
+            # the history: keep it for the deepest context (69 rows at three
+            # context chunks), more than the frame stack.
+            rows = self.history_frames
+            if self.precompute:
+                rows = max(rows, self.session.state.stream.max_raws)
             self._history = periodic.SampleHistory(
                 keys=factory.stack_keys,
                 history_rows=self.history_frames,
                 ratio=ratio,
+                capacity=periodic.history_capacity(rows, ratio),
             )
             self._grid = periodic.PredictGrid(ratio, float(self.periodic.sample_fps))
+        self._ahead: precompute.NextWindow | None = None
+        if self.precompute and self._history is not None:
+            self._ahead = precompute.NextWindow(
+                self.session,
+                self._history,
+                ratio,
+                skip_last_video=self.skip_video_decoder is True,
+            )
 
     @property
     def history_frames(self) -> int:
@@ -522,6 +555,7 @@ class ServedPolicy:
                 "sample_fps": float(self.periodic.sample_fps),
                 "max_in_flight": int(self.periodic.max_in_flight),
             },
+            "precompute": self.precompute,
         }
 
     def select_action(self, obs: dict) -> list[dict] | None:
@@ -614,6 +648,10 @@ class ServedPolicy:
             grid.reset()
         hist.append(obs, index)
         if not grid.due(index):
+            if self._ahead is not None:
+                self._ahead.feed(
+                    obs, grid.next_index, self._last_index, self._pending_reset
+                )
             return None
         state = self.session.state
         if self.max_chunks is not None and state.chunk_index >= self.max_chunks:
@@ -638,14 +676,52 @@ class ServedPolicy:
         # by half a row, as the stack of the chunked recipe would.
         last = self._last_index
         executed = 0 if last is None else (index - last) // grid.ratio
+        ahead = self._ahead
+        early = None
+        if ahead is not None:
+            if call_obs.get("reset_context") or call_obs.get("__reset_context__"):
+                # The call restarts the context: no window to plan.
+                early = "stale" if ahead.target is not None else None
+                ahead.drop()
+            else:
+                early = ahead.before_prediction(obs, index)
         res = self.session.step(call_obs, executed_rows=executed)
         rows = res.commands
         if self.smoothing in ("savgol", "sg"):
             rows = self._smoothed(res)
         wire = self._join(rows, obs, delay)
+        if ahead is not None:
+            self._junction.update(self._plan_timing(ahead, early))
+            ahead.drop()
         self._last_index = index
         grid.predicted(index, cfg.stride, call_id)
         return wire
+
+    def _plan_timing(
+        self, ahead: precompute.NextWindow, early: str | None
+    ) -> dict[str, object]:
+        """Return the precompute keys of the ``server_timing`` block of a prediction.
+
+        ``rtc_plan`` is ``hit`` (the trunk passes ran ahead of the call),
+        ``late`` (the call finished the window and ran them), ``miss`` (an
+        input of the call differed: the call sampled as without the
+        precompute), ``stale`` (the work was for another sample) or ``none``
+        (no window: a cold start or a refill). ``rtc_memo_hits`` counts the
+        latents that came from the precompute, ``rtc_plan_gpu_ms`` is the GPU
+        time of the trunk passes of a plan made ahead. A session that does not
+        plan (``cfg_batched=on``) reports ``none``.
+        """
+        result = self.session.plan_result
+        if result == "hit":
+            result = "hit" if ahead.planned == "ahead" else "late"
+        out: dict[str, object] = {
+            "rtc_plan": early or result or "none",
+            "rtc_memo_hits": self.session.memo_hits,
+        }
+        gpu_ms = ahead.plan_gpu_ms() if out["rtc_plan"] == "hit" else None
+        if gpu_ms is not None:
+            out["rtc_plan_gpu_ms"] = gpu_ms
+        return out
 
     def _join(self, rows: list[dict], obs: dict, delay_sec: float) -> list[dict]:
         """Join the chunk to the plan that the robot runs until the answer arrives."""
@@ -679,6 +755,8 @@ class ServedPolicy:
 
     def close(self) -> None:
         """Drop the context of the session."""
+        if self._ahead is not None:
+            self._ahead.drop()
         self.session.state.reset()
         if self._history is not None and self._grid is not None:
             self._history.reset()

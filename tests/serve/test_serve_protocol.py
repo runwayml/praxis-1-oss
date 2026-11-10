@@ -170,8 +170,9 @@ class FakePipeline:
     def session(self, **kwargs: object) -> Session:
         # The session of the real pipeline, with its defaults.
         return PraxisPipeline.session(
-            self, **kwargs
-        )  # ty: ignore[invalid-argument-type]
+            self,  # ty: ignore[invalid-argument-type]
+            **kwargs,  # ty: ignore[invalid-argument-type]
+        )
 
 
 def _single_arm_factory(
@@ -499,7 +500,7 @@ def test_param_literals() -> None:
     }
     with pytest.raises(ValueError, match=r"Unknown session params \['bogus'\]"):
         params.parse_session_params({"bogus": "1"})
-    assert len(params.SESSION_PARAMS) == 37
+    assert len(params.SESSION_PARAMS) == 38
 
 
 def test_rollout_ids_and_seeds() -> None:

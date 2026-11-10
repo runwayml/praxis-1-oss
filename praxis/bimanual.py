@@ -660,6 +660,14 @@ class BimanualServeSession:
         th, tw = self.tile_size
         return canvas_clip(views, th, tw, self.aspect_tol, self.device, self.antialias)
 
+    def frame_clip(self, obs: dict) -> torch.Tensor:
+        """Return the canvas clip ``(1, 3, 1, H, W)`` of the current frames of ``obs``.
+
+        A stack row's canvas does not depend on the other rows, so the clip of
+        one sample equals its row of a stacked clip.
+        """
+        return self._clip({v: s[-1:] for v, s in view_stacks(obs).items()})
+
     def prepare(
         self, obs: dict, executed_rows: int | None = None
     ) -> BimanualChunkInputs:

@@ -341,7 +341,13 @@ class ContiguousStreamContext:
     @property
     def depth(self) -> int:
         """Return the number of complete clean chunks in the stream."""
-        t = self.n_raws
+        return self._depth_of(self.n_raws)
+
+    def depth_after(self, rows: int) -> int:
+        """Return the depth after an append of ``rows`` raws with ``strict=False``."""
+        return self._depth_of(min(self.n_raws + int(rows), self.max_raws))
+
+    def _depth_of(self, t: int) -> int:
         if t < self.first_len:
             return 0
         return min(1 + (t - self.first_len) // self.cont_len, self.max_context_chunks)

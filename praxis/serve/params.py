@@ -59,6 +59,7 @@ SESSION_PARAMS: frozenset[str] = frozenset(
         "rtc_grip",
         "rtc_grip_rows",
         "rtc_reach_max_m",
+        "precompute",
     }
 )
 # Keys that the server reads itself. They do not go to the policy.
