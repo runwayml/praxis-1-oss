@@ -574,6 +574,19 @@ def test_judge_cli_does_not_write_an_invalid_answer(
     assert (tmp_path / "a__p0__s0.verdict.json").exists()
 
 
+@pytest.mark.parametrize("rollout_id", ["../escape", "a/b", "/etc/passwd", ".hidden"])
+def test_judge_cli_refuses_a_rollout_id_outside_the_run(
+    tmp_path: Path, rollout_id: str
+) -> None:
+    cli = _cli()
+    with pytest.raises(ValueError):
+        cli._run_file(tmp_path, rollout_id, ".mp4")
+    assert (
+        cli._run_file(tmp_path, "a__p0__s0", ".mp4")
+        == (tmp_path / "a__p0__s0.mp4").resolve()
+    )
+
+
 def test_score_cli_refuses_two_runs_with_the_same_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

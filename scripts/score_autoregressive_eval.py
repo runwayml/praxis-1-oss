@@ -36,22 +36,39 @@ from praxis.eval.autoregressive import score as S
 from praxis.eval.autoregressive import sets
 
 
+def _run_file(run: Path, rollout_id: str, suffix: str) -> Path:
+    """Return ``run/<rollout_id><suffix>``; refuse an id that leaves ``run``.
+
+    The ids come from the verified set, but a local copy (``--set-dir``) can
+    hold any ``rollouts.jsonl``, so an id with a path separator or ``..`` is
+    refused before any file is read or written.
+    """
+    name = f"{rollout_id}{suffix}"
+    if Path(name).name != name or name.startswith("."):
+        raise ValueError(f"rollout id {rollout_id!r} is not a plain file name")
+    path = (run / name).resolve()
+    if path.parent != run.resolve():
+        raise ValueError(f"rollout id {rollout_id!r} leaves the run folder {run}")
+    return path
+
+
 def _judge_one(es: sets.EvalSet, run: Path, ro: dict, tts: bool, model: str) -> str:
-    mp4 = run / f"{ro['id']}.mp4"
+    mp4 = _run_file(run, ro["id"], ".mp4")
     scene = es.scenes[ro["scene"]]
     frames = fps = None
-    out = run / f"{ro['id']}.verdict.json"
+    out = _run_file(run, ro["id"], ".verdict.json")
     if not out.exists():
         frames, fps = J.read_video(mp4)
         v = J.call(J.request(ro, scene, es.spec.name, frames, fps, model))
         S.full_adherence(v)  # refuses an answer without the three booleans
         out.write_text(json.dumps(v, indent=1))
     v = json.loads(out.read_text())
-    tts_out = run / f"{ro['id']}.tts.json"
+    tts_out = _run_file(run, ro["id"], ".tts.json")
     if tts and S.full_adherence(v) and not tts_out.exists():
         if frames is None:
             frames, fps = J.read_video(mp4)
-        assert fps is not None
+        if fps is None:
+            raise ValueError(f"{mp4} has no frame rate")
         t = J.call(J.tts_request(ro, scene, es.spec.name, frames, fps, model))
         S.success_time(t)  # refuses an answer without a valid success_time_s
         tts_out.write_text(json.dumps(t, indent=1))
@@ -61,7 +78,9 @@ def _judge_one(es: sets.EvalSet, run: Path, ro: dict, tts: bool, model: str) -> 
 def judge(args: argparse.Namespace) -> None:
     es = sets.load_set(args.set, args.set_dir)
     run = Path(args.run)
-    missing = [r["id"] for r in es.rollouts if not (run / f"{r['id']}.mp4").exists()]
+    missing = [
+        r["id"] for r in es.rollouts if not _run_file(run, r["id"], ".mp4").exists()
+    ]
     if missing:
         raise SystemExit(f"{len(missing)} videos missing in {run}, e.g. {missing[:3]}")
     model = os.environ.get("ASTRA_MODEL", J.DEFAULT_MODEL)
@@ -107,7 +126,10 @@ def score(args: argparse.Namespace) -> None:
             )
         print(line)
     if args.out:
-        Path(args.out).write_text(json.dumps(out, indent=1))
+        dest = Path(args.out).resolve()
+        if dest.is_dir():
+            raise SystemExit(f"--out {args.out} is a folder; give a file path")
+        dest.write_text(json.dumps(out, indent=1))
 
 
 def main() -> None:
