@@ -205,9 +205,87 @@ Change only the policy address of the client:
   in the headers `Modal-Key` and `Modal-Secret`. With `.file_authed_remote`,
   `--policy.headers.path` names a JSON file with these two headers.
 
+The task string goes to the text encoder verbatim. The bimanual checkpoint
+`praxis-1-yam` was trained on window captions such as "Pick up the pen from
+the center of the table, then place the pen in the bag", with no closing
+period, so phrase its tasks in that form (top README, "Bimanual rig").
+
 The query of the URL holds the session parameters, for example
 `?sample_seed=0&rollout_id=run1`. Without `sample_seed`, each session draws a
 random seed.
+
+## Real-time chunking (bimanual rig)
+
+With the chunked schedule, the robot plays each chunk to its end, then asks
+for the next one and waits for the answer. With real-time chunking the robot
+asks while it still runs the current chunk, so it does not stop between
+chunks. The bimanual checkpoint serves it per session with
+`?schedule=rtc`. The single-arm checkpoint serves the chunked schedule only.
+
+**When to use it.** Real-time chunking removes the stop between chunks and
+shortens the episodes, but it needs a short round trip. Measure the round
+trip and convert it to rows at 15 Hz. If it is longer than `rtc_stride`, use
+`schedule=chunked` or raise `rtc_stride`, and keep `rtc_stride` plus the round
+trip within one chunk (24 rows). At the default stride of 12 (0.8 s) the round
+trip must stay under 0.8 s. Past that the plan runs out before each answer
+arrives and the junctions lose their alignment. When no stride satisfies both
+limits (for example a 1.0 s round trip), use `schedule=chunked`. In our robot
+runs it also replanned during marginal grasps, where the chunked schedule
+commits to a grasp and lifts: on a five-object task it was faster (9.1 s
+against 15.2 s median time to success) with a lower, not significant, success
+rate (24/30 against 28/30). Measure task success on your task too before you
+turn it on.
+
+A real-time session uses the periodic flow of Positronic
+([Positronic-Robotics/positronic#1139](https://github.com/Positronic-Robotics/positronic/pull/1139)).
+The client needs a Positronic version with the `periodic` and
+`inference_schedule` components (0.4.4 or later).
+
+- The server declares the recipe
+  `stop_on_fault | trajectory_player | periodic(30 Hz) | inference_schedule |
+  restrict_image_size`. The client samples every 1/30 s and sends each
+  sample as a call with the current frames and state only. It has no frame
+  stack.
+- The server keeps the samples. It answers None on most samples. Every
+  `rtc_stride` rows (12 by default, 0.8 s) it rebuilds the frame stack of the
+  chunked recipe from the samples and predicts. The window of each
+  prediction holds the frames that the robot ran since the context started,
+  one every 1/15 s, as in training.
+- Calls overlap. The ready message declares `max_in_flight` (8 by default).
+  A real-time session speaks protocol v2: the ready message holds a
+  `session_id`, and each request carries it.
+- The client sends the plan it runs with each call (the `action_prefix`
+  plan mapping of
+  [Positronic-Robotics/positronic#1036](https://github.com/Positronic-Robotics/positronic/pull/1036)).
+  The robot runs the first rows of that plan before the answer arrives: the
+  rows of the delay estimate, the longest of the last 5 prediction durations.
+  The answer keeps these rows. After them the model's motion continues from
+  the end of these rows. The offset between the two goes back to zero over
+  `rtc_rebase_decay` rows, and the velocity fades over `rtc_vel_fade` rows.
+  The grippers fade from the plan to the model over `rtc_grip_rows` rows.
+- Targets past the reach of a YAM arm move back onto a reach radius
+  (`rtc_reach_max_m`). The reach model puts the arm bases where Positronic's
+  `yam_bimanual` embodiment puts them. Set `rtc_reach_max_m=off` on a rig
+  with other arm bases.
+
+The session parameters of real-time chunking:
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `schedule` | `chunked` | `rtc` turns real-time chunking on. |
+| `rtc_stride` | 12 | Rows between two predictions (1 to 20). |
+| `rtc_rebase_decay` | 24 | Rows over which the junction offset goes back to zero (0 keeps it). |
+| `rtc_vel_fade` | 6 | Rows over which the velocity fades from the plan to the model (0 turns it off). |
+| `rtc_grip` | `cont` | `cont` fades the grippers from the plan, `model` takes the model's grips. |
+| `rtc_grip_rows` | 16 | Rows of the gripper fade. |
+| `rtc_reach_max_m` | `auto` | Reach radius in m: `auto` (0.595 on both arms), `off`, one radius, or `left,right`. |
+| `sample_fps` | 30 | Samples per second, a whole multiple of the 15 Hz action rate. |
+| `max_in_flight` | 8 | Calls that the client may have in flight (1 to 16). |
+
+A real-time session needs `context_mode=observed`, `max_context_chunks`
+of 1 or more, and the full chunk (`exec_horizon` 24 or null). These defaults
+are the junction rule of our bimanual robot runs with real-time chunking.
+They can change when we have more robot results.
 
 ## Action clamp
 

@@ -216,6 +216,10 @@ def unpack_numpy(obj: dict) -> object:
         return _decode_jpeg(obj)
     if b"__h264__" in obj:
         return _decode_h264(obj)
+    if b"__cmd__" in obj:
+        # A robot command of the client (the plan of a real-time call): the
+        # command dict that the server sends.
+        return obj[b"__cmd__"]
     return obj
 
 

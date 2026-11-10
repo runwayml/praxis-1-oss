@@ -165,10 +165,20 @@ class Session:
         )
 
     @torch.no_grad()
-    def step(self, obs: dict) -> StepResult:
-        """Run one policy call on ``obs`` and return the commands of the chunk."""
+    def step(self, obs: dict, executed_rows: int | None = None) -> StepResult:
+        """Run one policy call on ``obs`` and return the commands of the chunk.
+
+        ``executed_rows`` (real-time chunking, the bimanual rig) is the number
+        of rows that the robot ran since the previous call, off the chunk grid
+        (:meth:`praxis.bimanual.BimanualServeSession.prepare`).
+        """
         state = self.state
-        inputs = state.prepare(obs)
+        if executed_rows is None:
+            inputs = state.prepare(obs)
+        elif isinstance(state, bimanual.BimanualServeSession):
+            inputs = state.prepare(obs, executed_rows)
+        else:
+            raise ValueError("real-time chunking serves the bimanual rig")
         video, actions, text = self._sample(inputs)
         commands = state.finish(inputs, actions)
         rows, rel = state.decode_actions(inputs, actions)

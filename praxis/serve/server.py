@@ -1,4 +1,8 @@
-"""WebSocket policy server of praxis. It speaks the Positronic offboard protocol v1.
+"""WebSocket policy server of praxis. It speaks the Positronic offboard protocol.
+
+A chunked session speaks protocol v1. A real-time session (``schedule=rtc``,
+the periodic flow) speaks protocol v2, which the periodic recipe of the
+client needs.
 
 Endpoints:
 
@@ -18,6 +22,18 @@ goes through these steps:
    {...}}``. The prompt goes to the model verbatim, so ``prompt_original``
    (the prompt before a rewrite) is always None.
 
+Protocol v2 (a real-time session) differs in these steps:
+
+* The ready message also holds ``"protocol_version": 2``, a ``session_id``
+  and ``max_in_flight``, the calls that the client may have in flight
+  (https://github.com/Positronic-Robotics/positronic/pull/1153).
+* Each request is ``{"session_id": id, "observation": {...}}``. The request
+  ``{"session_id": id, "end_session": True}`` ends the session. The server
+  answers it with the same message after the context is dropped.
+* ``result`` is None for a sample that does not predict. Each answer also
+  holds ``timing``, the served, decode, inference and queue times in ms.
+* An error answer holds ``"status": "error"``, so the client closes too.
+
 Errors:
 
 * A bad session parameter or an unknown model: ``{"status": "error",
@@ -36,8 +52,9 @@ import asyncio
 import contextlib
 import logging
 import os
+import secrets
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -126,14 +143,21 @@ class InferenceServer:
                     "rollout_id_source": source,
                     "session_overrides": {k: str(v) for k, v in overrides.items()},
                 }
+                ready_msg: dict[str, object] = {"status": "ready", "meta": meta}
+                session_id = None
+                if policy.protocol_version == 2:
+                    session_id = secrets.token_hex(16)
+                    ready_msg["protocol_version"] = 2
+                    ready_msg["session_id"] = session_id
+                    ready_msg["max_in_flight"] = policy.max_in_flight
                 # A session value that msgpack cannot pack fails here.
-                ready = serialise({"status": "ready", "meta": meta})
+                ready = serialise(ready_msg)
             except Exception as exc:  # any bad session value refuses the session
                 logger.warning("session refused: %s", exc)
                 await _refuse(websocket, str(exc))
                 return
             await websocket.send_bytes(ready)
-            await self._calls(websocket, policy, rollout_id)
+            await self._calls(websocket, policy, rollout_id, session_id)
         except Exception as exc:  # the client left, or a send failed
             logger.info("session closed: %s", exc)
         finally:
@@ -141,10 +165,18 @@ class InferenceServer:
                 policy.close()
 
     async def _calls(
-        self, websocket: WebSocket, policy: ServedPolicy, rollout_id: str
+        self,
+        websocket: WebSocket,
+        policy: ServedPolicy,
+        rollout_id: str,
+        session_id: str | None = None,
     ) -> None:
-        """Answer the observations of one session until it ends."""
+        """Answer the observations of one session until it ends.
+
+        ``session_id`` is the id of a protocol v2 session, None for v1.
+        """
         loop = asyncio.get_running_loop()
+        v2 = session_id is not None
         n_calls = 0
         while True:
             message = await websocket.receive()
@@ -162,6 +194,20 @@ class InferenceServer:
             recv_iso = _iso_now()
             try:
                 obs, stats = deserialise_request(data)
+                if v2:
+                    if not isinstance(obs, dict) or obs.get("session_id") != session_id:
+                        raise ValueError(
+                            "The session ID does not belong to this connection"
+                        )
+                    if obs.get("end_session") is True:
+                        await loop.run_in_executor(self.executor, policy.close)
+                        await websocket.send_bytes(
+                            serialise({"session_id": session_id, "end_session": True})
+                        )
+                        return
+                    obs = obs.get("observation")
+                    if not isinstance(obs, dict):
+                        raise ValueError("a v2 request carries an observation dict")
                 t_des = time.monotonic()
                 codec = "+".join(sorted(stats.codecs)) if stats.codecs else "raw"
                 timing: dict[str, object] = {
@@ -182,8 +228,9 @@ class InferenceServer:
                         len(data),
                     )
                 n_calls += 1
-                rows = await loop.run_in_executor(
-                    self.executor, policy.select_action, obs
+                t_queue = time.monotonic()
+                rows, t_call = await loop.run_in_executor(
+                    self.executor, _timed, policy.select_action, obs
                 )
                 t_pol = time.monotonic()
                 response: dict[str, object] = {
@@ -196,27 +243,49 @@ class InferenceServer:
                 timing["send_iso"] = _iso_now()
                 if policy.return_timing:
                     response["server_timing"] = timing
+                if v2:
+                    # The timing block of the protocol: numbers only.
+                    response["timing"] = {
+                        "served_ms": round((t_pol - t_recv) * 1e3, 1),
+                        "decode_ms": round((t_des - t_recv) * 1e3, 1),
+                        "infer_ms": round((t_pol - t_des) * 1e3, 1),
+                        "queued_ms": round((t_call - t_queue) * 1e3, 1),
+                    }
                 await websocket.send_bytes(serialise(response))
-                logger.info(
-                    "rollout %s call %d: %d rows, policy %.1f ms",
-                    rollout_id,
-                    n_calls,
-                    len(rows),
-                    timing["policy_ms"],
-                )
+                if rows is not None:
+                    logger.info(
+                        "rollout %s call %d: %d rows, policy %.1f ms",
+                        rollout_id,
+                        n_calls,
+                        len(rows),
+                        timing["policy_ms"],
+                    )
             except ChunkBudgetExhausted as exc:
                 logger.info("rollout %s: %s", rollout_id, exc)
                 with contextlib.suppress(Exception):
-                    await websocket.send_bytes(serialise({"error": str(exc)}))
+                    await websocket.send_bytes(serialise(_error(str(exc), v2)))
                 return
             except Exception as exc:
                 # The call can fail after it changed the context, so the
                 # session cannot continue. The next session starts cold.
                 logger.exception("rollout %s: the policy call failed", rollout_id)
-                await websocket.send_bytes(serialise({"error": str(exc)}))
+                await websocket.send_bytes(serialise(_error(str(exc), v2)))
                 with contextlib.suppress(Exception):
                     await websocket.close(code=1011)
                 return
+
+
+def _timed(
+    function: Callable[[dict], list[dict] | None], obs: dict
+) -> tuple[list[dict] | None, float]:
+    """Run ``function(obs)`` on the worker. Return its result and its start time."""
+    t_call = time.monotonic()
+    return function(obs), t_call
+
+
+def _error(reason: str, v2: bool) -> dict[str, object]:
+    """Return the error answer of a call. A v2 client closes on ``status`` error."""
+    return {"status": "error", "error": reason} if v2 else {"error": reason}
 
 
 async def _refuse(websocket: WebSocket, reason: str) -> None:
@@ -281,12 +350,14 @@ def warmup(factory: PolicyFactory, executor: ThreadPoolExecutor) -> None:
 
     The warmup compiles the attention kernels of each depth before the first
     robot call. It uses 2 sampler steps and synthetic observations. Each
-    later session starts with a new context.
+    later session starts with a new context. A real-time session samples the
+    same window shapes, so the chunked warmup covers it too.
     """
     t0 = time.monotonic()
     depths = int(factory.defaults["max_context_chunks"]) + 1
     policy = factory(
         {
+            "schedule": "chunked",
             "context_mode": "observed",
             "num_steps": 2,
             "action_steps": None,

@@ -490,7 +490,7 @@ def test_param_literals() -> None:
     }
     with pytest.raises(ValueError, match=r"Unknown session params \['bogus'\]"):
         params.parse_session_params({"bogus": "1"})
-    assert len(params.SESSION_PARAMS) == 28
+    assert len(params.SESSION_PARAMS) == 37
 
 
 def test_rollout_ids_and_seeds() -> None:
