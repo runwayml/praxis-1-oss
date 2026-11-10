@@ -6,7 +6,9 @@ token on each connection. A client sends the token in the headers
 ``Modal-Key`` and ``Modal-Secret``.
 
 Deploy with ``modal>=1.2`` and your own Modal credentials (``modal token
-set``), from the root of the repository:
+set``), from the root of the repository, after the weights are in their
+local directories ("Get the weights" in the top README: ``hf download
+runwayml/praxis-1-droid --local-dir checkpoints/praxis-1-droid``):
 
     modal volume create praxis-weights
     modal volume put praxis-weights checkpoints/praxis-1-droid /checkpoints/praxis-1-droid

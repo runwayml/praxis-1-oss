@@ -130,40 +130,47 @@ parity needs `transformers` 5.2.0, `flash-linear-attention` 0.5.0 and
 
 ## Get the weights
 
-The praxis checkpoints:
+The praxis checkpoints are on Hugging Face, in the `runwayml` organization:
 
-| Checkpoint | Local directory | What it is |
-|---|---|---|
-| Base | `checkpoints/praxis-1-base` | The pretrained model without action heads: the start of a fine-tune for a new rig |
-| Bimanual (YAM) | `checkpoints/praxis-1-yam` | The bimanual checkpoint (see [Bimanual rig](#bimanual-rig)) |
-| Single-arm (DROID) | `checkpoints/praxis-1-droid` | The single-arm checkpoint, the default of the configs |
+| Checkpoint | Hugging Face repository | Local directory | What it is |
+|---|---|---|---|
+| Single-arm (DROID) | [`runwayml/praxis-1-droid`](https://huggingface.co/runwayml/praxis-1-droid) | `checkpoints/praxis-1-droid` | `praxis-1-droid`, the default of the configs |
+| Bimanual (YAM) | [`runwayml/praxis-1-yam`](https://huggingface.co/runwayml/praxis-1-yam) | `checkpoints/praxis-1-yam` | the bimanual checkpoint (see [Bimanual rig](#bimanual-rig)) |
+| Base | [`runwayml/praxis-1-base`](https://huggingface.co/runwayml/praxis-1-base) | `checkpoints/praxis-1-base` | the pretrained model without action heads: the start of a fine-tune for a new rig |
+| Single-arm (DROID), NVFP4 QAT | [`runwayml/praxis-1-droid-nvfp4`](https://huggingface.co/runwayml/praxis-1-droid-nvfp4) | `checkpoints/praxis-1-droid-nvfp4` | `praxis-1-droid` with quantization-aware training of the routed experts for NVFP4 |
+| Bimanual (YAM), NVFP4 QAT | [`runwayml/praxis-1-yam-nvfp4`](https://huggingface.co/runwayml/praxis-1-yam-nvfp4) | `checkpoints/praxis-1-yam-nvfp4` | `praxis-1-yam` with quantization-aware training of the routed experts for NVFP4 |
 
-You need three sets of weights:
+Each checkpoint is a directory with `config.json`,
+`model.safetensors.index.json`, 17 safetensors shards and `SHA256SUMS`
+(54.4 GB). `SHA256SUMS` lists the shards, `config.json` and the index. The
+configs read each checkpoint from its local directory.
 
-1. The praxis checkpoint `praxis-1-droid`: a directory with
-   `config.json`, `model.safetensors.index.json`, 17 safetensors shards and
-   `SHA256SUMS` (54.4 GB).
-   The SHA-256 of its `config.json` is
-   `63fde53c91174a52c9f4b16b6f09733f30103c4e711fe863a0f0296314307c86`
-   (`tests/data/praxis-1-droid.json` is a copy).
-2. The Wan2.2 VAE: `Wan2.2_VAE.pth` from the Hugging Face model
-   `Wan-AI/Wan2.2-TI2V-5B`.
-3. The text encoder: the Hugging Face model `Qwen/Qwen3.5-2B`.
+The NVFP4 repositories hold bf16 weights in the same format, so they load
+like the other checkpoints. On SM120 GPUs, `--set model.routed_precision=nvfp4`
+packs their routed experts to NVFP4 at load time (see "Optional routed NVFP4
+inference").
 
-The configs use these paths. The `hf` command comes with `transformers`:
+You also need two public models:
+
+- The Wan2.2 VAE: `Wan2.2_VAE.pth` from the Hugging Face model
+  `Wan-AI/Wan2.2-TI2V-5B`.
+- The text encoder: the Hugging Face model `Qwen/Qwen3.5-2B`.
+
+The `hf` command comes with `transformers`. Log in once with an account
+that can read the `runwayml` repositories (`hf auth login`), then download
+the weights into the paths of the configs:
 
 ```bash
 hf download Wan-AI/Wan2.2-TI2V-5B Wan2.2_VAE.pth --local-dir weights
 hf download Qwen/Qwen3.5-2B --local-dir weights/Qwen3.5-2B
-C=checkpoints/praxis-1-droid
-mkdir -p $C   # copy the checkpoint files into this directory
-(cd $C && sha256sum -c --quiet SHA256SUMS && echo "checkpoint OK")
+for C in praxis-1-droid praxis-1-yam praxis-1-base; do   # take only the ones you need
+  hf download runwayml/$C --local-dir checkpoints/$C
+  (cd checkpoints/$C && sha256sum -c --quiet SHA256SUMS && echo "$C OK")
+done
 ```
 
-`SHA256SUMS` lists the shards, `config.json` and the index.
-The configs read each checkpoint from its
-local directory: `checkpoints/praxis-1-droid` (single-arm),
-`checkpoints/praxis-1-yam` (bimanual, see [Bimanual rig](#bimanual-rig)).
+The NVFP4 checkpoints download the same way
+(`for C in praxis-1-droid-nvfp4 praxis-1-yam-nvfp4; do ...`).
 
 The tests also use the config of the earlier single-arm checkpoint `praxis-1-droid-k`
 (`tests/data/praxis-1-droid-k.json`, SHA-256
@@ -171,13 +178,10 @@ The tests also use the config of the earlier single-arm checkpoint `praxis-1-dro
 architecture with 256x416 tiles and a resize without antialias. The
 recommended sampler settings were measured on `praxis-1-droid`.
 
-To train a policy for your own single-arm rig, start from the base
-checkpoint `praxis-1-base` (54.4 GB) in `checkpoints/praxis-1-base`. It is the
-pretrained model without the action heads of a rig, so it does not run on a robot by
-itself. The SHA-256 of its `config.json` is
-`07afcef905b5120763309041d5ddd9e0edabfa6274d3c0faf4d788c6d6d16110`
-(`tests/data/praxis-1-base.json` is a copy). `praxis/train/README.md`,
-"Fine-tune the base checkpoint", tells how to make a policy from it.
+`praxis-1-base` is the pretrained model without the action heads of a rig,
+so it does not run on a robot by itself. `praxis/train/README.md`,
+"Fine-tune the base checkpoint", tells how to make a policy for your own
+single-arm rig from it.
 
 The checkpoint asks for the `flash` attention backend of the trunk
 (`backbone.attention.backend` in `config.json`). We made the validation
@@ -203,6 +207,45 @@ json.dump(c, open(p, "w"), indent=1)
 print("attention backend: triton")
 PYEOF
 ```
+
+## Download, then run
+
+All the commands below, from a fresh clone after "Install" and `hf auth
+login`. They read the weights from the local directories of the configs.
+
+```bash
+# Weights (see "Get the weights").
+hf download Wan-AI/Wan2.2-TI2V-5B Wan2.2_VAE.pth --local-dir weights
+hf download Qwen/Qwen3.5-2B --local-dir weights/Qwen3.5-2B
+for C in praxis-1-droid praxis-1-yam praxis-1-base; do
+  hf download runwayml/$C --local-dir checkpoints/$C
+  (cd checkpoints/$C && sha256sum -c --quiet SHA256SUMS && echo "$C OK")
+done
+
+# Inference: one closed-loop episode per checkpoint in the simulation (pip install -e ".[sim]").
+MUJOCO_GL=egl python scripts/run_sim.py --config configs/sim_droid.yaml \
+    --set task.name=block_in_bowl --set task.prompt=null --set viewer.enabled=false
+MUJOCO_GL=egl python scripts/run_sim_yam.py --config configs/sim_yam.yaml \
+    --checkpoint checkpoints/praxis-1-yam --tasks block_tower --seeds 1 --out outputs/sim_yam
+
+# Evaluation: the fixed suites of the single-arm checkpoint (praxis/sim/EVAL.md).
+MUJOCO_GL=egl python scripts/run_sim_eval.py --suite droid_guard \
+    --checkpoint checkpoints/praxis-1-droid --out outputs/eval/droid_guard
+MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard \
+    --checkpoint checkpoints/praxis-1-droid --out outputs/eval/hard
+
+# Training (pip install -e ".[train]", praxis/train/README.md).
+# A new rig: the full fine-tune of the base on 8 GPUs. The statistics and the heads come first.
+python scripts/compute_norm_stats.py --config configs/finetune_base.yaml
+python scripts/init_heads.py --config configs/finetune_base.yaml
+torchrun --nproc_per_node 8 scripts/finetune.py --config configs/finetune_base.yaml
+# The DROID rig, a new task: LoRA on praxis-1-droid on one GPU.
+torchrun --nproc_per_node 1 scripts/finetune.py --config configs/finetune_droid_lora.yaml
+```
+
+Both training configs read DROID from the Hugging Face hub
+(`data.source: cadene/droid_1.0.1`). For your own data, or for a long run
+(the hub has a rate limit), set `--set data.source=<a local LeRobot tree>`.
 
 ## Run
 
@@ -493,11 +536,11 @@ The data of the rig:
 
 The bimanual checkpoint `praxis-1-yam` (`"embodiment": "bimanual"`) is the
 model variant of the single-arm checkpoint with 20-D actions over two arms
-and a canvas of three views. The weights have the same layout as the single-arm
-checkpoint (54.4 GB).
-`tests/data/praxis-1-yam.json` is a copy of its `config.json`, SHA-256
-`2511b1a2138f9f2f1b9be2c25f8bf99b97bfcf0c205335e7312d5135bacf3c3c`. Copy the
-checkpoint files into `checkpoints/praxis-1-yam` and serve it with
+and a canvas of three views. The weights are the Hugging Face repository
+[`runwayml/praxis-1-yam`](https://huggingface.co/runwayml/praxis-1-yam) (54.4
+GB, the same layout as the single-arm checkpoint; see "Get the weights").
+`tests/data/praxis-1-yam.json` is a copy of its `config.json`. Download
+it into `checkpoints/praxis-1-yam` and serve it with
 `configs/serve_yam.yaml` (the
 Modal app: `PRAXIS_CONFIG=configs/serve_yam.yaml`). The rig code is
 `praxis/bimanual.py`.
