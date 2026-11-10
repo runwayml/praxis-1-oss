@@ -26,7 +26,6 @@ from praxis.rig import (
     normalization_from_stats,
     single_arm_config,
 )
-from praxis.train.norm_stats import norm_stats
 
 DROID = Path(__file__).parent / "data" / "praxis-1-droid.json"
 BASE = Path(__file__).parent / "data" / "praxis-1-base.json"
@@ -108,6 +107,10 @@ def test_normalization_from_stats_checks_the_vectors() -> None:
 
 
 def test_norm_stats_quantiles_and_guards() -> None:
+    pytest.importorskip("av")  # praxis.train needs the `train` extra
+    pytest.importorskip("pyarrow")
+    from praxis.train.norm_stats import norm_stats
+
     rng = np.random.default_rng(0)
     actions = rng.normal(size=(10_000, 10))
     actions[:, 9] = 0.5  # a gripper that never moves

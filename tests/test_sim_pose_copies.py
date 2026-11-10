@@ -6,6 +6,9 @@ import dataclasses
 
 import numpy as np
 import pytest
+
+pytest.importorskip("praxis_sim")  # the `sim` extra
+
 from praxis_sim import pose
 
 from praxis import robot_io, single_arm

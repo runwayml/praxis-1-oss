@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 from pathlib import Path
@@ -24,10 +25,14 @@ from praxis.eval import offline_action_error as ae
 from praxis.model import SamplerSettings
 from praxis.robot_io import pack_action_tokens, q99_normalize
 from praxis.sampler import seeded_normal, window_time_grid
-from praxis.train.data import VAL_EVERY
 
 DATA = Path(__file__).parent / "data"
 CONFIG = json.loads((DATA / "praxis-1-droid.json").read_text())
+# praxis.train.data (the windows of the fine-tune data) needs the `train` extra.
+needs_train = pytest.mark.skipif(
+    not all(importlib.util.find_spec(m) for m in ("av", "pyarrow")),
+    reason="needs the `train` extra",
+)
 
 
 def _rel_rows(rng: np.random.Generator, n: int) -> np.ndarray:
@@ -148,17 +153,21 @@ def test_decode_does_not_clip_the_prediction() -> None:
 # ---------------------------------------------------------------------------
 
 
+@needs_train
 def test_windows_file() -> None:
     spec = ae.load_windows_file()
     assert spec["source"] == "cadene/droid_1.0.1"
     assert len(spec["episodes"]) == len(set(spec["episodes"])) == 19
     assert spec["episodes"] == sorted(spec["episodes"])
     # Every episode is in the val split of the fine-tune data.
+    from praxis.train.data import VAL_EVERY
+
     assert all(e % VAL_EVERY == 0 for e in spec["episodes"])
 
 
 @pytest.mark.parametrize("n_frames", [102, 124, 135, 200, 536, 629])
 @pytest.mark.parametrize("n", [4, 7])
+@needs_train
 def test_stratified_anchors_spread_and_reproduce(n_frames: int, n: int) -> None:
     a = ae.stratified_anchors(n_frames, 93, 15.0, n, ae.episode_rng(0, 7))
     assert a == ae.stratified_anchors(n_frames, 93, 15.0, n, ae.episode_rng(0, 7))
@@ -173,6 +182,7 @@ def test_stratified_anchors_spread_and_reproduce(n_frames: int, n: int) -> None:
         assert other != a
 
 
+@needs_train
 def test_stratified_anchors_refusals() -> None:
     with pytest.raises(ValueError, match="n_windows"):
         ae.stratified_anchors(200, 93, 15.0, 0, ae.episode_rng(0, 0))

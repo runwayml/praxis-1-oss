@@ -789,8 +789,10 @@ pytest tests/
 ```
 
 The unit tests run on the CPU and need no weights. The tests of the training
-loop start 1 or 2 processes with the gloo backend. The tests of the DROID
-data module need the `train` extra. Without it, pytest skips them.
+loop start 1 or 2 processes with the gloo backend. `pytest tests/` runs with
+any set of extras. pytest skips a test whose extra is not installed: the DROID
+data module needs `train`, the policy server `serve`, the simulator `sim` (or
+`pip install -e packages/praxis-sim`).
 
 ## License
 

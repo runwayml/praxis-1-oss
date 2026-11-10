@@ -14,6 +14,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+pytest.importorskip("praxis_sim")  # the `sim` extra
+
 from praxis.sim.viewer import BOUNDARY, Viewer, parse_range
 
 
