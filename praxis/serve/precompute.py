@@ -20,7 +20,8 @@ inference thread:
   prediction finishes the window and runs the trunk passes itself.
 * With ``skip_video_decoder=on`` the plan runs the last step without the
   video decoder: the server returns no video, and the actions read only the
-  encoder taps, so they keep their bits.
+  encoder taps, so they keep their bits. The plan takes the skip of the
+  session, as the call does.
 * A session with ``cfg_batched=on`` makes no plan: the plan runs the guided
   and the unguided passes one after the other. The window encode still runs
   ahead. Its predictions report ``none`` and sample the trunk passes in the
@@ -96,14 +97,18 @@ class NextWindow:
         session: Session,
         history: SampleHistory,
         ratio: int,
-        skip_last_video: bool = False,
+        skip_last_video: bool | None = None,
     ) -> None:
         if session.memo is None:
             raise ValueError("the precompute needs a session opened with precompute")
         self.session = session
         self.history = history
         self.ratio = int(ratio)
-        self.skip_last_video = bool(skip_last_video)
+        # None plans with the session's skip_last_video, the skip of the call
+        # that the plan stands in for (and of its fallback on a miss).
+        self.skip_last_video = (
+            None if skip_last_video is None else bool(skip_last_video)
+        )
         # The sample index of the prediction that the work is for, and how
         # its plan was made: "ahead" (on a sample before the prediction) or
         # "late" (in the prediction).
@@ -196,8 +201,15 @@ class NextWindow:
         stream = state.stream
         rows = samples // self.ratio
         # A stream that is empty or past its stack refills from the stack of
-        # the call, and a stateless call has no window: no precompute.
-        if state.stateless or stream.n_raws == 0 or rows > self.history.history_rows:
+        # the call, a gap that is not whole rows restarts the context
+        # (ServedPolicy._sample), and a stateless call has no window: no
+        # precompute.
+        if (
+            state.stateless
+            or stream.n_raws == 0
+            or rows > self.history.history_rows
+            or samples % self.ratio
+        ):
             self._skip = True
             return
         self._depth = stream.depth_after(rows)

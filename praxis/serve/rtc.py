@@ -77,8 +77,10 @@ class RTCConfig:
 
     ``stride`` is the number of rows between two predictions. It must be
     below the 21 rows of the cold-start chunk, so a chunk outlasts the next
-    call. The delay estimate is capped at the rows that a chunk has left after
-    the stride (:meth:`max_delay_sec`).
+    call. The delay estimate is capped at the rows that a 24-row chunk has
+    left after the stride (:meth:`max_delay_sec`). During a 21-row chunk the
+    plan of the client holds ``21 - stride`` rows, and the kept prefix stops
+    at its end (:func:`prefix_rows`), below the cap.
 
     ``reach_max_m`` holds one reach radius per arm (left, right) of the
     bimanual rig, or is empty for no clamp.
@@ -121,7 +123,9 @@ class RTCConfig:
             )
 
     def max_delay_sec(self, fps: float) -> float:
-        """Return the cap of the delay estimate: the rows left after the stride."""
+        """Return the cap of the delay estimate: the rows that a 24-row chunk has
+        left after the stride. The rows of the plan bound the prefix of a
+        21-row chunk."""
         return max(1, CHUNK_ROWS - int(self.stride)) / float(fps)
 
     def meta(self, fps: float) -> dict[str, object]:

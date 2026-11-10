@@ -248,7 +248,7 @@ class Session:
         anchor: Tensor,
         cleans: list[Tensor],
         prompt: str,
-        skip_last_video: bool = False,
+        skip_last_video: bool | None = None,
     ) -> None:
         """Run the trunk passes of the next call now, on ``anchor`` and ``cleans``.
 
@@ -258,10 +258,11 @@ class Session:
         it only when all the trunk inputs of the call equal those of the plan
         (:meth:`TrunkPlan.matches`); it then runs only the expert passes.
         Otherwise the call samples as without a plan. One plan is kept at a
-        time, and every call drops it. ``skip_last_video`` skips the video
-        decoder of the last step: the call then returns no video. A session
-        with ``cfg_batched`` makes no plan: the plan runs the guidance passes
-        one after the other.
+        time, and every call drops it. ``skip_last_video`` (default None:
+        the session's ``skip_last_video``, as the call without a plan) skips
+        the video decoder of the last step: the call then returns no video. A
+        session with ``cfg_batched`` makes no plan: the plan runs the guidance
+        passes one after the other.
         """
         if self.memo is None:
             raise RuntimeError("plan needs a session opened with precompute")
@@ -279,7 +280,9 @@ class Session:
             cleans=cleans,
             seed=self.seed + self.state.chunk_index,
             settings=self.sampler,
-            skip_last_video=skip_last_video,
+            skip_last_video=self.skip_last_video
+            if skip_last_video is None
+            else bool(skip_last_video),
         )
 
     @torch.no_grad()

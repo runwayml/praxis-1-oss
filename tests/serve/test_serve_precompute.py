@@ -550,3 +550,31 @@ def _drive_skipping(
             return policy.select_action(obs)
 
     return _drive(cast(ServedPolicy, _Skip()), delays, seconds, sample_fps=15.0)
+
+
+def test_a_prediction_off_the_row_grid_has_no_plan() -> None:
+    """At 30 Hz a skipped prediction sample puts the next prediction off the
+    row grid: the context restarts, so the precompute makes no plan for it.
+    The rows equal those of a session without the precompute, and the
+    predictions after it plan again."""
+    a, _ = _pair(sample_fps=30)
+    _, at, _ = _drive(a, DELAYS, 9.0)
+    skip = at[3]
+    a2, b2 = _pair(sample_fps=30)
+    rec = _Recorder(b2)
+
+    class _Skip:
+        def __init__(self, policy: ServedPolicy) -> None:
+            self.policy = policy
+
+        def select_action(self, obs: dict) -> list[dict] | None:
+            if obs[per.SAMPLE_INDEX] == skip:
+                return None
+            return self.policy.select_action(obs)
+
+    want, at_a, _ = _drive(cast(ServedPolicy, _Skip(a2)), DELAYS, 9.0)
+    got, at_b, _ = _drive(cast(ServedPolicy, _Skip(rec.as_policy())), DELAYS, 9.0)
+    assert at_a == at_b and at_b[3] == skip + 1
+    _same_rows(want, got, bimanual.SIDES)
+    assert rec.plans[3] == "stale"
+    assert rec.plans[4:] == ["hit"] * (len(DELAYS) - 4)
