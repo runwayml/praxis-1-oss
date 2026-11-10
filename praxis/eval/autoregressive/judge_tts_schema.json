@@ -1,0 +1,39 @@
+{
+ "type": "object",
+ "properties": {
+  "grasp_time_s": {
+   "type": [
+    "number",
+    "null"
+   ]
+  },
+  "success_time_s": {
+   "type": [
+    "number",
+    "null"
+   ]
+  },
+  "stays_done": {
+   "type": "boolean"
+  },
+  "confidence": {
+   "type": "string",
+   "enum": [
+    "high",
+    "medium",
+    "low"
+   ]
+  },
+  "evidence": {
+   "type": "string"
+  }
+ },
+ "required": [
+  "grasp_time_s",
+  "success_time_s",
+  "stays_done",
+  "confidence",
+  "evidence"
+ ],
+ "additionalProperties": false
+}

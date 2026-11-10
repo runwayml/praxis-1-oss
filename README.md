@@ -187,6 +187,7 @@ The extras of `pyproject.toml`:
 | `video` | imageio, imageio-ffmpeg | mp4 export of `scripts/run_inference.py` |
 | `serve` | the web server, the image decoders and the cloud host client | the policy server (`praxis/serve/README.md`) |
 | `train` | huggingface_hub, av, pyarrow | the fine-tune (`praxis/train/README.md`) |
+| `eval` | huggingface_hub, av, openai | the autoregressive eval (`praxis/eval/autoregressive/README.md`) |
 | `nvfp4` | FlashInfer, TorchAO, ninja | optional SM120 routed-expert inference |
 | `dev` | pytest, ruff | the tests |
 
@@ -738,6 +739,22 @@ the sampler and the metrics.
 python scripts/run_action_error_eval.py --checkpoint checkpoints/praxis-1-droid \
     --vae weights/Wan2.2_VAE.pth --text-encoder weights/Qwen3.5-2B \
     --data droid_hires --out outputs/action_error/start
+```
+
+## Autoregressive prompt adherence
+
+`praxis/eval/autoregressive/` scores whether a model's own video follows the
+prompt. The model rolls out its video from one real first frame and a
+prompt for 12.6 s. A VLM judge (GPT-6 Astra, any OpenAI-compatible
+endpoint) checks the target object, the destination and the action. The
+sets are in the Hugging Face dataset `runwayml/praxis-1-eval`. The judge and
+the scorer take the mp4s of any model. See
+`praxis/eval/autoregressive/README.md`.
+
+```bash
+pip install -e ".[eval]"
+python scripts/score_autoregressive_eval.py judge --set droid --run outputs/ar/mine
+python scripts/score_autoregressive_eval.py score --set droid outputs/ar/praxis-1-droid outputs/ar/mine
 ```
 
 ## Determinism

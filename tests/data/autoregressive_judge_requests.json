@@ -1,0 +1,403 @@
+[
+ {
+  "set": "droid",
+  "kind": "adherence",
+  "frames_seed": 0,
+  "width": 832,
+  "height": 224,
+  "rollout": {
+   "id": "co_e0_AUTOLab_2023-10-27_2001__p0__s0",
+   "scene": "co_e0_AUTOLab_2023-10-27_2001",
+   "prompt": "Put the green sponge on the plate.",
+   "seed": 0,
+   "target_object": "green_sponge",
+   "destination": "cyan_plate",
+   "action": "place_on",
+   "distractors": [
+    {
+     "name": "blue_sponge",
+     "differs_by": "colour"
+    }
+   ],
+   "destination_distractor": {
+    "name": "white_bowl",
+    "differs_by": "type"
+   },
+   "feature": "colour",
+   "level": "easy",
+   "relation": null,
+   "required_count": 1,
+   "count_mode": "exact",
+   "target_instances": null,
+   "count_filter": null,
+   "n_present": null,
+   "relation_applies_to": null,
+   "container": null
+  },
+  "scene": {
+   "scene": "co_e0_AUTOLab_2023-10-27_2001",
+   "description": "DROID single-arm cell (AUTOLab); inserted objects: cyan_plate, white_bowl, green_sponge, blue_sponge"
+  },
+  "request_sha256": "d671f18f1650e1a4ae47fd8f8f1421c14be73da99047784ce728b436ee0ffcd9"
+ },
+ {
+  "set": "droid",
+  "kind": "adherence",
+  "frames_seed": 1,
+  "width": 832,
+  "height": 224,
+  "rollout": {
+   "id": "co_m0_GuptaLab_2023-04-20_1322__p0__s0",
+   "scene": "co_m0_GuptaLab_2023-04-20_1322",
+   "prompt": "Put the blue candle jar on the plate.",
+   "seed": 0,
+   "target_object": "blue_candle_jar",
+   "destination": "pink_plate",
+   "action": "place_on",
+   "distractors": [
+    {
+     "name": "purple_candle_jar",
+     "differs_by": "colour"
+    }
+   ],
+   "destination_distractor": {
+    "name": "white_tray",
+    "differs_by": "type"
+   },
+   "feature": "colour",
+   "level": "medium",
+   "relation": null,
+   "required_count": 1,
+   "count_mode": "exact",
+   "target_instances": null,
+   "count_filter": null,
+   "n_present": null,
+   "relation_applies_to": null,
+   "container": null
+  },
+  "scene": {
+   "scene": "co_m0_GuptaLab_2023-04-20_1322",
+   "description": "DROID single-arm cell (GuptaLab); inserted objects: pink_plate, white_tray, blue_candle_jar, purple_candle_jar"
+  },
+  "request_sha256": "98e5509305726cb6d1722cb4ce6e03c01f60521065ebd6b3586ae4f44ade4ad2"
+ },
+ {
+  "set": "droid",
+  "kind": "adherence",
+  "frames_seed": 2,
+  "width": 832,
+  "height": 224,
+  "rollout": {
+   "id": "ct_e1_IPRL_2023-04-21_2149__p0__s0",
+   "scene": "ct_e1_IPRL_2023-04-21_2149",
+   "prompt": "Put one soap bar in the tray.",
+   "seed": 0,
+   "target_object": "pink_soap_bar",
+   "destination": "white_tray",
+   "action": "place_in",
+   "distractors": [],
+   "destination_distractor": {
+    "name": "cyan_plate",
+    "differs_by": "type"
+   },
+   "feature": "count",
+   "level": "easy",
+   "relation": null,
+   "required_count": 1,
+   "count_mode": "exact",
+   "target_instances": [
+    "pink_soap_bar_1",
+    "pink_soap_bar_2"
+   ],
+   "count_filter": null,
+   "n_present": 2,
+   "relation_applies_to": null,
+   "container": null
+  },
+  "scene": {
+   "scene": "ct_e1_IPRL_2023-04-21_2149",
+   "description": "DROID single-arm cell (IPRL); inserted objects: white_tray, cyan_plate, pink_soap_bar_1, pink_soap_bar_2, blue_sticky_notes"
+  },
+  "request_sha256": "4b4d20b460b41aaa1f85fd8e68997411f684e84485ac0fe3deedc413bc09b69b"
+ },
+ {
+  "set": "droid",
+  "kind": "adherence",
+  "frames_seed": 3,
+  "width": 832,
+  "height": 224,
+  "rollout": {
+   "id": "ct_e1_IPRL_2023-04-21_2149__p2__s0",
+   "scene": "ct_e1_IPRL_2023-04-21_2149",
+   "prompt": "Put both soap bars in the tray.",
+   "seed": 0,
+   "target_object": "pink_soap_bar",
+   "destination": "white_tray",
+   "action": "place_in",
+   "distractors": [],
+   "destination_distractor": {
+    "name": "cyan_plate",
+    "differs_by": "type"
+   },
+   "feature": "count",
+   "level": "easy",
+   "relation": null,
+   "required_count": 2,
+   "count_mode": "all",
+   "target_instances": [
+    "pink_soap_bar_1",
+    "pink_soap_bar_2"
+   ],
+   "count_filter": null,
+   "n_present": 2,
+   "relation_applies_to": null,
+   "container": null
+  },
+  "scene": {
+   "scene": "ct_e1_IPRL_2023-04-21_2149",
+   "description": "DROID single-arm cell (IPRL); inserted objects: white_tray, cyan_plate, pink_soap_bar_1, pink_soap_bar_2, blue_sticky_notes"
+  },
+  "request_sha256": "0da68cfe209d537fd0f005923ac9e538514a8bc951081de8cf10f0036a620b84"
+ },
+ {
+  "set": "droid",
+  "kind": "adherence",
+  "frames_seed": 4,
+  "width": 832,
+  "height": 224,
+  "rollout": {
+   "id": "sp_e1_GuptaLab_2023-04-30_1241__p0__s0",
+   "scene": "sp_e1_GuptaLab_2023-04-30_1241",
+   "prompt": "Put the donut on the robot's left in the bowl.",
+   "seed": 0,
+   "target_object": "pink_donut_robot_left",
+   "destination": "white_bowl",
+   "action": "place_in",
+   "distractors": [
+    {
+     "name": "pink_donut_robot_right",
+     "differs_by": "position"
+    }
+   ],
+   "destination_distractor": null,
+   "feature": "spatial",
+   "level": "easy",
+   "relation": "robot_left",
+   "required_count": 1,
+   "count_mode": "exact",
+   "target_instances": null,
+   "count_filter": null,
+   "n_present": null,
+   "relation_applies_to": "object",
+   "container": null
+  },
+  "scene": {
+   "scene": "sp_e1_GuptaLab_2023-04-30_1241",
+   "description": "DROID single-arm cell (GuptaLab); inserted objects: white_bowl, purple_plate, pink_donut_robot_left, pink_donut_robot_right"
+  },
+  "request_sha256": "bb606bccb405aecabc15053ba0c1db279b5d2407e584cf1798a0d3dfdcc76946"
+ },
+ {
+  "set": "droid",
+  "kind": "adherence",
+  "frames_seed": 5,
+  "width": 832,
+  "height": 224,
+  "rollout": {
+   "id": "ty_e2_GuptaLab_2023-04-20_1322__p0__s0",
+   "scene": "ty_e2_GuptaLab_2023-04-20_1322",
+   "prompt": "Put the pink donut in the bowl.",
+   "seed": 0,
+   "target_object": "pink_donut",
+   "destination": "blue_bowl",
+   "action": "place_in",
+   "distractors": [
+    {
+     "name": "pink_toy_ball",
+     "differs_by": "type"
+    }
+   ],
+   "destination_distractor": {
+    "name": "white_tray",
+    "differs_by": "type"
+   },
+   "feature": "type",
+   "level": "easy",
+   "relation": null,
+   "required_count": 1,
+   "count_mode": "exact",
+   "target_instances": null,
+   "count_filter": null,
+   "n_present": null,
+   "relation_applies_to": null,
+   "container": null
+  },
+  "scene": {
+   "scene": "ty_e2_GuptaLab_2023-04-20_1322",
+   "description": "DROID single-arm cell (GuptaLab); inserted objects: blue_bowl, white_tray, pink_donut, pink_toy_ball"
+  },
+  "request_sha256": "f3bc6191f2310e23eab2e9505bc34b5c722717db52ef84cab030a32d470a4155"
+ },
+ {
+  "set": "droid",
+  "kind": "adherence",
+  "frames_seed": 6,
+  "width": 832,
+  "height": 224,
+  "rollout": {
+   "id": "ty_m0_CLVR_2023-05-18_1746__p0__s0",
+   "scene": "ty_m0_CLVR_2023-05-18_1746",
+   "prompt": "Put the lemon on the cutting board.",
+   "seed": 0,
+   "target_object": "yellow_lemon",
+   "destination": "white_cutting_board",
+   "action": "place_on",
+   "distractors": [
+    {
+     "name": "yellow_toy_ball",
+     "differs_by": "type"
+    }
+   ],
+   "destination_distractor": {
+    "name": "white_plate",
+    "differs_by": "type"
+   },
+   "feature": "type",
+   "level": "medium",
+   "relation": null,
+   "required_count": 1,
+   "count_mode": "exact",
+   "target_instances": null,
+   "count_filter": null,
+   "n_present": null,
+   "relation_applies_to": null,
+   "container": null
+  },
+  "scene": {
+   "scene": "ty_m0_CLVR_2023-05-18_1746",
+   "description": "DROID single-arm cell (CLVR); inserted objects: white_cutting_board, white_plate, yellow_lemon, yellow_toy_ball, red_bell_pepper, lime_sticky_notes"
+  },
+  "request_sha256": "654872c7c673259d3834a6315b0cac5a8ec397edfb426c7f852d93de090ab1e3"
+ },
+ {
+  "set": "droid",
+  "kind": "tts",
+  "frames_seed": 0,
+  "width": 832,
+  "height": 224,
+  "rollout": {
+   "id": "co_e0_AUTOLab_2023-10-27_2001__p0__s0",
+   "scene": "co_e0_AUTOLab_2023-10-27_2001",
+   "prompt": "Put the green sponge on the plate.",
+   "seed": 0,
+   "target_object": "green_sponge",
+   "destination": "cyan_plate",
+   "action": "place_on",
+   "distractors": [
+    {
+     "name": "blue_sponge",
+     "differs_by": "colour"
+    }
+   ],
+   "destination_distractor": {
+    "name": "white_bowl",
+    "differs_by": "type"
+   },
+   "feature": "colour",
+   "level": "easy",
+   "relation": null,
+   "required_count": 1,
+   "count_mode": "exact",
+   "target_instances": null,
+   "count_filter": null,
+   "n_present": null,
+   "relation_applies_to": null,
+   "container": null
+  },
+  "scene": {
+   "scene": "co_e0_AUTOLab_2023-10-27_2001",
+   "description": "DROID single-arm cell (AUTOLab); inserted objects: cyan_plate, white_bowl, green_sponge, blue_sponge"
+  },
+  "request_sha256": "403aeffd5356b2e59f4b8fe3aaebf6884f017acc50aba3b59b959924886da857"
+ },
+ {
+  "set": "droid",
+  "kind": "tts",
+  "frames_seed": 1,
+  "width": 832,
+  "height": 224,
+  "rollout": {
+   "id": "co_m0_GuptaLab_2023-04-20_1322__p0__s0",
+   "scene": "co_m0_GuptaLab_2023-04-20_1322",
+   "prompt": "Put the blue candle jar on the plate.",
+   "seed": 0,
+   "target_object": "blue_candle_jar",
+   "destination": "pink_plate",
+   "action": "place_on",
+   "distractors": [
+    {
+     "name": "purple_candle_jar",
+     "differs_by": "colour"
+    }
+   ],
+   "destination_distractor": {
+    "name": "white_tray",
+    "differs_by": "type"
+   },
+   "feature": "colour",
+   "level": "medium",
+   "relation": null,
+   "required_count": 1,
+   "count_mode": "exact",
+   "target_instances": null,
+   "count_filter": null,
+   "n_present": null,
+   "relation_applies_to": null,
+   "container": null
+  },
+  "scene": {
+   "scene": "co_m0_GuptaLab_2023-04-20_1322",
+   "description": "DROID single-arm cell (GuptaLab); inserted objects: pink_plate, white_tray, blue_candle_jar, purple_candle_jar"
+  },
+  "request_sha256": "13ec173655dc088688001550decc6d048380faefe88bbfea4eba5747d0ddfc1d"
+ },
+ {
+  "set": "droid",
+  "kind": "tts",
+  "frames_seed": 2,
+  "width": 832,
+  "height": 224,
+  "rollout": {
+   "id": "ct_e1_IPRL_2023-04-21_2149__p0__s0",
+   "scene": "ct_e1_IPRL_2023-04-21_2149",
+   "prompt": "Put one soap bar in the tray.",
+   "seed": 0,
+   "target_object": "pink_soap_bar",
+   "destination": "white_tray",
+   "action": "place_in",
+   "distractors": [],
+   "destination_distractor": {
+    "name": "cyan_plate",
+    "differs_by": "type"
+   },
+   "feature": "count",
+   "level": "easy",
+   "relation": null,
+   "required_count": 1,
+   "count_mode": "exact",
+   "target_instances": [
+    "pink_soap_bar_1",
+    "pink_soap_bar_2"
+   ],
+   "count_filter": null,
+   "n_present": 2,
+   "relation_applies_to": null,
+   "container": null
+  },
+  "scene": {
+   "scene": "ct_e1_IPRL_2023-04-21_2149",
+   "description": "DROID single-arm cell (IPRL); inserted objects: white_tray, cyan_plate, pink_soap_bar_1, pink_soap_bar_2, blue_sticky_notes"
+  },
+  "request_sha256": "57725cdb566fbec96f183f616565431a0f28a8b393d204e4ac98ede9fd62c5d9"
+ }
+]

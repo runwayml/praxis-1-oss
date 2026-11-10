@@ -27,6 +27,7 @@ results reproducible. `README.md` is the user guide.
 | `packages/praxis-sim/` | the simulator as its own package, `praxis_sim` (no torch): the single-arm DROID rig, tasks, scripted oracles, the Gymnasium wrapper. `praxis.sim.<module>` names still resolve to it |
 | `packages/praxis-sim/src/praxis_sim/eval_suites.py`, `praxis/sim/EVAL.md` | the fixed evaluation scenarios of the single-arm checkpoint |
 | `praxis/eval/` | the offline action error on fixed DROID windows (oracle and deployment legs) |
+| `praxis/eval/autoregressive/` | the video-only autoregressive prompt-adherence eval: sets, VLM judge, scorer. See its `README.md` |
 | `praxis/train/` | the fine-tune: data windows (`DatasetSpec` for other single-arm rigs), objective, MoE balance, FSDP trainer, normalization statistics. See `praxis/train/README.md` |
 | `praxis/rig.py` | the base checkpoint `praxis-1-base` to a single-arm checkpoint: rig config fields and new head tensors (`scripts/init_heads.py`) |
 | `configs/` | the YAML settings of inference, serving, simulation and fine-tuning |
@@ -45,14 +46,15 @@ results reproducible. `README.md` is the user guide.
 | Compare two suite runs | `python scripts/compare_sim_eval.py OUT_A OUT_B` |
 | The policy server | `python -m praxis.serve --config configs/serve_droid.yaml` |
 | The offline action error | `python scripts/run_action_error_eval.py --checkpoint CKPT --vae VAE --text-encoder TEXT --data DROID --out OUT` |
+| Judge and score autoregressive rollouts | `python scripts/score_autoregressive_eval.py judge --set droid --run RUN`, then `... score --set droid RUN_A RUN_B` |
 | Inference speed, per stage, on a local GPU | `python scripts/benchmark_inference.py --config configs/serve_droid.yaml` |
 | Latency of a running server | `python -m praxis.serve.latency --url ws://<host>:8000/api/v1/session` |
 | A fine-tune of the base on your rig (full, 8 GPUs) | `scripts/compute_norm_stats.py`, `scripts/init_heads.py`, then `scripts/finetune.py`, all with `--config configs/finetune_base.yaml` |
 | A LoRA fine-tune of `praxis-1-droid` on the DROID rig (one 80 GB GPU) | `torchrun --nproc_per_node 1 scripts/finetune.py --config configs/finetune_droid_lora.yaml` |
 
 The extras of `pyproject.toml`: `kernels` (the text encoder kernels of the
-validation results), `video`, `serve`, `sim`, `train`, `nvfp4` (the optional
-routed NVFP4 inference on SM120 GPUs), `dev`.
+validation results), `video`, `serve`, `sim`, `train`, `eval`, `nvfp4` (the
+optional routed NVFP4 inference on SM120 GPUs), `dev`.
 
 ## Checks before a commit
 
@@ -87,6 +89,9 @@ pytest tests/
   for the same model.
 - Do not commit weights, checkpoints, datasets or outputs. `outputs/` is
   ignored.
+- The judge prompts and schemas of `praxis/eval/autoregressive/` are part of
+  the published results. `tests/test_eval_autoregressive.py` pins the judge
+  requests by hash. Change them only with a new judge validation.
 
 ## Measure a change in behavior
 

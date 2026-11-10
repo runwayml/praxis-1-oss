@@ -306,9 +306,13 @@ class PraxisPolicy(nn.Module):
         with one Euler step. Only the last chunk is returned. The noised
         history chunks start from their own noise and are dropped.
 
-        * ``text`` is ``(1, S, 2048)``. ``text_uncond`` is the encoded blank
-          caption of the unguided pass. Guidance needs it. The unguided pass
-          keeps every other input.
+        * ``text`` is ``(1, S, 2048)``. ``text_uncond`` is the text of the
+          unguided pass. Guidance needs it. The pipeline passes the encoded
+          blank caption of the checkpoint config. The autoregressive eval
+          (:mod:`praxis.eval.autoregressive`) passes an encoded negative
+          prompt instead. The tensor goes to the unguided pass as it is, so
+          the blank caption gives the bits of the served path. The unguided
+          pass keeps every other input.
         * ``anchor`` is ``(1, 192, 1, h, w)``, each clean chunk
           ``(1, 192, 6, h, w)``. ``proprio_all`` holds the normalized boundary
           pose of each chunk ``(1, K', P)`` float32, current pose last.
@@ -346,7 +350,9 @@ class PraxisPolicy(nn.Module):
             raise ValueError(f"layout {settings.layout!r} is not 'window_joint'")
         guided = settings.guided
         if guided and text_uncond is None:
-            raise ValueError("text guidance needs the encoded blank caption")
+            raise ValueError(
+                "text guidance needs the encoded blank caption (or a negative prompt)"
+            )
         dev, md = self.device, self.dtype
         lat = int(self.config["chunking"]["latents_per_chunk"])
         max_chunks = int(self.config["chunking"]["n_chunks"])
