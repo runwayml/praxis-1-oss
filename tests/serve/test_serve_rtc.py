@@ -21,14 +21,14 @@ import numpy as np
 import pytest
 import torch
 
+pytest.importorskip("scipy")  # praxis.serve.rtc needs the `serve` extra
+
 from praxis import bimanual
 from praxis.model import SamplerSettings
 from praxis.robot_io import ContiguousStreamContext, NormStats
 from praxis.serve import params, rtc
 from praxis.serve import periodic as per
 from praxis.serve.policy import PolicyFactory, ServedPolicy
-
-pytest.importorskip("scipy")
 
 ROOT = Path(__file__).resolve().parents[2]
 YAM = json.loads((ROOT / "tests" / "data" / "praxis-1-yam.json").read_text())

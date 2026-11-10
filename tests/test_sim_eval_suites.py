@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("praxis_sim")  # the `sim` extra
+
 from praxis.sim.eval_suites import (
     SUITES,
     mcnemar_p,

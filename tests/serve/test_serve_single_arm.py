@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+pytest.importorskip("scipy")  # praxis.serve.rtc needs the `serve` extra
+
 from praxis.model import SamplerSettings
 from praxis.serve.policy import PolicyFactory
 

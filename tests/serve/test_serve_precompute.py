@@ -20,6 +20,9 @@ import numpy as np
 import pytest
 import torch
 import yaml
+
+pytest.importorskip("scipy")  # praxis.serve.rtc needs the `serve` extra
+
 from test_serve_rtc import (
     DELAYS,
     DROID,
@@ -41,8 +44,6 @@ from praxis.pipeline import PraxisPipeline, StepResult
 from praxis.serve import periodic as per
 from praxis.serve import rtc
 from praxis.serve.policy import SESSION_DEFAULTS, PolicyFactory, ServedPolicy
-
-pytest.importorskip("scipy")
 
 ROOT = Path(__file__).resolve().parents[2]
 

@@ -581,6 +581,7 @@ def test_nvfp4_device_check_needs_flashinfer_on_sm120(monkeypatch):
 
 
 def test_default_imports_load_no_nvfp4_code():
+    pytest.importorskip("uvicorn")  # praxis.serve.server needs the `serve` extra
     code = (
         "import sys\n"
         "import praxis.pipeline, praxis.serve.server\n"

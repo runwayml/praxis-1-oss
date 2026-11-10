@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytest.importorskip("praxis_sim")  # the `sim` extra
+
 from praxis.sim.video import (
     VideoWriter,
     compose_panels,

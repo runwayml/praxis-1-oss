@@ -16,6 +16,8 @@ import numpy as np
 import pytest
 import torch
 
+pytest.importorskip("praxis_sim")  # the `sim` extra
+
 # praxis.sim sets the OpenGL backend of MuJoCo. It must load before mujoco.
 import praxis.sim  # noqa: F401
 
