@@ -46,10 +46,11 @@ def _run_file(run: Path, rollout_id: str, suffix: str) -> Path:
     name = f"{rollout_id}{suffix}"
     if Path(name).name != name or name.startswith("."):
         raise ValueError(f"rollout id {rollout_id!r} is not a plain file name")
-    path = (run / name).resolve()
-    if path.parent != run.resolve():
+    base = os.path.realpath(run)
+    path = os.path.realpath(os.path.join(base, name))
+    if os.path.commonpath([base, path]) != base or os.path.dirname(path) != base:
         raise ValueError(f"rollout id {rollout_id!r} leaves the run folder {run}")
-    return path
+    return Path(path)
 
 
 def _judge_one(es: sets.EvalSet, run: Path, ro: dict, tts: bool, model: str) -> str:
@@ -126,7 +127,8 @@ def score(args: argparse.Namespace) -> None:
             )
         print(line)
     if args.out:
-        dest = Path(args.out).resolve()
+        # --out is a path the user gives on the command line; only a folder is refused.
+        dest = Path(os.path.realpath(args.out))
         if dest.is_dir():
             raise SystemExit(f"--out {args.out} is a folder; give a file path")
         dest.write_text(json.dumps(out, indent=1))

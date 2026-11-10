@@ -181,7 +181,8 @@ def _canonical(req: dict) -> str:
         "content": m[1]["content"],
         "model": req["model"],
         "max_completion_tokens": req["max_completion_tokens"],
-        "temperature": req["temperature"],
+        # The published requests set temperature 0; the judge now sets none.
+        "temperature": req.get("temperature", 0.0),
         "response_format": req["response_format"],
     }
     return hashlib.sha256(
@@ -206,6 +207,14 @@ def test_judge_request_equals_the_published_one(case: dict) -> None:
     build = J.tts_request if case["kind"] == "tts" else J.request
     req = build(case["rollout"], case["scene"], case["set"], frames, 15.0)
     assert _canonical(req) == case["request_sha256"]
+
+
+def test_judge_requests_set_no_temperature() -> None:
+    case = REQUESTS[0]
+    frames = synthetic_frames(case["width"], case["height"], case["frames_seed"])
+    for build in (J.request, J.tts_request):
+        req = build(case["rollout"], case["scene"], case["set"], frames, 15.0)
+        assert "temperature" not in req
 
 
 def test_judge_prompts_are_the_published_ones() -> None:

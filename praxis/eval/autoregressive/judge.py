@@ -16,10 +16,11 @@ One request holds:
 The judge reads 189 frames at 15 fps on the judged canvas of the set
 (:func:`judged_frames`): 832x224, one 416-px tile per camera.
 
-The request is the request of the published results, byte for byte
-(``tests/test_eval_autoregressive.py``). The answer is strict JSON
-(``response_format`` json_schema, ``judge_schema_<set>.json``), temperature
-0, at most 8000 completion tokens.
+The request is the request of the published results, byte for byte, less
+the temperature (``tests/test_eval_autoregressive.py``). It sets no
+temperature: the current judge model takes only its default, and the
+published runs used 0. The answer is strict JSON (``response_format``
+json_schema, ``judge_schema_<set>.json``), at most 8000 completion tokens.
 
 The time-to-success judge (:func:`tts_request`) runs on the fully adherent
 clips only. It reads 24 evenly spaced frames and gives ``success_time_s``,
@@ -492,7 +493,6 @@ def request(
     return {
         "model": model,
         "max_completion_tokens": MAX_TOKENS,
-        "temperature": 0.0,
         "messages": [
             {"role": "system", "content": system_prompt(set_name)},
             {"role": "user", "content": content},
@@ -544,7 +544,6 @@ def tts_request(
     return {
         "model": model,
         "max_completion_tokens": TTS_MAX_TOKENS,
-        "temperature": 0.0,
         "messages": [
             {"role": "system", "content": tts_system_prompt()},
             {"role": "user", "content": content},

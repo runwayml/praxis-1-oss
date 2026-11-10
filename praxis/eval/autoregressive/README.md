@@ -97,7 +97,9 @@ rollout holds:
 - 12 evenly spaced frames, each a grid of labelled camera tiles at 1.5x
   (JPEG quality 85), then the last frame at 2.25x.
 
-The answer is strict JSON (temperature 0, at most 8000 tokens). The call
+The answer is strict JSON (at most 8000 tokens). The request sets no
+temperature: the judge model takes only its default (the published runs
+used temperature 0). The call
 retries 6 times with backoff. It falls back to `json_object` if the
 endpoint refuses a JSON schema. A bad key (HTTP 401), no access (403), an
 unknown model (404) or another 400 stops the call at once, without retries.
