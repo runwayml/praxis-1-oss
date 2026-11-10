@@ -137,7 +137,8 @@ def parse_opt_int(v: str | float | None) -> int | None:
 
 
 def parse_skip_mode(v: object) -> bool | None:
-    """Return the ``skip_video_decoder`` value: None for ``auto``, else a bool."""
+    """Return the ``skip_video_decoder`` value: None for ``auto`` (the server's
+    default: skip the last Euler step's video decoder), else a bool."""
     if v is None:
         return None
     if isinstance(v, str) and v.strip().lower() in ("auto", "default"):

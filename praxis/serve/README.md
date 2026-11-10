@@ -76,6 +76,17 @@ A client can change each value for one session in the query of the session
 URL, for example `?max_context_chunks=3`. `layout` is the only exception: it
 is a boot setting of the server.
 
+The server returns commands only, never the predicted video, so each call
+skips the video decoder of the last Euler step (`skip_video_decoder`,
+default `auto` = on). The action expert reads only the encoder of the trunk,
+so the commands keep their bits; the call is shorter by one decoder pass.
+Both serve configs set `skip_video_decoder: on`. To run the full last step,
+a deploy sets `skip_video_decoder: off` in the `session` block of its config,
+and a client sends `?skip_video_decoder=off` for one session. A pipeline
+session in your own code keeps the full step by default
+(`PraxisPipeline.session(skip_last_video=False)`), so that
+`Session.decode_video` can decode the predicted video.
+
 ## Run the server in Docker
 
 `docker/Dockerfile` is an example image. It holds CUDA 13.0, PyTorch 2.13,

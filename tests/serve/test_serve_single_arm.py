@@ -141,6 +141,7 @@ def test_serve_config_has_the_recipe() -> None:
         "context_mode": "observed",
         "max_context_chunks": 1,
         "carry_mode": "clean",
+        "skip_video_decoder": True,
         "prompt": "",
         "schedule": "chunked",
     }
@@ -277,8 +278,11 @@ def test_session_gets_the_sampler_and_settings_of_the_session() -> None:
         "control_mode",
         "exec_horizon",
         "sampler",
+        "skip_last_video",
     ]
     assert kwargs["prompt"] == "pick the cube" and kwargs["seed"] == 7
+    # the server returns no video: the last step's video decoder is skipped
+    assert kwargs["skip_last_video"] is True
     assert kwargs["max_context_chunks"] == 1 and kwargs["control_mode"] == "none"
     assert kwargs["exec_horizon"] is None  # the server cuts the rows itself
     assert kwargs["sampler"] == SamplerSettings(

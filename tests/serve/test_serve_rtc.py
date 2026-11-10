@@ -450,7 +450,16 @@ class _Policy:
         self.calls: list[dict] = []
 
     def sample_window_joint(
-        self, text, text_uncond, anchor, cleans, proprio_all, seed, settings, trace=None
+        self,
+        text,
+        text_uncond,
+        anchor,
+        cleans,
+        proprio_all,
+        seed,
+        settings,
+        trace=None,
+        skip_last_video=None,
     ):
         self.calls.append({"depth": len(cleans), "seed": int(seed)})
         generator = torch.Generator().manual_seed(int(seed))

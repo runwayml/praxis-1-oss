@@ -44,7 +44,7 @@ class StepResult:
     commands: list[dict]
     action_rows_norm: np.ndarray
     action_rel: np.ndarray
-    pred_video_latent: Tensor
+    pred_video_latent: Tensor | None
     pred_action_norm: Tensor
     depth: int
     seed: int
@@ -100,6 +100,7 @@ class PraxisPipeline:
         control_mode: str | None = None,
         exec_horizon: int | None = 24,
         sampler: SamplerSettings | None = None,
+        skip_last_video: bool = False,
     ) -> Session:
         """Open a session for one robot episode.
 
@@ -108,6 +109,9 @@ class PraxisPipeline:
         and ``none`` on the bimanual rig.
         ``sampler`` replaces the sampler settings of the pipeline for this
         session.
+        ``skip_last_video`` skips the video decoder on the last Euler step of
+        each call: the commands keep their bits, and the call returns no
+        predicted video (:meth:`Session.decode_video` refuses it).
         """
         return Session(
             self,
@@ -117,6 +121,7 @@ class PraxisPipeline:
             control_mode=control_mode,
             exec_horizon=exec_horizon,
             sampler=sampler,
+            skip_last_video=skip_last_video,
         )
 
 
@@ -132,9 +137,11 @@ class Session:
         control_mode: str | None = None,
         exec_horizon: int | None = 24,
         sampler: SamplerSettings | None = None,
+        skip_last_video: bool = False,
     ) -> None:
         self.pipe = pipeline
         self.sampler = sampler or pipeline.sampler
+        self.skip_last_video = bool(skip_last_video)
         self.seed = int(seed)
         variant = model_variant(pipeline.policy.config)
         config = pipeline.policy.config
@@ -200,8 +207,12 @@ class Session:
     def _sample(
         self,
         inputs: single_arm.SingleArmChunkInputs | bimanual.BimanualChunkInputs,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        """Sample one chunk. Return the video latent, the actions and the text."""
+    ) -> tuple[Tensor | None, Tensor, Tensor]:
+        """Sample one chunk. Return the video latent, the actions and the text.
+
+        The video latent is None when the session skips the video of the last
+        step (``skip_last_video``).
+        """
         text = self.pipe.encode_text(inputs.prompt)
         uncond = self.pipe.encode_uncond_text() if self.sampler.guided else None
         video, actions = self.pipe.policy.sample_window_joint(
@@ -212,6 +223,9 @@ class Session:
             proprio_all=inputs.proprio_all,
             seed=self.seed + inputs.chunk_index,
             settings=self.sampler,
+            # Always the session's value, so that False overrides the policy
+            # flag. The call with False gives the bits of the stock call.
+            skip_last_video=bool(getattr(self, "skip_last_video", False)),
         )
         return video, actions, text
 
@@ -230,6 +244,11 @@ class Session:
         Returns uint8 frames ``(len(result.commands), 3, H, W)``.
         """
         latent = result.pred_video_latent
+        if latent is None:
+            raise ValueError(
+                "this call skipped the predicted video (skip_last_video); open the"
+                " session with skip_last_video=False to decode it"
+            )
         cleans = result.inputs["cleans"]
         if cleans:
             dtype = cleans[0].dtype

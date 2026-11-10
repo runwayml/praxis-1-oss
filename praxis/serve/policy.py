@@ -67,6 +67,7 @@ SESSION_DEFAULTS: dict = {
     "sg_order": 3,
     "max_chunks_per_episode": None,
     "schedule": "chunked",
+    "skip_video_decoder": None,
 }
 SCHEDULES: tuple[str, ...] = ("chunked", "rtc")
 # The session parameters of the real-time schedule.
@@ -243,7 +244,14 @@ class ServedPolicy:
         self.stop_on_fault = bool(o.get("declare_stop_on_fault", True))
         record = o.get("record_denoised")
         self.compile = params.parse_on_off(o.get("compile"))
-        self.skip_video_decoder = params.parse_skip_mode(o.get("skip_video_decoder"))
+        # The server returns commands only, never the predicted video, so the
+        # video decoder of the last Euler step is skipped unless the config or the
+        # session turns it off (``skip_video_decoder: off``); the commands keep
+        # their bits.
+        skip = params.parse_skip_mode(
+            o.get("skip_video_decoder", d["skip_video_decoder"])
+        )
+        self.skip_video_decoder = True if skip is None else skip
         self.action_steps = params.parse_opt_int(o.get("action_steps", s.action_steps))
         self.cfg_video_scale = float(o.get("cfg_video_scale", s.cfg_video_scale))
         self.cfg_batched = (
@@ -367,6 +375,7 @@ class ServedPolicy:
             # The server cuts the rows to its exec_horizon (select_action).
             exec_horizon=None,
             sampler=sampler,
+            skip_last_video=self.skip_video_decoder,
         )
         self._history: periodic.SampleHistory | None = None
         self._grid: periodic.PredictGrid | None = None

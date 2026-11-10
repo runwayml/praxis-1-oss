@@ -147,6 +147,9 @@ class PraxisPolicy(nn.Module):
         self.backbone = backbone
         self.action_expert = expert
         self.config = config
+        # True: the last Euler step of sample_window_joint moves only the actions
+        # (no video decoder on that step); the sampler then returns no video.
+        self.skip_last_video = False
 
     @classmethod
     def from_config(cls, config: dict) -> PraxisPolicy:
@@ -208,7 +211,8 @@ class PraxisPolicy(nn.Module):
         trace: TraceFn | None = None,
         oracle_video: Tensor | None = None,
         return_window: bool = False,
-    ) -> tuple[Tensor, Tensor]:
+        skip_last_video: bool | None = None,
+    ) -> tuple[Tensor | None, Tensor]:
         """Denoise the window of the chunk at depth ``d = len(cleans)`` jointly.
 
         The sampler of the checkpoint (layout ``window_joint``). The
@@ -240,11 +244,19 @@ class PraxisPolicy(nn.Module):
           actions read the true future video. The returned video is then
           ``oracle_video``.
         * ``return_window`` returns all ``K'`` chunks instead of the last.
+        * ``skip_last_video`` (default None: ``self.skip_last_video``, which
+          is False unless set): the last step moves only
+          the actions. Its guided pass runs without the video decoder, and its
+          unguided pass runs only for action guidance, also without the
+          decoder. The action expert reads only the encoder taps, and the
+          guidance combine at scale 1.0 is the identity, so the actions keep
+          their bits. The video comes back as None. A ``trace`` call runs all
+          passes.
 
-        Returns the video latent of the last chunk ``(1, 192, 6, h, w)`` and
-        its normalized action tokens ``(1, 6, A)``, float32. With
-        ``return_window`` the shapes are ``(1, 192, 6 K', h, w)`` and
-        ``(1, 6 K', A)``.
+        Returns the video latent of the last chunk ``(1, 192, 6, h, w)`` (None
+        with ``skip_last_video``) and its normalized action tokens
+        ``(1, 6, A)``, float32. With ``return_window`` the shapes are
+        ``(1, 192, 6 K', h, w)`` and ``(1, 6 K', A)``.
         """
         if settings.layout != "window_joint":
             raise ValueError(f"layout {settings.layout!r} is not 'window_joint'")
@@ -338,25 +350,34 @@ class PraxisPolicy(nn.Module):
         # skipped part changes no bit. A trace keeps both parts.
         decode_uncond = trace is not None or float(settings.cfg_video_scale) != 1.0
         act_uncond = trace is not None or float(settings.cfg_scale) != 1.0
+        skip = self.skip_last_video if skip_last_video is None else skip_last_video
+        skip_video = trace is None and bool(skip)
         x0_v = None if oracle_video is None else oracle_video.float().cpu()
         for step in range(settings.num_steps):
             t_cur, t_next = ts[step], ts[step + 1]
+            # the last step's video moves only the returned latent: skip its decoder
+            video = not (skip_video and step == settings.num_steps - 1)
             if x0_v is not None:
                 xv = ((1 - t_cur) * x0_v + t_cur * noise_v).to(dev)
             probe("pass.marker", torch.tensor([step, 0]))
-            v, a = velocity(text_c, xv, xa, t_cur, True)
-            assert v is not None and a is not None
-            if guided:
-                assert text_u is not None
+            v, a = velocity(text_c, xv, xa, t_cur, video)
+            if a is None or (video and v is None):
+                raise RuntimeError(
+                    f"the trunk pass of step {step} returned no "
+                    f"{'actions' if a is None else 'video velocity'}"
+                )
+            if guided and (video or act_uncond):
+                if text_u is None:
+                    raise RuntimeError("guided sampling needs text_uncond")
                 probe("pass.marker", torch.tensor([step, 1]))
                 v_u, a_u = velocity(
-                    text_u, xv, xa, t_cur, decode_uncond, act=act_uncond
+                    text_u, xv, xa, t_cur, video and decode_uncond, act=act_uncond
                 )
                 for kind, cond, unc, scale in (
                     ("video", v, v_u, settings.cfg_video_scale),
                     ("action", a, a_u, settings.cfg_scale),
                 ):
-                    if unc is None:  # the unguided video is not needed
+                    if unc is None or cond is None:  # a part not needed
                         continue
                     out = guidance_combine(cond, unc, scale)
                     probe(f"cfg_combine.{kind}.cond", cond)
@@ -367,16 +388,18 @@ class PraxisPolicy(nn.Module):
                     else:
                         a = out
             dt = t_next - t_cur
-            xv = xv + dt * v
+            if video and v is not None:
+                xv = xv + dt * v
             xa = xa + dt * a
         if x0_v is not None:
             xv = x0_v.to(dev)
         probe("out.video", xv)
         probe("out.action", xa)
         if return_window:
-            return xv, xa[None]
-        video = xv[:, :, d * lat :].contiguous()
+            return (None if skip_video else xv), xa[None]
+        video_last = None if skip_video else xv[:, :, d * lat :].contiguous()
         actions = xa[d * lat :].contiguous()
-        probe("out.video_last", video)
+        if video_last is not None:
+            probe("out.video_last", video_last)
         probe("out.action_last", actions)
-        return video, actions[None]
+        return video_last, actions[None]

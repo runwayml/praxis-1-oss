@@ -485,6 +485,77 @@ def test_unguided_actions_are_skipped_with_the_same_bits(
     assert torch.equal(out[False][1], out[True][1])
 
 
+@pytest.mark.parametrize(("depth", "seed", "steps", "shift", "cfg", "cfg_v"), CASES)
+def test_skip_last_video_keeps_the_action_bits(
+    monkeypatch: pytest.MonkeyPatch,
+    depth: int,
+    seed: int,
+    steps: int,
+    shift: float,
+    cfg: float,
+    cfg_v: float,
+) -> None:
+    """The last step without its video decoder: the same action bits, no video.
+
+    The last step runs its guided pass with ``decode=False``, and its unguided
+    pass only when the action scale reads it (also without the decoder). The
+    earlier steps are unchanged.
+    """
+    settings = SamplerSettings(
+        layout="window_joint",
+        num_steps=steps,
+        t_shift=shift,
+        cfg_scale=cfg,
+        cfg_video_scale=cfg_v,
+    )
+    out, calls_of = {}, {}
+    for skip in (False, True):
+        calls = Calls()
+        monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(calls))
+        out[skip] = _policy(calls).sample_window_joint(
+            seed=seed, settings=settings, skip_last_video=skip, **_inputs(depth)
+        )
+        calls_of[skip] = calls
+    assert out[True][0] is None
+    assert torch.equal(out[True][1], out[False][1])
+    guided = cfg != 1.0 or cfg_v != 1.0
+    act_uncond = guided and cfg != 1.0
+    per_step = 2 if guided else 1
+    full, skipped = calls_of[False].trunk, calls_of[True].trunk
+    # The earlier steps make the same trunk calls with the same inputs.
+    assert len(skipped) == (steps - 1) * per_step + (2 if act_uncond else 1)
+    for a, b in zip(full[: (steps - 1) * per_step], skipped, strict=False):
+        assert a["decode"] is b["decode"] and torch.equal(a["noised"], b["noised"])
+    # The last step decodes no video in any pass.
+    assert all(c["decode"] is False for c in skipped[(steps - 1) * per_step :])
+    # The expert sees the same calls: the action path is untouched.
+    assert len(calls_of[True].expert) == len(calls_of[False].expert)
+    for a, b in zip(calls_of[False].expert, calls_of[True].expert, strict=True):
+        assert torch.equal(a["noised_actions"], b["noised_actions"])
+
+
+def test_skip_last_video_follows_the_policy_flag_and_a_trace_runs_all_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``policy.skip_last_video`` is the default of the argument; a trace keeps
+    every pass, with the video, so its probes see the full sampler."""
+    settings = SamplerSettings(num_steps=2, cfg_scale=1.0, cfg_video_scale=4.0)
+    calls = Calls()
+    monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(calls))
+    policy = _policy(calls)
+    policy.skip_last_video = True
+    video, _ = policy.sample_window_joint(seed=1, settings=settings, **_inputs(1))
+    assert video is None
+    video, _ = policy.sample_window_joint(
+        seed=1, settings=settings, skip_last_video=False, **_inputs(1)
+    )
+    assert video is not None
+    traced, _ = policy.sample_window_joint(
+        seed=1, settings=settings, trace=lambda n, t: None, **_inputs(1)
+    )
+    assert traced is not None
+
+
 def test_window_joint_refusals(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = Calls()
     monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(calls))
@@ -576,3 +647,71 @@ def test_session_samples_the_window(cfg: float) -> None:
         assert pipe.texts == [inputs.prompt, "<uncond>"]
         assert torch.equal(call["text_uncond"], torch.zeros(1, 1, 4))
     assert torch.equal(text, call["text"])
+
+
+@pytest.mark.parametrize("skip", [False, True])
+def test_session_passes_its_skip_last_video(skip: bool) -> None:
+    """The session always passes its ``skip_last_video``, so a session opened
+    with False overrides ``policy.skip_last_video`` (the policy-level flag)."""
+    pipe = StubPipe()
+    pipe.skip_last_video = True  # ty: ignore[unresolved-attribute]
+    session = object.__new__(Session)
+    session.pipe = cast(PraxisPipeline, pipe)
+    session.sampler = SamplerSettings(layout="window_joint")
+    session.seed = 0
+    session.skip_last_video = skip
+    inputs = StubInputs(
+        prompt="Put the cube on the plate.",
+        anchor=torch.zeros(1),
+        cleans=[],
+        proprio=torch.zeros(1, 1, 10),
+        proprio_all=torch.ones(1, 1, 10),
+        chunk_index=0,
+    )
+    session._sample(cast(SingleArmChunkInputs, inputs))
+    (call,) = pipe.calls
+    assert call["skip_last_video"] is skip
+
+
+def test_a_session_without_skip_overrides_the_policy_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``policy.skip_last_video = True``, a session opened with
+    ``skip_last_video=False`` still gets the video of the last step, with the
+    bits of the stock call."""
+    settings = SamplerSettings(layout="window_joint", num_steps=2, cfg_video_scale=4.0)
+    calls = Calls()
+    monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(calls))
+    policy = _policy(calls)
+    policy.skip_last_video = True
+    inputs = _inputs(1)
+
+    @dataclass
+    class Pipe:
+        policy: PraxisPolicy
+
+        def encode_text(self, prompt: str) -> Tensor:
+            return inputs["text"]
+
+        def encode_uncond_text(self) -> Tensor:
+            return inputs["text_uncond"]
+
+    session = object.__new__(Session)
+    session.pipe = cast(PraxisPipeline, Pipe(policy))
+    session.sampler = settings
+    session.seed = 1
+    session.skip_last_video = False
+    chunk = StubInputs(
+        prompt="p",
+        anchor=inputs["anchor"],
+        cleans=inputs["cleans"],
+        proprio=torch.zeros(1, 1, P_DIM),
+        proprio_all=inputs["proprio_all"],
+        chunk_index=0,
+    )
+    video, actions, _ = session._sample(cast(SingleArmChunkInputs, chunk))
+    ref_video, ref_actions = policy.sample_window_joint(
+        seed=1, settings=settings, skip_last_video=False, **inputs
+    )
+    assert video is not None and ref_video is not None
+    assert torch.equal(video, ref_video) and torch.equal(actions, ref_actions)
