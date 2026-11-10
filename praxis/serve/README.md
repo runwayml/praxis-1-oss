@@ -181,6 +181,11 @@ python -m praxis.serve.latency \
     --headers-file ~/.config/praxis/modal_headers.json --out outputs/latency.jsonl
 ```
 
+The client times the chunked schedule (its default `--query` holds
+`schedule=chunked`): a real-time session is periodic samples on protocol v2,
+which this client does not speak. The positronic client times a real-time
+session end to end.
+
 The headers file holds the proxy auth token:
 `{"Modal-Key": "<id>", "Modal-Secret": "<secret>"}`. Keep it outside the
 checkout and readable only by you (`chmod 600`); `.gitignore` also skips
@@ -214,13 +219,20 @@ The query of the URL holds the session parameters, for example
 `?sample_seed=0&rollout_id=run1`. Without `sample_seed`, each session draws a
 random seed.
 
-## Real-time chunking (bimanual rig)
+The default session is the chunked schedule. Real-time chunking is opt-in
+with `schedule=rtc` in the query (see "Real-time chunking"); it needs
+Positronic 0.4.4 or later.
+
+## Real-time chunking
 
 With the chunked schedule, the robot plays each chunk to its end, then asks
 for the next one and waits for the answer. With real-time chunking the robot
 asks while it still runs the current chunk, so it does not stop between
-chunks. The bimanual checkpoint serves it per session with
-`?schedule=rtc`. The single-arm checkpoint serves the chunked schedule only.
+chunks. It is opt-in: both serve configs default to the chunked schedule
+(`schedule: chunked` in `configs/serve_droid.yaml` and
+`configs/serve_yam.yaml`). A client asks for real-time chunking with
+`/api/v1/session?schedule=rtc`, and a deploy turns it on for every session
+with `schedule: rtc` in the `session` block of its config.
 
 **When to use it.** Real-time chunking removes the stop between chunks and
 shortens the episodes, but it needs a short round trip. Measure the round
@@ -238,12 +250,15 @@ turn it on.
 
 A real-time session uses the periodic flow of Positronic
 ([Positronic-Robotics/positronic#1139](https://github.com/Positronic-Robotics/positronic/pull/1139)).
-The client needs a Positronic version with the `periodic` and
-`inference_schedule` components (0.4.4 or later).
+**The client needs Positronic 0.4.4 or later**, the first release with the
+`periodic` and `inference_schedule` components. An older client refuses the
+handshake of a real-time session ("This client cannot build the client
+stack that the server declares", an unknown local-stack entry); it keeps the
+default chunked schedule.
 
 - The server declares the recipe
-  `stop_on_fault | trajectory_player | periodic(30 Hz) | inference_schedule |
-  restrict_image_size`. The client samples every 1/30 s and sends each
+  `stop_on_fault | trajectory_player | periodic(15 Hz) | inference_schedule |
+  restrict_image_size`. The client samples every 1/15 s and sends each
   sample as a call with the current frames and state only. It has no frame
   stack.
 - The server keeps the samples. It answers None on most samples. Every
@@ -251,7 +266,7 @@ The client needs a Positronic version with the `periodic` and
   chunked recipe from the samples and predicts. The window of each
   prediction holds the frames that the robot ran since the context started,
   one every 1/15 s, as in training.
-- Calls overlap. The ready message declares `max_in_flight` (8 by default).
+- Calls overlap. The ready message declares `max_in_flight` (16 by default).
   A real-time session speaks protocol v2: the ready message holds a
   `session_id`, and each request carries it.
 - The client sends the plan it runs with each call (the `action_prefix`
@@ -263,29 +278,36 @@ The client needs a Positronic version with the `periodic` and
   the end of these rows. The offset between the two goes back to zero over
   `rtc_rebase_decay` rows, and the velocity fades over `rtc_vel_fade` rows.
   The grippers fade from the plan to the model over `rtc_grip_rows` rows.
-- Targets past the reach of a YAM arm move back onto a reach radius
-  (`rtc_reach_max_m`). The reach model puts the arm bases where Positronic's
-  `yam_bimanual` embodiment puts them. Set `rtc_reach_max_m=off` on a rig
-  with other arm bases.
+- On the bimanual rig, targets past the reach of a YAM arm move back onto a
+  reach radius (`rtc_reach_max_m`). The reach model puts the arm bases where
+  Positronic's `yam_bimanual` embodiment puts them. Set
+  `rtc_reach_max_m=off` on a rig with other arm bases. The single-arm rig
+  has no reach clamp.
+- On the single-arm rig, the rows stay in the frame of the client (the frame
+  the robot runs), every row keeps the control law of the session
+  (`droid_impedance`), and the server checks each prediction's current pose
+  against the forward kinematics of `robot_state.q`, as on a chunked call.
 
 The session parameters of real-time chunking:
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `schedule` | `chunked` | `rtc` turns real-time chunking on. |
+| `schedule` | `chunked` | `rtc` turns real-time chunking on (Positronic 0.4.4 or later). |
 | `rtc_stride` | 12 | Rows between two predictions (1 to 20). |
 | `rtc_rebase_decay` | 24 | Rows over which the junction offset goes back to zero (0 keeps it). |
 | `rtc_vel_fade` | 6 | Rows over which the velocity fades from the plan to the model (0 turns it off). |
 | `rtc_grip` | `cont` | `cont` fades the grippers from the plan, `model` takes the model's grips. |
 | `rtc_grip_rows` | 16 | Rows of the gripper fade. |
-| `rtc_reach_max_m` | `auto` | Reach radius in m: `auto` (0.595 on both arms), `off`, one radius, or `left,right`. |
-| `sample_fps` | 30 | Samples per second, a whole multiple of the 15 Hz action rate. |
-| `max_in_flight` | 8 | Calls that the client may have in flight (1 to 16). |
+| `rtc_reach_max_m` | `auto` | Bimanual rig: reach radius in m, `auto` (0.595 on both arms), `off`, one radius, or `left,right`. |
+| `sample_fps` | 15 | Samples per second, a whole multiple of the 15 Hz action rate. |
+| `max_in_flight` | 16 | Calls that the client may have in flight (1 to 16). |
 
 A real-time session needs `context_mode=observed`, `max_context_chunks`
-of 1 or more, and the full chunk (`exec_horizon` 24 or null). These defaults
-are the junction rule of our bimanual robot runs with real-time chunking.
-They can change when we have more robot results.
+of 1 or more, and the full chunk (`exec_horizon` 24 or null). Under the
+`rtc` schedule set in a deploy's config, a session that asks for a
+stateless context or a shorter `exec_horizon` gets the chunked schedule; with
+an explicit `schedule=rtc` in its query it is refused. These defaults are the junction rule of our robot runs with
+real-time chunking. They can change when we have more robot results.
 
 ## Action clamp
 

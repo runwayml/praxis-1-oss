@@ -42,3 +42,4 @@ session:
   max_context_chunks: 1           # executed chunks kept as context
   carry_mode: clean               # clean | zeros (no effect on this checkpoint)
   prompt: ""                      # task string until the robot sends one
+  schedule: chunked               # chunked | rtc (real-time chunking, opt-in, positronic 0.4.4+)

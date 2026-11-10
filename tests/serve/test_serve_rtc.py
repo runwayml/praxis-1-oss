@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -453,7 +454,8 @@ class _Policy:
     ):
         self.calls.append({"depth": len(cleans), "seed": int(seed)})
         generator = torch.Generator().manual_seed(int(seed))
-        noise = torch.randn((1, 6, 80), generator=generator)
+        dim = 4 * int(self.config["action_space"]["dim"])
+        noise = torch.randn((1, 6, dim), generator=generator)
         proprio = float(proprio_all[..., -1, :].sum())
         actions = 0.1 * noise + 0.001 * float(anchor.mean()) + 0.001 * proprio
         return torch.zeros(1, 1, 6, 1, 1), actions
@@ -475,16 +477,16 @@ class _Encoder:
 
 
 class _Pipeline:
-    def __init__(self) -> None:
+    def __init__(self, config: dict = YAM) -> None:
         from praxis.pipeline import PraxisPipeline
 
         self._session = PraxisPipeline.session
         self.device = torch.device("cpu")
-        self.policy = _Policy(YAM)
+        self.policy = _Policy(config)
         self.vae = _Encoder()
         self.sampler = SamplerSettings(num_steps=2, t_shift=1.0, cfg_video_scale=1.0)
-        self.embodiment = "bimanual"
-        n = YAM["normalization"]
+        self.embodiment = str(config["embodiment"])
+        n = config["normalization"]
         self.stats = NormStats(
             action_q01=np.asarray(n["action_q01"], np.float32),
             action_q99=np.asarray(n["action_q99"], np.float32),
@@ -505,7 +507,12 @@ class _Pipeline:
 def _factory() -> PolicyFactory:
     return PolicyFactory(
         _Pipeline(),  # ty: ignore[invalid-argument-type]
-        {"exec_horizon": 24, "control_mode": "none", "max_context_chunks": 1},
+        {
+            "exec_horizon": 24,
+            "control_mode": "none",
+            "max_context_chunks": 1,
+            "schedule": "chunked",
+        },
         "/ckpt/praxis-1-yam",
     )
 
@@ -568,21 +575,29 @@ def _drive(
     delays: list[float],
     seconds: float,
     late: dict[int, int] | None = None,
+    sample: Callable[[float], dict] | None = None,
+    sample_fps: float = SAMPLE_FPS,
 ) -> tuple[list[list[dict]], list[int], list[int]]:
     """Drive a session as the periodic recipe does, one call in flight.
 
     ``delays[k]`` is the duration of prediction ``k``. ``late`` maps a sample
-    index to the index after which it arrives (out of order). Returns the
-    answered chunks, their sample indices and the sample indices that
-    answered None.
+    index to the index after which it arrives (out of order). ``sample(raw)``
+    builds the current observation at the action raw ``raw`` (default: the
+    bimanual rig). Returns the answered chunks, their sample indices and the
+    sample indices that answered None.
     """
+    if sample is None:
+
+        def sample(raw: float) -> dict:
+            return _current(_obs([raw]))
+
     chunk: list[dict] | None = None
     start = 0.0
     unreported: list[dict] = []
     answers: list[list[dict]] = []
     at: list[int] = []
     nones: list[int] = []
-    order = list(range(round(seconds * SAMPLE_FPS)))
+    order = list(range(round(seconds * sample_fps)))
     for n, after in (late or {}).items():
         order.remove(n)
         order.insert(order.index(after) + 1, n)
@@ -590,8 +605,8 @@ def _drive(
     for n in order:
         if k >= len(delays):
             break
-        t = n / SAMPLE_FPS
-        obs = _current(_obs([t * FPS]))
+        t = n / sample_fps
+        obs = sample(t * FPS)
         obs.update(_plan_context(chunk, start, t))
         obs.update(
             {
@@ -629,9 +644,9 @@ def test_a_real_time_session_declares_the_periodic_recipe() -> None:
         "inference_schedule",
         "restrict_image_size",
     ]
-    assert policy.protocol_version == 2 and policy.max_in_flight == 8
+    assert policy.protocol_version == 2 and policy.max_in_flight == 16
     assert meta["schedule"] == "rtc"
-    assert meta["periodic"] == {"sample_fps": 30.0, "max_in_flight": 8}
+    assert meta["periodic"] == {"sample_fps": 15.0, "max_in_flight": 16}
     assert meta["rtc"] == {
         "stride": 12,
         "max_delay_sec": 12 / FPS,
@@ -667,7 +682,7 @@ def test_a_real_time_session_predicts_on_the_real_time_grid() -> None:
     """The first prediction at once. The next one 12 rows (24 samples) plus the
     first duration (0.30 s, 9 samples) later. Then every 24 samples. Every
     other sample answers None, and each answer has no timestamps."""
-    policy = _factory()({"schedule": "rtc", "sample_seed": 0})
+    policy = _factory()({"schedule": "rtc", "sample_seed": 0, "sample_fps": 30})
     answers, at, nones = _drive(policy, DELAYS, 9.0)
     assert len(answers) == len(DELAYS)
     gaps = np.diff(at).tolist()
@@ -684,7 +699,7 @@ def test_the_window_of_each_prediction_is_the_chunked_stack_of_that_call() -> No
     chunked recipe would send on the same call, ending right before the
     current frame: 21 raws, one every 1/15 s."""
     factory = _factory()
-    policy = factory({"schedule": "rtc", "sample_seed": 0})
+    policy = factory({"schedule": "rtc", "sample_seed": 0, "sample_fps": 30})
     _answers, at, _ = _drive(policy, DELAYS[:6], 6.0)
     vae = factory.pipe.vae
     assert isinstance(vae, _Encoder)
@@ -698,7 +713,14 @@ def test_the_window_of_each_prediction_is_the_chunked_stack_of_that_call() -> No
 def test_the_junction_keeps_the_plan_until_the_answer_arrives() -> None:
     """After the first prediction the answer repeats the rows of the plan that
     run before it arrives (the delay estimate), then the model takes over."""
-    policy = _factory()({"schedule": "rtc", "sample_seed": 0, "rtc_reach_max_m": "off"})
+    policy = _factory()(
+        {
+            "schedule": "rtc",
+            "sample_seed": 0,
+            "rtc_reach_max_m": "off",
+            "sample_fps": 30,
+        }
+    )
     answers, at, _ = _drive(policy, DELAYS[:4], 5.0)
     chans = rtc.channels(bimanual.SIDES)
     first, second = (rtc.rows_to_array(a, chans) for a in answers[:2])
@@ -715,7 +737,7 @@ def test_a_sample_after_a_later_one_answers_none_and_keeps_its_timings() -> None
     """The workers of the client race to send: sample 1 can arrive before
     sample 0. The late sample answers None, and its call timings still anchor
     the grid."""
-    policy = _factory()({"schedule": "rtc", "sample_seed": 0})
+    policy = _factory()({"schedule": "rtc", "sample_seed": 0, "sample_fps": 30})
     first = _current(_obs([0.5]))
     first.update(
         {
@@ -763,8 +785,8 @@ def test_a_sample_after_a_later_one_answers_none_and_keeps_its_timings() -> None
 
 def test_a_session_with_late_samples_serves_the_same_rows() -> None:
     """Samples that arrive out of order and answer None change no answer."""
-    a = _factory()({"schedule": "rtc", "sample_seed": 0})
-    b = _factory()({"schedule": "rtc", "sample_seed": 0})
+    a = _factory()({"schedule": "rtc", "sample_seed": 0, "sample_fps": 30})
+    b = _factory()({"schedule": "rtc", "sample_seed": 0, "sample_fps": 30})
     ref, at_a, _ = _drive(a, DELAYS[:5], 6.0)
     late = {n: n + 1 for n in (3, 40, 61, 90) if n not in at_a and n + 1 not in at_a}
     got, at_b, _ = _drive(b, DELAYS[:5], 6.0, late=late)
@@ -778,7 +800,7 @@ def test_a_session_with_late_samples_serves_the_same_rows() -> None:
 
 
 def test_a_replan_predicts_on_its_sample() -> None:
-    policy = _factory()({"schedule": "rtc", "sample_seed": 0})
+    policy = _factory()({"schedule": "rtc", "sample_seed": 0, "sample_fps": 30})
     _drive(policy, DELAYS[:3], 2.5)
     grid = policy._grid
     assert grid is not None and grid.next_index is not None
@@ -829,7 +851,7 @@ def test_the_real_time_helpers_refuse_a_chunked_session() -> None:
 
 
 def test_close_drops_the_history_and_the_grid() -> None:
-    policy = _factory()({"schedule": "rtc", "sample_seed": 0})
+    policy = _factory()({"schedule": "rtc", "sample_seed": 0, "sample_fps": 30})
     _drive(policy, DELAYS[:3], 2.5)
     assert policy._history is not None and len(policy._history) > 0
     policy.close()
@@ -890,11 +912,13 @@ def test_protocol_v2_session_over_a_websocket() -> None:
 
     addr, srv, thread, executor = _v2_server()
     try:
-        with connect(f"ws://{addr}/api/v1/session?schedule=rtc&sample_seed=0") as ws:
+        with connect(
+            f"ws://{addr}/api/v1/session?schedule=rtc&sample_seed=0&sample_fps=30"
+        ) as ws:
             assert _recv_v2(ws)["status"] == "loading"
             ready = _recv_v2(ws)
             assert ready["status"] == "ready" and ready["protocol_version"] == 2
-            assert ready["max_in_flight"] == 8 and len(ready["session_id"]) == 32
+            assert ready["max_in_flight"] == 16 and len(ready["session_id"]) == 32
             sid = ready["session_id"]
             first = None
             for n in range(3):
@@ -975,3 +999,172 @@ def test_protocol_v2_session_over_a_websocket() -> None:
         srv.should_exit = True
         thread.join(timeout=10)
         executor.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# The single-arm rig (DROID)
+# ---------------------------------------------------------------------------
+
+DROID = json.loads((ROOT / "tests" / "data" / "praxis-1-droid.json").read_text())
+FR3_HOME = np.array([0.0, -0.4, 0.0, -2.2, 0.0, 1.9, 0.8])
+
+
+def _droid_factory(**session: object) -> PolicyFactory:
+    return PolicyFactory(
+        _Pipeline(DROID),  # ty: ignore[invalid-argument-type]
+        {
+            "exec_horizon": 24,
+            "control_mode": "droid_impedance",
+            "max_context_chunks": 1,
+            "schedule": "chunked",
+            **session,
+        },
+        "/ckpt/praxis-1-droid",
+    )
+
+
+def _fr3_pose(q: np.ndarray) -> np.ndarray:
+    """The FR3 rig's reported pose (its hand point) at the joints ``q``: xyz + quat wxyz."""
+    from praxis import single_arm as sa
+
+    m = sa.franka_flange_pose(q)
+    xyz, rot = sa.pose_to_rig(m[:3, 3], m[:3, :3], sa.FR3_HAND)
+    xyzw = sa.matrix_to_quat_xyzw(rot)
+    return np.r_[xyz, xyzw[3], xyzw[:3]].astype(np.float32)
+
+
+def _droid_frame(raw: float) -> np.ndarray:
+    """A 416x234 view (the antialiased canvas) whose blue channel holds the raw index."""
+    return _frame(raw, 234, 416)
+
+
+def _droid_sample(raw: float) -> dict:
+    """The FR3 rig's current observation at the action raw ``raw``: the joints move slowly."""
+    q = FR3_HOME + 0.05 * np.sin(raw / 15.0 + np.arange(7))
+    return {
+        "image.exterior": _droid_frame(raw),
+        "image.wrist": _droid_frame(raw),
+        "robot_state.ee_pose": _fr3_pose(q),
+        "robot_state.q": q.astype(np.float32),
+        "grip": np.float32(0.2),
+        "descriptor": "",
+    }
+
+
+def _droid_stack(raws: list[float]) -> dict:
+    """The chunked recipe's frame stack of the FR3 rig at the raws ``raws``."""
+    rows = [_droid_sample(r) for r in raws]
+    out: dict[str, object] = {
+        k: np.stack([r[k] for r in rows])
+        for k in ("image.exterior", "image.wrist", "robot_state.ee_pose")
+    }
+    out["grip"] = np.stack([r["grip"] for r in rows])[:, None]
+    out["robot_state.q"] = rows[-1]["robot_state.q"]
+    out["descriptor"] = ""
+    return out
+
+
+def test_a_single_arm_session_declares_the_periodic_recipe() -> None:
+    policy = _droid_factory()({"schedule": "rtc"})
+    names = [e["name"] for e in policy.local_stack["seq"]]
+    assert names == [
+        "stop_on_fault",
+        "restrict_image_size",
+        "trajectory_player",
+        "periodic",
+        "inference_schedule",
+    ]
+    assert policy.protocol_version == 2 and policy.max_in_flight == 16
+    assert policy.rtc is not None and policy.rtc.reach_max_m == ()
+    with pytest.raises(ValueError, match="reach clamp of the bimanual"):
+        _droid_factory()({"schedule": "rtc", "rtc_reach_max_m": "0.6"})
+
+
+def test_a_single_arm_session_serves_the_rows_of_the_frame_stack() -> None:
+    """Every prediction of a periodic single-arm session encodes the stack rows of
+    that call, and every row keeps the control law and the client frame."""
+    factory = _droid_factory()
+    policy = factory({"schedule": "rtc", "sample_seed": 0, "sample_fps": 30})
+    answers, at, _ = _drive(policy, DELAYS[:6], 6.0, sample=_droid_sample)
+    assert len(answers) == 6
+    assert np.diff(at).tolist()[0] == 24 + 9 and set(np.diff(at).tolist()[1:]) == {24}
+    vae = factory.pipe.vae
+    assert isinstance(vae, _Encoder)
+    windows = [r for r in vae.raws if len(r) > 1]
+    assert windows == [list(range(n // 2 - 21, n // 2)) for n in at[2:]]
+    for rows in answers:
+        assert all(r["robot_command"]["mode"]["type"] == "impedance" for r in rows)
+        assert all("timestamp" not in r and "target_grip" in r for r in rows)
+    # The second answer keeps the rows of the plan that run before it arrives.
+    chans = rtc.channels(())
+    first, second = (rtc.rows_to_array(a, chans) for a in answers[:2])
+    running = int(np.floor((at[1] / SAMPLE_FPS - 0.30) * FPS + 1e-9))
+    p = rtc.prefix_rows(0.30, FPS, len(first) - running)
+    np.testing.assert_allclose(second[:p], first[running : running + p], atol=1e-6)
+
+
+def test_the_first_single_arm_prediction_equals_the_chunked_answer() -> None:
+    """The first prediction of a real-time session is the cold start of a chunked
+    session on the same observation, row for row (apart from the timestamps)."""
+    rt = _droid_factory()({"schedule": "rtc", "sample_seed": 3, "sample_fps": 30})
+    obs = _droid_sample(0.0)
+    obs.update(
+        {per.SAMPLE_INDEX: 0, per.OBS_TIME_NS: 0, per.CALL_ID: 0, per.CALL_TIMINGS: []}
+    )
+    got = rt.select_action(obs)
+    ch = _droid_factory()({"schedule": "chunked", "sample_seed": 3})
+    want = ch.select_action(_droid_stack([0.0]))
+    assert got is not None and want is not None and len(got) == len(want) == 21
+    chans = rtc.channels(())
+    np.testing.assert_array_equal(
+        rtc.rows_to_array(got, chans), rtc.rows_to_array(want, chans)
+    )
+    assert [r["robot_command"]["mode"] for r in got] == [
+        r["robot_command"]["mode"] for r in want
+    ]
+
+
+def test_the_single_arm_frame_check_runs_on_each_prediction() -> None:
+    policy = _droid_factory()({"schedule": "rtc", "sample_seed": 0, "sample_fps": 30})
+    obs = _droid_sample(0.0)
+    obs["robot_state.q"] = (FR3_HOME + 0.5).astype(np.float32)
+    obs.update(
+        {per.SAMPLE_INDEX: 0, per.OBS_TIME_NS: 0, per.CALL_ID: 0, per.CALL_TIMINGS: []}
+    )
+    with pytest.raises(ValueError, match="flange forward"):
+        policy.select_action(obs)
+
+
+def test_a_debug_session_falls_back_to_the_chunked_schedule() -> None:
+    """When a deploy's config sets schedule: rtc, a stateless session or a short
+    exec_horizon gets the chunked schedule; an explicit schedule=rtc with them is
+    refused."""
+    factory = _droid_factory(schedule="rtc")
+    assert factory({}).schedule == "rtc"
+    for o in (
+        {"context_mode": "stateless"},
+        {"max_context_chunks": 0},
+        {"exec_horizon": 12},
+    ):
+        assert factory(o).schedule == "chunked", o
+        with pytest.raises(ValueError):
+            factory({**o, "schedule": "rtc"})
+
+
+def test_the_default_samples_at_the_action_rate() -> None:
+    """The default session samples at 15 Hz: every sample is a row of the window.
+    The grid is 12 samples (the stride) after the first answer's delay, and each
+    window is the 21 samples before the prediction's own."""
+    factory = _droid_factory()
+    policy = factory({"schedule": "rtc", "sample_seed": 0})
+    assert policy.periodic is not None and policy.periodic.sample_fps == 15.0
+    answers, at, _ = _drive(
+        policy, DELAYS[:6], 6.0, sample=_droid_sample, sample_fps=15.0
+    )
+    assert len(answers) == 6
+    gaps = np.diff(at).tolist()
+    assert gaps[0] == 12 + round(0.30 * 15) and set(gaps[1:]) == {12}
+    vae = factory.pipe.vae
+    assert isinstance(vae, _Encoder)
+    windows = [r for r in vae.raws if len(r) > 1]
+    assert windows == [list(range(n - 21, n)) for n in at[2:]]

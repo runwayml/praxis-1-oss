@@ -914,8 +914,16 @@ class SingleArmServeSession:
         self._boundary_poses = []
         self.stream.reset()
 
-    def prepare(self, obs: dict) -> SingleArmChunkInputs:
-        """Update the context from ``obs`` and return the inputs of this chunk."""
+    def prepare(
+        self, obs: dict, executed_rows: int | None = None
+    ) -> SingleArmChunkInputs:
+        """Update the context from ``obs`` and return the inputs of this chunk.
+
+        ``executed_rows`` (real-time chunking) is the number of rows that the
+        robot ran since the previous call, off the chunk grid. The stream then
+        appends that many stack rows (:meth:`_append_rows`). None keeps the
+        chunk grid.
+        """
         if bool(obs.get("reset_context") or obs.get("__reset_context__")):
             self.restart()
         override = obs.get("task") or obs.get("prompt")
@@ -933,6 +941,8 @@ class SingleArmServeSession:
         )
         if self.stateless:
             self.restart()
+        elif executed_rows is not None:
+            self._append_rows(obs, frame, int(executed_rows))
         elif self._boundary_latents:
             need = self.stream.expected_next_rows
             got = executed_clip(
@@ -975,6 +985,44 @@ class SingleArmServeSession:
             chunk_index=self.chunk_index,
             prompt=text_encoder_prompt(self.prompt),
         )
+
+    def _append_rows(self, obs: dict, frame: RigFrame, rows: int) -> None:
+        """Append the rows that the robot ran since the previous call (real-time chunking).
+
+        An empty stream (the start of a session, a restart) takes the whole
+        history of the stack, so the context fills without waiting for the
+        chunk grid. A stride past the history of the stack restarts the
+        context, then refills it the same way. A missing wrist stack or a
+        stream without its pose rows restarts: off the chunk grid, the poses
+        of the calls are not chunk boundaries.
+        """
+        try:
+            ext = np.asarray(_pick(obs, VIEW_KEY_CANDIDATES["exterior"]))
+            wrist = np.asarray(_pick(obs, VIEW_KEY_CANDIDATES["wrist"]))
+        except KeyError:
+            self.restart()
+            return
+        if ext.ndim != 4 or wrist.ndim != 4:
+            self.restart()
+            return
+        hist = min(ext.shape[0], wrist.shape[0]) - 1
+        if self.stream.n_raws and rows > hist:
+            self.restart()
+        n = min(hist, self.stream.max_raws) if self.stream.n_raws == 0 else rows
+        if n < 1:
+            return
+        got = executed_clip(
+            obs, n, self.device, self.tile_size, self.aspect_tol, self.antialias
+        )
+        if got is None:
+            self.restart()
+            return
+        clip, poses = got
+        if poses is not None:
+            poses = pose8_to_model(poses, frame)
+        self.stream.append_executed(clip, poses, strict=False)
+        if self.stream.depth and self.stream.boundary_poses() is None:
+            self.restart()
 
     def decode_actions(
         self, inputs: SingleArmChunkInputs, pred_action: torch.Tensor

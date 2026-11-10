@@ -168,17 +168,12 @@ class Session:
     def step(self, obs: dict, executed_rows: int | None = None) -> StepResult:
         """Run one policy call on ``obs`` and return the commands of the chunk.
 
-        ``executed_rows`` (real-time chunking, the bimanual rig) is the number
-        of rows that the robot ran since the previous call, off the chunk grid
-        (:meth:`praxis.bimanual.BimanualServeSession.prepare`).
+        ``executed_rows`` (real-time chunking) is the number of rows that the
+        robot ran since the previous call, off the chunk grid (the
+        ``prepare`` of the rig session).
         """
         state = self.state
-        if executed_rows is None:
-            inputs = state.prepare(obs)
-        elif isinstance(state, bimanual.BimanualServeSession):
-            inputs = state.prepare(obs, executed_rows)
-        else:
-            raise ValueError("real-time chunking serves the bimanual rig")
+        inputs = state.prepare(obs, executed_rows)
         video, actions, text = self._sample(inputs)
         commands = state.finish(inputs, actions)
         rows, rel = state.decode_actions(inputs, actions)

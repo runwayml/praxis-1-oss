@@ -253,12 +253,14 @@ class InferenceServer:
                     }
                 await websocket.send_bytes(serialise(response))
                 if rows is not None:
+                    junction = {k: v for k, v in timing.items() if k.startswith("rtc_")}
                     logger.info(
-                        "rollout %s call %d: %d rows, policy %.1f ms",
+                        "rollout %s call %d: %d rows, policy %.1f ms%s",
                         rollout_id,
                         n_calls,
                         len(rows),
                         timing["policy_ms"],
+                        f", {junction}" if junction else "",
                     )
             except ChunkBudgetExhausted as exc:
                 logger.info("rollout %s: %s", rollout_id, exc)

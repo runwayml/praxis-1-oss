@@ -29,8 +29,12 @@ this prefix (:func:`rebase_into_prefix`):
 * the grippers fade from the continuation of the plan to the model's grips
   over ``grip_rows`` rows (``grip="cont"``), or follow the model
   (``grip="model"``);
-* the YAM reach clamp moves targets past a reach radius back onto it
-  (:func:`praxis.bimanual.clamp_reach`).
+* on the bimanual rig, the YAM reach clamp moves targets past a reach
+  radius back onto it (:func:`praxis.bimanual.clamp_reach`).
+
+On the single-arm rig the rows are in the frame of the client, the frame the
+robot runs, and every row keeps the control law of the session
+(``droid_impedance``), the kept prefix rows included.
 
 The rule never changes the sampler. The plan is anchored on the measured
 pose at the observation, and the rebase puts no measured-pose term into the
@@ -76,12 +80,12 @@ class RTCConfig:
     call. The delay estimate is capped at the rows that a chunk has left after
     the stride (:meth:`max_delay_sec`).
 
-    ``reach_max_m`` holds one reach radius per arm (left, right), or is empty
-    for no clamp.
+    ``reach_max_m`` holds one reach radius per arm (left, right) of the
+    bimanual rig, or is empty for no clamp.
 
-    The defaults are the junction rule of our bimanual robot runs with
-    real-time chunking: stride 12, rebase decay 24, velocity fade 6, grip
-    continuation over 16 rows and the reach clamp.
+    The defaults are the junction rule of our robot runs with real-time
+    chunking: stride 12, rebase decay 24, velocity fade 6, grip continuation
+    over 16 rows, and the reach clamp on the bimanual rig.
     """
 
     stride: int = 12
@@ -133,7 +137,13 @@ class RTCConfig:
 
 
 def channels(sides: cabc.Sequence[str]) -> tuple[tuple[str, str], ...]:
-    """Return the ``(robot_command key, target_grip key)`` of each arm."""
+    """Return the ``(robot_command key, target_grip key)`` of each arm.
+
+    No sides (the single-arm rig) gives the one arm ``robot_command`` and
+    ``target_grip``.
+    """
+    if not sides:
+        return (("robot_command", "target_grip"),)
     return tuple((f"robot_command.{s}", f"target_grip.{s}") for s in sides)
 
 

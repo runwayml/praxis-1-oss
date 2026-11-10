@@ -10,14 +10,14 @@ predict. It answers None on the other samples. Calls overlap, up to the
 ``max_in_flight`` that the ready message of the server declares
 (https://github.com/Positronic-Robotics/positronic/pull/1153).
 
-The session samples at ``ratio`` times the action rate (30 Hz for 15 Hz
-actions). The history and the prediction grid work on the sample index, not on
-the clock:
+The session samples at ``ratio`` times the action rate (15 Hz by default, the
+action rate: ``ratio`` 1). The history and the prediction grid work on the
+sample index, not on the clock:
 
 * :class:`SampleHistory` rebuilds, for a prediction at sample ``n``, the frame
   stack that the chunked recipe declares: row ``b`` rows back is the latest
-  sample at or before index ``n - ratio * b``. On a grid without skips this is
-  every ``ratio``-th sample, the frame grid of training. A late tick that
+  sample at or before index ``n - ratio * b``. On a grid without skips these
+  are the samples of the 15 Hz frame grid of training. A late tick that
   skipped grid positions falls back to the sample before. A pick by time would
   move a pick to the next frame whenever the sampler jitters by a few ms.
 * :class:`PredictGrid` predicts on the first sample, then ``ratio * stride``
@@ -50,14 +50,17 @@ CALL_ID = "call_id"
 CALL_TIMINGS = "call_timings"
 ELAPSED_SEC = "elapsed_sec"
 
-# Twice the action rate: each frame of a 30 fps camera is a sample, and the
-# window takes every second one, as training does.
-DEFAULT_SAMPLE_FPS = 30.0
+# The action rate: each sample is a row of the window, the 15 Hz frame grid of
+# training. A prediction takes about 0.63 to 0.69 s on an H100 with real
+# weights, and the samples queue behind it on the one inference thread. At
+# 30 Hz with 8 calls in flight the client skipped about half the samples
+# during each prediction, and about half the rows of each window fell back to
+# an older sample. At 15 Hz with 16 in flight it skipped none.
+DEFAULT_SAMPLE_FPS = 15.0
 # The history keeps ``ratio`` samples per window row, each with its views.
 MAX_SAMPLE_FPS = 60.0
-# The calls in flight. A prediction round trip of about 200 ms is 6 samples at
-# 30 Hz, and 6 calls in flight skipped about one sample per prediction.
-DEFAULT_MAX_IN_FLIGHT = 8
+# The calls in flight: 16 samples at 15 Hz cover a prediction of about 1 s.
+DEFAULT_MAX_IN_FLIGHT = 16
 MAX_IN_FLIGHT_RANGE = (1, 16)
 # How long past the end of the first chunk the grid waits for the duration of
 # the first prediction before it predicts anyway.

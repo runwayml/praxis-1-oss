@@ -15,8 +15,8 @@ and adds the session rules of the server:
 * The sampler settings of the session (``num_steps``, ``cfg_scale`` and the
   other sampler parameters).
 * ``schedule``: ``chunked`` plays each chunk to its end, then asks for the
-  next. ``rtc`` (real-time chunking, the bimanual rig) asks while the robot
-  still runs the current chunk, over the periodic flow
+  next. ``rtc`` (real-time chunking) asks while the robot still runs the
+  current chunk, over the periodic flow
   (:mod:`praxis.serve.periodic`): the client sends every sample, the server
   keeps the history, predicts every ``rtc_stride`` rows and joins each chunk
   to the plan that the robot runs meanwhile (:mod:`praxis.serve.rtc`).
@@ -280,6 +280,16 @@ class ServedPolicy:
         self.schedule = str(o.get("schedule", d["schedule"]))
         if self.schedule not in SCHEDULES:
             raise ValueError(f"schedule {self.schedule!r} not in {SCHEDULES}")
+        if (
+            "schedule" not in o
+            and self.schedule == "rtc"
+            and _chunked_only(o, d, context_mode)
+        ):
+            # A deploy's config sets schedule: rtc, and the session asks for
+            # settings that only the chunked schedule serves (a debug session):
+            # it gets the chunked schedule. An explicit schedule=rtc is refused
+            # instead.
+            self.schedule = "chunked"
         self.rtc: rtc.RTCConfig | None = None
         self.periodic: periodic.PeriodicConfig | None = None
         rtc_keys = sorted(k for k in o if k in RTC_PARAMS)
@@ -362,8 +372,9 @@ class ServedPolicy:
         self._grid: periodic.PredictGrid | None = None
         self._timings = periodic.CallTimings()
         self._delay = rtc.DelayEstimate()
-        # The sample of the last prediction.
+        # The sample of the last prediction, and the junction of this call.
         self._last_index: int | None = None
+        self._junction: dict[str, float] = {}
         self._pending_reset = False
         if self.periodic is not None:
             ratio = self.periodic.ratio(factory.fps)
@@ -386,7 +397,18 @@ class ServedPolicy:
 
     @property
     def timing(self) -> dict[str, object]:
-        """Return the sampler values of the ``server_timing`` block."""
+        """Return the sampler values of the ``server_timing`` block.
+
+        A prediction of a real-time session adds its junction: the plan rows
+        that the answer keeps (``rtc_prefix_rows``), the delay estimate that
+        the junction used (``rtc_delay_ms``) and the jump that a plain switch
+        to the model would make at the end of the prefix (``rtc_junction_cm``,
+        the largest over the arms). ``rtc_delay_ms`` is not the round trip of
+        this call: it is the longest of the last 5 prediction durations that
+        the client reported, capped at the rows that a chunk has left after
+        the stride (``RTCConfig.max_delay_sec``). Past the cap it is shorter
+        than the real round trip.
+        """
         return {
             "cfg_scale": self.cfg_scale,
             "cfg_video_scale": self.cfg_video_scale,
@@ -394,6 +416,7 @@ class ServedPolicy:
             "t_shift": self.t_shift,
             "solver": self.solver,
             "num_evals": self.num_evals,
+            **self._junction,
         }
 
     @property
@@ -553,6 +576,7 @@ class ServedPolicy:
         hist, grid, cfg = self._history, self._grid, self.rtc
         if hist is None or grid is None or cfg is None:
             raise RuntimeError("_sample serves a real-time session only")
+        self._junction = {}
         index = obs.get(periodic.SAMPLE_INDEX)
         if isinstance(index, bool) or not isinstance(index, int | np.integer):
             raise ValueError(
@@ -619,22 +643,29 @@ class ServedPolicy:
         cfg = self.rtc
         if cfg is None:
             raise RuntimeError("_join serves a real-time session only")
-        chans = rtc.channels(bimanual.SIDES)
-        fps = self.factory.fps
+        f = self.factory
+        chans = rtc.channels(bimanual.SIDES if f.embodiment == "bimanual" else ())
+        fps = f.fps
         new = rtc.rows_to_array(rows, chans)
         plan = rtc.read_plan(obs, chans, fps)
         if plan is None:
             plan = new[:0]
         p = min(rtc.prefix_rows(delay_sec, fps, len(plan)), len(new))
-        out, _stats = rtc.rebase_into_prefix(
+        out, stats = rtc.rebase_into_prefix(
             new, plan[:p], cfg.rebase_decay, cfg.vel_fade
         )
+        self._junction = {
+            "rtc_prefix_rows": p,
+            "rtc_delay_ms": round(delay_sec * 1e3, 1),
+            "rtc_junction_cm": round(stats["junction_cm"], 2),
+        }
         if cfg.grip == "cont" and p:
             cont = plan[p:] if p < len(plan) else plan[-1:]
             rtc.grip_crossfade(out, p, cont, cfg.grip_rows)
         if cfg.reach_max_m:
             # The prefix rows were clamped when they were served.
             bimanual.clamp_reach(out, p, cfg.reach_max_m)
+        # The command of each row keeps its control law, the prefix rows too.
         return rtc.strip_timestamps(rtc.write_rows(rows, out, chans))
 
     def close(self) -> None:
@@ -649,18 +680,32 @@ class ServedPolicy:
         self._pending_reset = False
 
 
+def _chunked_only(o: dict, d: dict, context_mode: str) -> bool:
+    """Return whether the session settings need the chunked schedule.
+
+    A stateless context (``context_mode=stateless`` or
+    ``max_context_chunks=0``) and an ``exec_horizon`` below the chunk need it.
+    """
+    eh = o.get("exec_horizon", d["exec_horizon"])
+    return context_mode != "observed" or (
+        eh is not None and int(eh) < robot_io.ACTION_CHUNK
+    )
+
+
 def _rtc_session(
     factory: PolicyFactory, o: dict, context_mode: str
 ) -> tuple[rtc.RTCConfig, periodic.PeriodicConfig]:
     """Return the junction and the periodic settings of a real-time session.
 
-    Real-time chunking serves the observed context of the bimanual rig. A
-    bad value raises ``ValueError``.
+    Real-time chunking serves the observed context of both rigs. The reach
+    clamp is the YAM model: the single-arm rig has none, and refuses
+    ``rtc_reach_max_m``. A bad value raises ``ValueError``.
     """
-    if factory.embodiment != "bimanual":
+    bimanual_rig = factory.embodiment == "bimanual"
+    if not bimanual_rig and o.get("rtc_reach_max_m") is not None:
         raise ValueError(
-            "schedule=rtc serves the bimanual rig; the single-arm checkpoint is "
-            "served with schedule=chunked"
+            "rtc_reach_max_m is the reach clamp of the bimanual YAM rig; the "
+            "single-arm rig has none"
         )
     if context_mode != "observed":
         raise ValueError(
@@ -681,7 +726,9 @@ def _rtc_session(
         vel_fade=int(o.get("rtc_vel_fade", base.vel_fade)),
         grip=grip,
         grip_rows=int(o.get("rtc_grip_rows", base.grip_rows)),
-        reach_max_m=params.parse_reach(o.get("rtc_reach_max_m"), bimanual.REACH_MAX_M),
+        reach_max_m=params.parse_reach(o.get("rtc_reach_max_m"), bimanual.REACH_MAX_M)
+        if bimanual_rig
+        else (),
     )
     flow = periodic.PeriodicConfig(
         sample_fps=float(o.get("sample_fps", periodic.DEFAULT_SAMPLE_FPS)),

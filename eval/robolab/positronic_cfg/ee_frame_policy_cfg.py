@@ -65,12 +65,32 @@ def _command_to_wire(command: Any, offset_inv: np.ndarray) -> Any:
     return command
 
 
+def with_chunked_schedule(query: str) -> str:
+    """``query`` with ``schedule=chunked`` added when it is not empty and sets no
+    ``schedule``.
+
+    RoboLab pauses the sim during each policy call, and the client's schedule runs on a
+    virtual clock that stands still during a call, so real-time chunking gains nothing
+    here. A deploy can set real-time chunking as its default; this client keeps the
+    chunked schedule unless the URL asks for another one. An empty query (a server that
+    accepts no session settings) goes as written.
+    """
+    if not query:
+        return query
+    pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+    if any(k == "schedule" for k, _ in pairs):
+        return query
+    return f"{query}&schedule=chunked"
+
+
 def wire_address(url: str) -> tuple[str, HostPortAddress]:
     """The positronic wire and session address for a policy URL.
 
     Accepted forms: ``host``, ``host:port`` and ``scheme://host[:port][/api/v1/session[/<model_id>]]``,
     each with an optional ``?query``. ``https``/``wss`` use TLS, the port defaults to 443 for
-    TLS and 80 otherwise, and the query reaches the server as written.
+    TLS and 80 otherwise, and the query reaches the server as written, with
+    ``schedule=chunked`` added when it is not empty and sets no schedule
+    (``with_chunked_schedule``).
     """
     split = urllib.parse.urlsplit(url if "://" in url else f"//{url}")
     if split.scheme not in ("", "http", "ws", "https", "wss"):
@@ -87,7 +107,9 @@ def wire_address(url: str) -> tuple[str, HostPortAddress]:
         )
     port = split.port if split.port is not None else (443 if secure else 80)
     name = "websocket_tls" if secure else "websocket"
-    return name, HostPortAddress(split.hostname, port, path, split.query)
+    return name, HostPortAddress(
+        split.hostname, port, path, with_chunked_schedule(split.query)
+    )
 
 
 class _CallLoggingSession:
