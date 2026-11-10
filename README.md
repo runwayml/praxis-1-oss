@@ -1,4 +1,4 @@
-praxis-1
+# praxis-1
 
 Praxis is a video-action policy for robot arms. There are two checkpoints of
 one model variant: `praxis-1-droid`, the single-arm checkpoint, for a
