@@ -22,7 +22,10 @@ sample index, not on the clock:
   move a pick to the next frame whenever the sampler jitters by a few ms.
 * :class:`PredictGrid` predicts on the first sample, then ``ratio * stride``
   samples after the previous prediction, or on the first sample past that
-  index when it was skipped. A replan predicts on its sample.
+  index when it was skipped. A replan predicts on its sample. Above 15 Hz
+  such a prediction can land off the row grid of the context. The session
+  then restarts the context, so a window never mixes two sample phases
+  (:meth:`praxis.serve.policy.ServedPolicy._sample`).
 * :class:`CallTimings` keeps the durations of the prediction calls for the
   delay estimate. The client reports every call, and the None answers take a
   few ms, so an estimate over all of them runs short.

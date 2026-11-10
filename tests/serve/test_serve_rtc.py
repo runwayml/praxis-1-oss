@@ -15,6 +15,7 @@ import json
 import math
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -1185,3 +1186,114 @@ def test_the_default_samples_at_the_action_rate() -> None:
     assert isinstance(vae, _Encoder)
     windows = [r for r in vae.raws if len(r) > 1]
     assert windows == [list(range(n - 21, n)) for n in at[2:]]
+
+
+def _skipping(
+    policy: ServedPolicy, skipped: set[int], replans: set[int] | None = None
+) -> ServedPolicy:
+    """``policy`` with the samples ``skipped`` never sent (a late client tick)
+    and a ``replan_now`` on the samples ``replans``."""
+
+    class _Skip:
+        def select_action(self, obs: dict) -> list[dict] | None:
+            n = obs[per.SAMPLE_INDEX]
+            if n in skipped:
+                return None
+            if replans and n in replans:
+                obs[per.REPLAN_NOW] = True
+            return policy.select_action(obs)
+
+    return cast(ServedPolicy, _Skip())
+
+
+def _by_sample(raw: float) -> dict:
+    """The bimanual sample at 30 Hz whose frames hold the sample index (2 per raw)."""
+    return _current(_obs([round(2 * raw)]))
+
+
+@pytest.mark.parametrize("event", ["skip", "replan"])
+def test_a_prediction_off_the_row_grid_restarts_the_context(event: str) -> None:
+    """At 30 Hz a row is 2 samples. A prediction an odd number of samples
+    after the previous one (the client skipped the sample of a prediction, or
+    a replan) has its new rows on the other sample phase: appended to the
+    stream, they would make a window of two grids with one 3-sample gap. The
+    context restarts instead and refills from the frame stack, so every window
+    holds one sample every 2, ending right before the current frame. After a
+    replan the next prediction waits for the duration of the replan (9
+    samples, odd): that one restarts too."""
+    query = {"schedule": "rtc", "sample_seed": 0, "sample_fps": 30}
+    _, at, _ = _drive(_factory()(query), DELAYS[:7], 7.0, sample=_by_sample)
+    skipped = {at[3]} if event == "skip" else set()
+    replans = {at[3] + 11} if event == "replan" else set()
+    factory = _factory()
+    policy = factory({**query, "precompute": "off"})
+    restarts = policy.session.state.restart_count
+    _, at_b, _ = _drive(
+        _skipping(policy, skipped, replans), DELAYS[:7], 7.0, sample=_by_sample
+    )
+    assert at_b[:3] == at[:3]
+    gaps = np.diff(at_b).tolist()
+    if event == "skip":
+        assert at_b[3] == at[3] + 1 and gaps[2:] == [25, 24, 24, 24]
+    else:
+        assert at_b[4] == at[3] + 11 and gaps[2:] == [24, 11, 24 + 9, 24]
+    odd = sum(g % 2 for g in gaps[1:])
+    assert odd == (1 if event == "skip" else 2)
+    assert policy.session.state.restart_count == restarts + odd
+    vae = factory.pipe.vae
+    assert isinstance(vae, _Encoder)
+    windows = [r for r in vae.raws if len(r) > 1]
+    assert windows == [[n - 2 * b for b in range(21, 0, -1)] for n in at_b[2:]]
+
+
+def test_the_default_rate_keeps_the_context_over_a_skipped_prediction_sample() -> None:
+    """At 15 Hz every sample is a row: a skipped prediction sample moves the
+    prediction by one row, and the context keeps going. The row of the
+    skipped sample takes the sample before it, as the chunked stack does."""
+    factory = _droid_factory()
+    query = {"schedule": "rtc", "sample_seed": 0, "precompute": "off"}
+    _, at, _ = _drive(
+        factory(query), DELAYS[:6], 6.0, sample=_droid_sample, sample_fps=15.0
+    )
+    factory = _droid_factory()
+    policy = factory(query)
+    restarts = policy.session.state.restart_count
+    skip = at[3]
+    _, at_b, _ = _drive(
+        _skipping(policy, {skip}),
+        DELAYS[:6],
+        6.0,
+        sample=_droid_sample,
+        sample_fps=15.0,
+    )
+    assert at_b[3] == skip + 1
+    assert policy.session.state.restart_count == restarts
+    vae = factory.pipe.vae
+    assert isinstance(vae, _Encoder)
+    windows = [r for r in vae.raws if len(r) > 1]
+    held = [[r - (r == skip) for r in range(n - 21, n)] for n in at_b[2:]]
+    assert windows == held
+
+
+def test_the_prefix_stops_at_the_rows_left_in_a_21_row_chunk() -> None:
+    """The delay cap is the rows that a 24-row chunk has left after the stride
+    (12 at stride 12). A 21-row chunk has 9 rows left: the plan that the client
+    sends holds only those, so the kept prefix stops there. With a 0.7 s round
+    trip (11 rows) the plan of a 21-row chunk runs out, that of a 24-row chunk
+    does not."""
+    policy = _factory()({"schedule": "rtc", "sample_seed": 0, "precompute": "off"})
+    junctions: list[dict] = []
+
+    class _Rec:
+        def select_action(self, obs: dict) -> list[dict] | None:
+            rows = policy.select_action(obs)
+            if rows is not None:
+                junctions.append(dict(policy.timing))
+            return rows
+
+    answers, _, _ = _drive(
+        cast(ServedPolicy, _Rec()), [0.3, 0.7, 0.7, 0.7], 4.0, sample_fps=15.0
+    )
+    assert [len(r) for r in answers] == [21, 21, 24, 24]
+    assert [j["rtc_delay_ms"] for j in junctions[2:]] == [700.0, 700.0]
+    assert [j["rtc_prefix_rows"] for j in junctions[2:]] == [21 - 12, 11]

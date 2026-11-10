@@ -248,11 +248,18 @@ with `schedule: rtc` in the `session` block of its config.
 **When to use it.** Real-time chunking removes the stop between chunks and
 shortens the episodes, but it needs a short round trip. Measure the round
 trip and convert it to rows at 15 Hz. If it is longer than `rtc_stride`, use
-`schedule=chunked` or raise `rtc_stride`, and keep `rtc_stride` plus the round
-trip within one chunk (24 rows). At the default stride of 12 (0.8 s) the round
-trip must stay under 0.8 s. Past that the plan runs out before each answer
-arrives and the junctions lose their alignment. When no stride satisfies both
-limits (for example a 1.0 s round trip), use `schedule=chunked`. In our robot
+`schedule=chunked` or raise `rtc_stride`. Also keep `rtc_stride` plus the
+round trip within the chunk that the robot runs. That chunk has 21 rows
+while its window holds no context chunk yet: the first one or two answers of
+a session, and of the context after a `reset_context`. Every later chunk has
+24 rows. At the default stride of 12 the round trip must stay under
+(21 - 12) / 15 = 0.6 s during a 21-row chunk, and under (24 - 12) / 15 =
+0.8 s during a 24-row chunk. Past that the plan runs out before the answer
+arrives and that junction loses its alignment. So a round trip from 0.6 s
+to 0.8 s misaligns the first junctions of a session and after each
+`reset_context`, and a round trip under 0.6 s keeps every junction aligned.
+When no stride satisfies both limits (for example a 1.0 s round trip), use
+`schedule=chunked`. In our robot
 runs it also replanned during marginal grasps, where the chunked schedule
 commits to a grasp and lifts: on a five-object task it was faster (9.1 s
 against 15.2 s median time to success) with a lower, not significant, success
@@ -310,7 +317,7 @@ The session parameters of real-time chunking:
 | `rtc_grip` | `cont` | `cont` fades the grippers from the plan, `model` takes the model's grips. |
 | `rtc_grip_rows` | 16 | Rows of the gripper fade. |
 | `rtc_reach_max_m` | `auto` | Bimanual rig: reach radius in m, `auto` (0.595 on both arms), `off`, one radius, or `left,right`. |
-| `sample_fps` | 15 | Samples per second, a whole multiple of the 15 Hz action rate. |
+| `sample_fps` | 15 | Samples per second, a whole multiple of the 15 Hz action rate. Above 15 Hz, a prediction off the row grid of the previous one (the client skipped its sample, or a replan) restarts the context, which refills from the frame stack (one context chunk). |
 | `max_in_flight` | 16 | Calls that the client may have in flight (1 to 16). |
 | `precompute` | `on` | Runs the window encode and the trunk passes of each prediction on the samples before it (see below). `off` turns it off. Real-time sessions only. |
 

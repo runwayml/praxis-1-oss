@@ -19,7 +19,7 @@ import praxis.model as model_mod
 from praxis.action_expert import ActionExpert
 from praxis.backbone import VideoBackbone
 from praxis.model import PraxisPolicy, SamplerSettings
-from praxis.pipeline import PraxisPipeline, Session
+from praxis.pipeline import EncodeMemo, PraxisPipeline, Session
 from praxis.sampler import (
     ACTION_SALT,
     VIDEO_SALT,
@@ -27,7 +27,7 @@ from praxis.sampler import (
     seeded_normal,
     window_time_grid,
 )
-from praxis.single_arm import SingleArmChunkInputs
+from praxis.single_arm import SingleArmChunkInputs, SingleArmServeSession
 
 
 def _sha(t: Tensor) -> str:
@@ -556,6 +556,39 @@ def test_skip_last_video_follows_the_policy_flag_and_a_trace_runs_all_passes(
     assert traced is not None
 
 
+@pytest.mark.parametrize("flag", ["argument", "policy"])
+def test_return_window_keeps_the_video_under_the_skip(
+    monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    """A call that returns the whole window (the offline evaluation) reads the
+    video, so it keeps the last step's decoder under ``skip_last_video``,
+    from the argument or from the policy flag: the same video and actions as
+    the call without the skip."""
+    settings = SamplerSettings(num_steps=2, cfg_scale=1.0, cfg_video_scale=4.0)
+    inp = _inputs(2)
+    out, calls_of = {}, {}
+    for skip in (False, True):
+        calls = Calls()
+        monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(calls))
+        policy = _policy(calls)
+        kw: dict = {}
+        if flag == "policy":
+            policy.skip_last_video = skip
+        else:
+            kw["skip_last_video"] = skip
+        out[skip] = policy.sample_window_joint(
+            seed=6, settings=settings, return_window=True, **kw, **inp
+        )
+        calls_of[skip] = calls
+    video, actions = out[True]
+    assert video is not None and out[False][0] is not None
+    assert video.shape == (1, C, 3 * LAT, H, W)
+    assert torch.equal(video, out[False][0]) and torch.equal(actions, out[False][1])
+    assert [c["decode"] for c in calls_of[True].trunk] == [
+        c["decode"] for c in calls_of[False].trunk
+    ]
+
+
 def test_window_joint_refusals(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = Calls()
     monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(calls))
@@ -815,6 +848,53 @@ def test_a_plan_without_the_last_video_keeps_the_actions(
     assert video is None and torch.equal(got, want)
     last = [c for c in split.trunk[-2:] if c["t"][0, 0] == split.trunk[-1]["t"][0, 0]]
     assert all(c["decode"] is False for c in last)
+
+
+@pytest.mark.parametrize("skip", [False, True])
+def test_a_plan_takes_the_skip_of_the_session(
+    monkeypatch: pytest.MonkeyPatch, skip: bool
+) -> None:
+    """``Session.plan`` without ``skip_last_video`` plans with the session's
+    value, the skip of the call that the plan stands in for. An explicit value
+    still wins. ``plan_window_joint`` without it takes the policy flag, as
+    ``sample_window_joint`` does."""
+    settings = SamplerSettings(num_steps=2, cfg_video_scale=4.0)
+    calls = Calls()
+    monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(calls))
+    policy = _policy(calls)
+    inp = _inputs(1)
+
+    @dataclass
+    class Pipe:
+        policy: PraxisPolicy
+
+        def encode_text(self, prompt: str) -> Tensor:
+            return inp["text"]
+
+        def encode_uncond_text(self) -> Tensor:
+            return inp["text_uncond"]
+
+    @dataclass
+    class State:
+        chunk_index: int = 0
+
+    session = object.__new__(Session)
+    session.pipe = cast(PraxisPipeline, Pipe(policy))
+    session.sampler = settings
+    session.seed = 1
+    session.skip_last_video = skip
+    session.memo = EncodeMemo(lambda clip: clip)
+    session.state = cast(SingleArmServeSession, State())
+    session.plan(inp["anchor"], inp["cleans"], "p")
+    plan = session._plan
+    assert plan is not None and (plan.video is None) is skip
+    session.plan(inp["anchor"], inp["cleans"], "p", skip_last_video=not skip)
+    plan = session._plan
+    assert plan is not None and (plan.video is None) is (not skip)
+    policy.skip_last_video = skip
+    trunk = {k: v for k, v in inp.items() if k != "proprio_all"}
+    plan = policy.plan_window_joint(seed=1, settings=settings, **trunk)
+    assert (plan.video is None) is skip
 
 
 @pytest.mark.parametrize(("cfg", "cfg_v"), [(1.0, 1.0), (3.0, 4.0)])

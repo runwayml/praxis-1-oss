@@ -420,12 +420,8 @@ class ServedPolicy:
             self._grid = periodic.PredictGrid(ratio, float(self.periodic.sample_fps))
         self._ahead: precompute.NextWindow | None = None
         if self.precompute and self._history is not None:
-            self._ahead = precompute.NextWindow(
-                self.session,
-                self._history,
-                ratio,
-                skip_last_video=self.skip_video_decoder is True,
-            )
+            # The plans take the session's skip_video_decoder.
+            self._ahead = precompute.NextWindow(self.session, self._history, ratio)
 
     @property
     def history_frames(self) -> int:
@@ -447,9 +443,10 @@ class ServedPolicy:
         to the model would make at the end of the prefix (``rtc_junction_cm``,
         the largest over the arms). ``rtc_delay_ms`` is not the round trip of
         this call: it is the longest of the last 5 prediction durations that
-        the client reported, capped at the rows that a chunk has left after
-        the stride (``RTCConfig.max_delay_sec``). Past the cap it is shorter
-        than the real round trip.
+        the client reported, capped at the rows that a 24-row chunk has left
+        after the stride (``RTCConfig.max_delay_sec``). Past the cap it is
+        shorter than the real round trip. During a 21-row chunk the prefix
+        stops at the end of the plan, ``21 - stride`` rows.
         """
         return {
             "cfg_scale": self.cfg_scale,
@@ -614,7 +611,8 @@ class ServedPolicy:
         other sample answers None. A sample older than the newest one answers
         None. Its ``reset_context`` drops the samples before it and restarts
         the context on the next prediction, and its ``replan_now`` makes the
-        next sample predict.
+        next sample predict. Above 15 Hz, a prediction whose gap to the
+        previous one is not a whole number of rows restarts the context.
         """
         hist, grid, cfg = self._history, self._grid, self.rtc
         if hist is None or grid is None or cfg is None:
@@ -671,15 +669,30 @@ class ServedPolicy:
             cfg.max_delay_sec(self.factory.fps),
         )
         # The whole rows since the previous prediction: the stack rows from its
-        # current frame on. An empty context fills from the stack instead. A
-        # gap of an odd sample count (a skipped grid position) moves the rows
-        # by half a row, as the stack of the chunked recipe would.
+        # current frame on. An empty context fills from the stack instead.
         last = self._last_index
         executed = 0 if last is None else (index - last) // grid.ratio
+        restart = bool(
+            call_obs.get("reset_context") or call_obs.get("__reset_context__")
+        )
+        if (
+            last is not None
+            and (index - last) % grid.ratio
+            and not restart
+            and self.session.state.stream.n_raws
+        ):
+            # Above 15 Hz a gap that is not whole rows (a skipped prediction
+            # sample, a replan) puts the new stack rows on another sample
+            # phase than the context: the window would mix two frame grids.
+            # Restart the context: it refills from the stack of this call, on
+            # one grid. The stack holds one context chunk, so a deeper context
+            # fills again over the next predictions. At 15 Hz every gap is
+            # whole rows.
+            self.session.state.restart()
         ahead = self._ahead
         early = None
         if ahead is not None:
-            if call_obs.get("reset_context") or call_obs.get("__reset_context__"):
+            if restart:
                 # The call restarts the context: no window to plan.
                 early = "stale" if ahead.target is not None else None
                 ahead.drop()

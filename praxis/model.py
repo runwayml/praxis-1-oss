@@ -299,15 +299,16 @@ class PraxisPolicy(nn.Module):
           the video noise of the call. Only the actions integrate: the
           actions read the true future video. The returned video is then
           ``oracle_video``.
-        * ``return_window`` returns all ``K'`` chunks instead of the last.
+        * ``return_window`` returns all ``K'`` chunks instead of the last,
+          the video included: it turns ``skip_last_video`` off.
         * ``skip_last_video`` (default None: ``self.skip_last_video``, which
           is False unless set): the last step moves only
           the actions. Its guided pass runs without the video decoder, and its
           unguided pass runs only for action guidance, also without the
           decoder. The action expert reads only the encoder taps, and the
           guidance combine at scale 1.0 is the identity, so the actions keep
-          their bits. The video comes back as None. A ``trace`` call runs all
-          passes.
+          their bits. The video comes back as None. A ``trace`` call and a
+          ``return_window`` call run all passes.
 
         Returns the video latent of the last chunk ``(1, 192, 6, h, w)`` (None
         with ``skip_last_video``) and its normalized action tokens
@@ -407,7 +408,9 @@ class PraxisPolicy(nn.Module):
         decode_uncond = trace is not None or float(settings.cfg_video_scale) != 1.0
         act_uncond = trace is not None or float(settings.cfg_scale) != 1.0
         skip = self.skip_last_video if skip_last_video is None else skip_last_video
-        skip_video = trace is None and bool(skip)
+        # The skip serves callers that read no video: a trace and a call that
+        # returns the whole window (the offline evaluation) keep the decoder.
+        skip_video = trace is None and not return_window and bool(skip)
         x0_v = None if oracle_video is None else oracle_video.float().cpu()
         for step in range(settings.num_steps):
             t_cur, t_next = ts[step], ts[step + 1]
@@ -452,7 +455,7 @@ class PraxisPolicy(nn.Module):
         probe("out.video", xv)
         probe("out.action", xa)
         if return_window:
-            return (None if skip_video else xv), xa[None]
+            return xv, xa[None]
         video_last = None if skip_video else xv[:, :, d * lat :].contiguous()
         actions = xa[d * lat :].contiguous()
         if video_last is not None:
@@ -469,7 +472,7 @@ class PraxisPolicy(nn.Module):
         cleans: list[Tensor],
         seed: int,
         settings: SamplerSettings,
-        skip_last_video: bool = False,
+        skip_last_video: bool | None = None,
     ) -> TrunkPlan:
         """Run the trunk passes of :meth:`sample_window_joint` ahead of the call.
 
@@ -484,9 +487,11 @@ class PraxisPolicy(nn.Module):
         only the order between the backbone and the expert changed. A trace
         is not supported.
 
-        ``skip_last_video`` runs the last step without the video decoder: the
-        last step moves only the actions, which read only the encoder taps.
-        The actions keep their bits, and the plan has no video (None).
+        ``skip_last_video`` (default None: ``self.skip_last_video``, as in
+        :meth:`sample_window_joint`) runs the last step without the video
+        decoder: the last step moves only the actions, which read only the
+        encoder taps. The actions keep their bits, and the plan has no video
+        (None).
 
         ``settings.cfg_batched`` raises ``ValueError``: the plan runs the
         guided and the unguided passes one after the other.
@@ -517,6 +522,8 @@ class PraxisPolicy(nn.Module):
         text_u = None if text_uncond is None else text_uncond.to(dev, md)
         backbone = cast(ChunkCausalBackbone, self.backbone)
         # The passes of sample_window_joint without a trace.
+        if skip_last_video is None:
+            skip_last_video = self.skip_last_video
         decode_uncond = float(settings.cfg_video_scale) != 1.0
         act_uncond = float(settings.cfg_scale) != 1.0
         taps: list[ChunkCausalTaps] = []
