@@ -170,3 +170,20 @@ def test_an_unreachable_server_is_recorded() -> None:
     assert meta == {}
     (rec,) = records
     assert rec["call"] == 0 and rec["session"] == 0 and rec["error"]
+
+
+def test_the_default_query_asks_for_the_chunked_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """This client runs the chunked schedule, also against a deploy whose config sets
+    real-time chunking."""
+    seen: list[str] = []
+
+    def fake_run(url: str, *args: object, **kwargs: object) -> tuple[dict, list]:
+        seen.append(url)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(latency, "run", fake_run)
+    with pytest.raises(SystemExit):
+        latency.main(["--url", "ws://h:8000/api/v1/session"])
+    assert seen == ["ws://h:8000/api/v1/session?sample_seed=0&schedule=chunked"]

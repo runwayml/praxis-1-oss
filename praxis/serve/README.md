@@ -76,6 +76,17 @@ A client can change each value for one session in the query of the session
 URL, for example `?max_context_chunks=3`. `layout` is the only exception: it
 is a boot setting of the server.
 
+The server returns commands only, never the predicted video, so each call
+skips the video decoder of the last Euler step (`skip_video_decoder`,
+default `auto` = on). The action expert reads only the encoder of the trunk,
+so the commands keep their bits; the call is shorter by one decoder pass.
+Both serve configs set `skip_video_decoder: on`. To run the full last step,
+a deploy sets `skip_video_decoder: off` in the `session` block of its config,
+and a client sends `?skip_video_decoder=off` for one session. A pipeline
+session in your own code keeps the full step by default
+(`PraxisPipeline.session(skip_last_video=False)`), so that
+`Session.decode_video` can decode the predicted video.
+
 ## Run the server in Docker
 
 `docker/Dockerfile` is an example image. It holds CUDA 13.0, PyTorch 2.13,
@@ -181,6 +192,11 @@ python -m praxis.serve.latency \
     --headers-file ~/.config/praxis/modal_headers.json --out outputs/latency.jsonl
 ```
 
+The client times the chunked schedule (its default `--query` holds
+`schedule=chunked`): a real-time session is periodic samples on protocol v2,
+which this client does not speak. The positronic client times a real-time
+session end to end.
+
 The headers file holds the proxy auth token:
 `{"Modal-Key": "<id>", "Modal-Secret": "<secret>"}`. Keep it outside the
 checkout and readable only by you (`chmod 600`); `.gitignore` also skips
@@ -205,9 +221,180 @@ Change only the policy address of the client:
   in the headers `Modal-Key` and `Modal-Secret`. With `.file_authed_remote`,
   `--policy.headers.path` names a JSON file with these two headers.
 
+The task string goes to the text encoder verbatim. The bimanual checkpoint
+`praxis-1-yam` was trained on window captions such as "Pick up the pen from
+the center of the table, then place the pen in the bag", with no closing
+period, so phrase its tasks in that form (top README, "Bimanual rig").
+
 The query of the URL holds the session parameters, for example
 `?sample_seed=0&rollout_id=run1`. Without `sample_seed`, each session draws a
 random seed.
+
+The default session is the chunked schedule. Real-time chunking is opt-in
+with `schedule=rtc` in the query (see "Real-time chunking"); it needs
+Positronic 0.4.4 or later.
+
+## Real-time chunking
+
+With the chunked schedule, the robot plays each chunk to its end, then asks
+for the next one and waits for the answer. With real-time chunking the robot
+asks while it still runs the current chunk, so it does not stop between
+chunks. It is opt-in: both serve configs default to the chunked schedule
+(`schedule: chunked` in `configs/serve_droid.yaml` and
+`configs/serve_yam.yaml`). A client asks for real-time chunking with
+`/api/v1/session?schedule=rtc`, and a deploy turns it on for every session
+with `schedule: rtc` in the `session` block of its config.
+
+**When to use it.** Real-time chunking removes the stop between chunks and
+shortens the episodes, but it needs a short round trip. Measure the round
+trip and convert it to rows at 15 Hz. If it is longer than `rtc_stride`, use
+`schedule=chunked` or raise `rtc_stride`, and keep `rtc_stride` plus the round
+trip within one chunk (24 rows). At the default stride of 12 (0.8 s) the round
+trip must stay under 0.8 s. Past that the plan runs out before each answer
+arrives and the junctions lose their alignment. When no stride satisfies both
+limits (for example a 1.0 s round trip), use `schedule=chunked`. In our robot
+runs it also replanned during marginal grasps, where the chunked schedule
+commits to a grasp and lifts: on a five-object task it was faster (9.1 s
+against 15.2 s median time to success) with a lower, not significant, success
+rate (24/30 against 28/30). Measure task success on your task too before you
+turn it on.
+
+A real-time session uses the periodic flow of Positronic
+([Positronic-Robotics/positronic#1139](https://github.com/Positronic-Robotics/positronic/pull/1139)).
+**The client needs Positronic 0.4.4 or later**, the first release with the
+`periodic` and `inference_schedule` components. An older client refuses the
+handshake of a real-time session ("This client cannot build the client
+stack that the server declares", an unknown local-stack entry); it keeps the
+default chunked schedule.
+
+- The server declares the recipe
+  `stop_on_fault | trajectory_player | periodic(15 Hz) | inference_schedule |
+  restrict_image_size`. The client samples every 1/15 s and sends each
+  sample as a call with the current frames and state only. It has no frame
+  stack.
+- The server keeps the samples. It answers None on most samples. Every
+  `rtc_stride` rows (12 by default, 0.8 s) it rebuilds the frame stack of the
+  chunked recipe from the samples and predicts. The window of each
+  prediction holds the frames that the robot ran since the context started,
+  one every 1/15 s, as in training.
+- Calls overlap. The ready message declares `max_in_flight` (16 by default).
+  A real-time session speaks protocol v2: the ready message holds a
+  `session_id`, and each request carries it.
+- The client sends the plan it runs with each call (the `action_prefix`
+  plan mapping of
+  [Positronic-Robotics/positronic#1036](https://github.com/Positronic-Robotics/positronic/pull/1036)).
+  The robot runs the first rows of that plan before the answer arrives: the
+  rows of the delay estimate, the longest of the last 5 prediction durations.
+  The answer keeps these rows. After them the model's motion continues from
+  the end of these rows. The offset between the two goes back to zero over
+  `rtc_rebase_decay` rows, and the velocity fades over `rtc_vel_fade` rows.
+  The grippers fade from the plan to the model over `rtc_grip_rows` rows.
+- On the bimanual rig, targets past the reach of a YAM arm move back onto a
+  reach radius (`rtc_reach_max_m`). The reach model puts the arm bases where
+  Positronic's `yam_bimanual` embodiment puts them. Set
+  `rtc_reach_max_m=off` on a rig with other arm bases. The single-arm rig
+  has no reach clamp.
+- On the single-arm rig, the rows stay in the frame of the client (the frame
+  the robot runs), every row keeps the control law of the session
+  (`droid_impedance`), and the server checks each prediction's current pose
+  against the forward kinematics of `robot_state.q`, as on a chunked call.
+
+The session parameters of real-time chunking:
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `schedule` | `chunked` | `rtc` turns real-time chunking on (Positronic 0.4.4 or later). |
+| `rtc_stride` | 12 | Rows between two predictions (1 to 20). |
+| `rtc_rebase_decay` | 24 | Rows over which the junction offset goes back to zero (0 keeps it). |
+| `rtc_vel_fade` | 6 | Rows over which the velocity fades from the plan to the model (0 turns it off). |
+| `rtc_grip` | `cont` | `cont` fades the grippers from the plan, `model` takes the model's grips. |
+| `rtc_grip_rows` | 16 | Rows of the gripper fade. |
+| `rtc_reach_max_m` | `auto` | Bimanual rig: reach radius in m, `auto` (0.595 on both arms), `off`, one radius, or `left,right`. |
+| `sample_fps` | 15 | Samples per second, a whole multiple of the 15 Hz action rate. |
+| `max_in_flight` | 16 | Calls that the client may have in flight (1 to 16). |
+| `precompute` | `on` | Runs the window encode and the trunk passes of each prediction on the samples before it (see below). `off` turns it off. Real-time sessions only. |
+
+A real-time session needs `context_mode=observed`, `max_context_chunks`
+of 1 or more, and the full chunk (`exec_horizon` 24 or null). Under the
+`rtc` schedule set in a deploy's config, a session that asks for a
+stateless context or a shorter `exec_horizon` gets the chunked schedule; with
+an explicit `schedule=rtc` in its query it is refused. These defaults are the junction rule of our robot runs with
+real-time chunking. They can change when we have more robot results.
+
+### Precompute of the next prediction
+
+A real-time prediction encodes its window (the frames that the robot ran
+since the context started), runs the trunk of both Euler steps and runs the
+action expert. The window rows are samples that arrive before the
+prediction, and no trunk pass reads the actions or the current pose. So the
+server does this work on the samples before the prediction
+(`praxis/serve/precompute.py`). It is on by default (`precompute: on` in
+both serve configs), and it applies to real-time sessions only
+(`schedule=rtc`). The default session is chunked: it does not use the
+precompute, and it is not faster with it. A client turns it off with
+`?precompute=off`, and a deploy with `precompute: off` in the `session`
+block of its config.
+
+- Each window row goes into a streamed encode as soon as its sample
+  arrives (`praxis.vae.StreamEncode`: the chunks of `Autoencoder.encode` in
+  the same order on the same buffers).
+- When the last window row is in, one row before the prediction, the server
+  runs the trunk passes (`PraxisPolicy.plan_window_joint`). The prediction
+  then runs only the expert passes (`finish_window_joint`).
+- The prediction checks each value before it uses it: a latent only for an
+  equal clip, the trunk passes only for an equal anchor, cleans, text, seed
+  and settings (`torch.equal`). On any difference it computes everything
+  as without the precompute.
+
+The answers keep their bits: the same model calls run on the same inputs.
+Each prediction reports `rtc_plan` in `server_timing`: `hit` (the trunk
+passes ran ahead), `late` (the sample of the last row was skipped, so the
+prediction finished the window), `miss` (an input differed), `stale` (a
+replan or a skipped prediction sample) or `none` (a cold start, or a session
+that does not plan).
+
+The default applies only where it can: on a chunked session it does
+nothing, with no error. An explicit `precompute=on` on a chunked session is
+refused, as the other real-time parameters are. A session with
+`cfg_batched=on` makes no plan yet: the plan runs the guided and the
+unguided passes one after the other, so those predictions report `none` and
+run the trunk passes in the call (the window encode still runs ahead).
+`cfg_batched` has no effect on the `window_joint` sampler today. When
+batched guidance lands, the plan must run the same batched passes before
+this refusal can go.
+
+The trunk passes need the last window row, so they start at most one row
+(67 ms at 15 Hz) before the prediction, and the prediction waits for the
+rest of them on the inference thread. The gain is the encode plus that head
+start, so it depends on how early the client sends the last row. Most of
+the plan's GPU time stays on the critical path. Measured on one H100, with
+the median over the warm predictions of each session. The columns are both
+off, the precompute alone, and both on (the default of a real-time session):
+
+| Rig | `precompute=off&skip_video_decoder=off` | `precompute=on&skip_video_decoder=off` | both on (default) |
+|---|---|---|---|
+| `praxis-1-yam`, round trip (client) | 638 ms | 523 ms | 397 ms |
+| `praxis-1-yam`, server time with the plan, no head start | 641 ms | 603 ms | 475 ms |
+| `praxis-1-droid`, round trip (client) | 694 ms | 601 ms | 379 ms |
+| `praxis-1-droid`, server time with the plan, no head start | 690 ms | 688 ms | 469 ms |
+
+- The round trip: a recorded episode per rig, replayed on the wall clock by
+  Positronic's client over a loopback WebSocket, 36 warm predictions per
+  session. The client sends each sample on its tick, so the plan gets the
+  one-row head start.
+- The server time: the samples go in back to back with no wall-clock gap,
+  timed from the start of the sample that runs the plan to the end of the
+  answer. With no head start, the precompute alone gains little (YAM
+  -38 ms, DROID -2 ms: the DROID plan, with video guidance 4.0, takes
+  about 580 ms of GPU time).
+- Most of the combined gain comes from `skip_video_decoder`. The
+  precompute alone gains the encode plus up to one row.
+
+The `served_ms` of the answers (YAM: 634 ms to 213 ms) leaves out the wait:
+the server reads the prediction request only after the sample before it,
+which runs the trunk passes. Read the round trip instead. The precompute
+holds the taps of one plan per session (about 0.6 GB on the YAM canvas at
+depth 1), and drops them before a fallback runs.
 
 ## Action clamp
 

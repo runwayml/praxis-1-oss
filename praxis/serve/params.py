@@ -11,6 +11,7 @@ times, the last value applies.
 from __future__ import annotations
 
 import json
+import math
 import re
 import secrets
 import subprocess
@@ -49,6 +50,16 @@ SESSION_PARAMS: frozenset[str] = frozenset(
         "record_denoised",
         "compile",
         "skip_video_decoder",
+        "schedule",
+        "sample_fps",
+        "max_in_flight",
+        "rtc_stride",
+        "rtc_rebase_decay",
+        "rtc_vel_fade",
+        "rtc_grip",
+        "rtc_grip_rows",
+        "rtc_reach_max_m",
+        "precompute",
     }
 )
 # Keys that the server reads itself. They do not go to the policy.
@@ -127,12 +138,38 @@ def parse_opt_int(v: str | float | None) -> int | None:
 
 
 def parse_skip_mode(v: object) -> bool | None:
-    """Return the ``skip_video_decoder`` value: None for ``auto``, else a bool."""
+    """Return the ``skip_video_decoder`` value: None for ``auto`` (the server's
+    default: skip the last Euler step's video decoder), else a bool."""
     if v is None:
         return None
     if isinstance(v, str) and v.strip().lower() in ("auto", "default"):
         return None
     return parse_on_off(v)
+
+
+def parse_reach(value: object, default_m: float, arms: int = 2) -> tuple[float, ...]:
+    """Return the ``rtc_reach_max_m`` radii: one per arm, or empty for no clamp.
+
+    ``auto``, ``on`` and None give ``default_m`` on every arm. ``off``, ``0``
+    and an empty string turn the clamp off. ``R`` gives R m on every arm and
+    ``L,R`` one radius per arm. A radius out of 0.2..1.0 m raises
+    ``ValueError``.
+    """
+    text = "auto" if value is None else str(value).strip().lower()
+    if text in ("auto", "on", "true", "1"):
+        return (float(default_m),) * arms
+    if text in ("", "0", "off", "none", "false", "null"):
+        return ()
+    vals = tuple(float(v) for v in text.split(","))
+    radii = vals * arms if len(vals) == 1 else vals
+    if len(radii) != arms or not all(
+        math.isfinite(r) and 0.2 <= r <= 1.0 for r in radii
+    ):
+        raise ValueError(
+            "rtc_reach_max_m must be auto, off, one radius or one per arm "
+            f"(left,right), 0.2..1.0 m, got {value!r}"
+        )
+    return radii
 
 
 def resolve_rollout_id(value: str | None) -> tuple[str, str]:

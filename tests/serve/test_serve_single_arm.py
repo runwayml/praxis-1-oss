@@ -70,13 +70,20 @@ VARIANT_KEYS = [
 ]
 
 
+class _Stream:
+    max_raws = 21
+
+
 class _State:
     prompt = ""
+    stream = _Stream()
 
 
 class _Session:
-    def __init__(self) -> None:
+    def __init__(self, precompute: bool = False) -> None:
         self.state = _State()
+        # A session opened with precompute keeps an encode memo.
+        self.memo = object() if precompute else None
 
 
 class _Policy:
@@ -97,7 +104,7 @@ class _Pipeline:
 
     def session(self, **kwargs: object) -> _Session:
         self.sessions.append(kwargs)
-        return _Session()
+        return _Session(precompute=bool(kwargs.get("precompute")))
 
 
 def _serve_config(name: str = "serve_droid.yaml") -> dict:
@@ -141,7 +148,10 @@ def test_serve_config_has_the_recipe() -> None:
         "context_mode": "observed",
         "max_context_chunks": 1,
         "carry_mode": "clean",
+        "skip_video_decoder": True,
         "prompt": "",
+        "schedule": "chunked",
+        "precompute": True,
     }
     for key in ("checkpoint", "vae_weights", "text_encoder"):
         assert not Path(cfg["model"][key]).is_absolute(), key
@@ -186,8 +196,14 @@ def test_meta_adds_the_variant() -> None:
     }
     assert meta["max_context_chunks"] == 1 and meta["num_evals"] == 2
     assert meta["t_shift"] == 12.5 and meta["cfg_batched"] is False
+    # The serve config's default is the chunked schedule (a chunked session states no
+    # schedule key); real-time chunking is opt-in.
+    assert "schedule" not in meta
+    rtc_meta = _factory(SINGLE_ARM)[0]({"schedule": "rtc"}).meta
+    assert rtc_meta["schedule"] == "rtc" and rtc_meta["precompute"] is True
     local_stack = meta["local_stack"]
     assert isinstance(local_stack, dict)
+    # The chunked recipe of main: its entries carry no version.
     assert local_stack["seq"][-1] == {
         "name": "restrict_image_size",
         "args": {"width": 1024, "height": 288},
@@ -271,8 +287,11 @@ def test_session_gets_the_sampler_and_settings_of_the_session() -> None:
         "control_mode",
         "exec_horizon",
         "sampler",
+        "skip_last_video",
     ]
     assert kwargs["prompt"] == "pick the cube" and kwargs["seed"] == 7
+    # the server returns no video: the last step's video decoder is skipped
+    assert kwargs["skip_last_video"] is True
     assert kwargs["max_context_chunks"] == 1 and kwargs["control_mode"] == "none"
     assert kwargs["exec_horizon"] is None  # the server cuts the rows itself
     assert kwargs["sampler"] == SamplerSettings(
@@ -311,12 +330,23 @@ def test_antialiased_canvas_declares_the_fit_serve_stack() -> None:
         }
     factory = _factory(config)[0]
     assert factory.restrict == (416, 234) and factory.restrict_first is True
-    seq = factory({}).meta["local_stack"]["seq"]
+    seq = factory({"schedule": "chunked"}).meta["local_stack"]["seq"]
     assert [e["name"] for e in seq] == [
         "stop_on_fault",
         "restrict_image_size",
         "temporal_stack",
         "chunked_schedule",
+    ]
+    # The default is that chunked stack; schedule=rtc declares the periodic recipe,
+    # the restrict in its place.
+    assert factory({}).meta["local_stack"]["seq"] == seq
+    rtc_seq = factory({"schedule": "rtc"}).meta["local_stack"]["seq"]
+    assert [e["name"] for e in rtc_seq] == [
+        "stop_on_fault",
+        "restrict_image_size",
+        "trajectory_player",
+        "periodic",
+        "inference_schedule",
     ]
     assert seq[1]["args"] == {"width": 416, "height": 234}
     offsets = seq[2]["args"]["offsets_sec"]
@@ -352,7 +382,9 @@ def test_factory_serves_the_bimanual_rig() -> None:
         "target_grip.right",
     ]
     assert pipe.sessions[-1]["control_mode"] == "none"
-    seq = meta["local_stack"]["seq"]
+    assert "schedule" not in meta  # the chunked default
+    assert factory({"schedule": "rtc"}).meta["schedule"] == "rtc"
+    seq = factory({"schedule": "chunked"}).meta["local_stack"]["seq"]
     # The YAM client order: the stack, then the restrict; half-frame offsets.
     assert [s["name"] for s in seq] == [
         "stop_on_fault",

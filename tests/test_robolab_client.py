@@ -217,3 +217,85 @@ def test_refusal_with_no_finite_pose_to_hold_stops_the_run(
     obs["proprio_obs"]["ee_pos"][:] = np.nan
     with pytest.raises(RuntimeError, match="no finite pose"):
         client.infer(obs, "task", env_id=0)
+
+
+def _cfg_module(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """ee_frame_policy_cfg with stand-ins for the positronic modules it imports."""
+    cfg_dir = STOCK.parent / "positronic_cfg"
+    stubs: dict[str, dict[str, object]] = {
+        "positronic": {"geom": types.SimpleNamespace()},
+        "positronic.drivers": {},
+        "positronic.drivers.roboarm": {"command": types.SimpleNamespace()},
+        "positronic.policy": {
+            "keys": types.SimpleNamespace(
+                CALL_ID="call_id", CALL_TIMINGS="call_timings"
+            )
+        },
+        "positronic.policy.base": {
+            "Policy": object,
+            "PolicyRun": object,
+            "Runtime": object,
+            "Step": object,
+        },
+        "positronic.policy.remote": {"RemotePolicy": object},
+        "positronic.policy.sequential": {"Sequential": object},
+        "positronic_wire": {},
+        "positronic_wire.wire": {
+            "SESSION_PATH": "/api/v1/session",
+            "HostPortAddress": lambda *a: a,
+        },
+    }
+    for name, attrs in stubs.items():
+        mod = types.ModuleType(name)
+        for k, v in attrs.items():
+            setattr(mod, k, v)
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.syspath_prepend(str(cfg_dir))
+    monkeypatch.delitem(sys.modules, "ee_frame_policy_cfg", raising=False)
+    import ee_frame_policy_cfg
+
+    return ee_frame_policy_cfg
+
+
+@pytest.mark.parametrize(
+    ("url", "query"),
+    [
+        ("host:8000", ""),
+        (
+            "wss://h/api/v1/session?max_context_chunks=1",
+            "max_context_chunks=1&schedule=chunked",
+        ),
+        ("ws://h:80/api/v1/session?schedule=rtc&x=1", "schedule=rtc&x=1"),
+        ("https://h/api/v1/session/m?schedule=chunked", "schedule=chunked"),
+    ],
+)
+def test_the_client_asks_for_the_chunked_schedule(
+    monkeypatch: pytest.MonkeyPatch, url: str, query: str
+) -> None:
+    """RoboLab pauses the sim during a call, so the client asks for the chunked
+    schedule unless the URL sets one. A deploy can set real-time chunking as its
+    default. An empty query goes as written."""
+    cfg = _cfg_module(monkeypatch)
+    _name, address = cfg.wire_address(url)
+    assert address[3] == query
+
+
+@pytest.mark.parametrize("url", ["host:8000", "wss://h/api/v1/session?"])
+def test_an_empty_query_stays_empty(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    """``--query ""`` reaches a server that accepts no session settings as written:
+    a server built before the ``schedule`` key refuses ``schedule=chunked``."""
+    cfg = _cfg_module(monkeypatch)
+    assert cfg.with_chunked_schedule("") == ""
+    _name, address = cfg.wire_address(url)
+    assert address[3] == ""
+
+
+def test_the_example_query_asks_for_the_chunked_schedule() -> None:
+    tree = ast.parse((STOCK / "example_client.py").read_text())
+    query = next(
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "QUERY" for t in node.targets)
+    )
+    assert "schedule=chunked" in query.split("&")

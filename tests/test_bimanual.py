@@ -161,8 +161,8 @@ def test_views_must_be_uint8() -> None:
 
 
 def test_serve_config_documents_a_caption_prompt() -> None:
-    """The checkpoint was trained on window captions; the serve config and the
-    README show the same caption-form prompt to send."""
+    """The checkpoint was trained on window captions; the serve config, the
+    README and the serve README show the same caption-form prompt to send."""
     root = DATA.parents[1]
     example = (
         '"Pick up the pen from the center of the table, then place the pen in the bag"'
@@ -171,7 +171,8 @@ def test_serve_config_documents_a_caption_prompt() -> None:
         (root / "configs" / "serve_yam.yaml").read_text().replace("#", " ").split()
     )
     readme = " ".join((root / "README.md").read_text().split())
-    assert example in serve and example in readme
+    serve_readme = " ".join((root / "praxis/serve/README.md").read_text().split())
+    assert example in serve and example in readme and example in serve_readme
     assert "the bag." not in serve
 
 

@@ -115,7 +115,16 @@ class FakePolicy:
         self.calls: list[dict] = []
 
     def sample_window_joint(
-        self, text, text_uncond, anchor, cleans, proprio_all, seed, settings, trace=None
+        self,
+        text,
+        text_uncond,
+        anchor,
+        cleans,
+        proprio_all,
+        seed,
+        settings,
+        trace=None,
+        skip_last_video=None,
     ):
         self.calls.append({"depth": len(cleans), "settings": settings})
         generator = torch.Generator().manual_seed(int(seed))
@@ -161,8 +170,9 @@ class FakePipeline:
     def session(self, **kwargs: object) -> Session:
         # The session of the real pipeline, with its defaults.
         return PraxisPipeline.session(
-            self, **kwargs
-        )  # ty: ignore[invalid-argument-type]
+            self,  # ty: ignore[invalid-argument-type]
+            **kwargs,  # ty: ignore[invalid-argument-type]
+        )
 
 
 def _single_arm_factory(
@@ -490,7 +500,7 @@ def test_param_literals() -> None:
     }
     with pytest.raises(ValueError, match=r"Unknown session params \['bogus'\]"):
         params.parse_session_params({"bogus": "1"})
-    assert len(params.SESSION_PARAMS) == 28
+    assert len(params.SESSION_PARAMS) == 38
 
 
 def test_rollout_ids_and_seeds() -> None:
@@ -592,7 +602,7 @@ def test_handshake_meta(server: tuple[str, InferenceServer]) -> None:
         "carry_mode": "clean",
         "record_denoised": None,
         "compile": None,
-        "skip_video_decoder": None,
+        "skip_video_decoder": True,
         "action_steps": None,
         "embodiment": "franka_ee",
         "control_mode": "droid_impedance",
@@ -1081,7 +1091,16 @@ class OutOfRangePolicy(FakePolicy):
         self.value = value
 
     def sample_window_joint(
-        self, text, text_uncond, anchor, cleans, proprio_all, seed, settings, trace=None
+        self,
+        text,
+        text_uncond,
+        anchor,
+        cleans,
+        proprio_all,
+        seed,
+        settings,
+        trace=None,
+        skip_last_video=None,
     ):
         self.calls.append({"depth": len(cleans), "settings": settings})
         rows = np.zeros((24, 10), np.float32)
@@ -1195,3 +1214,64 @@ def test_smoothing_keeps_a_chunk_it_cannot_filter(window: int, order: int) -> No
     }
     smooth = factory(query).select_action(_droid_obs(1))
     assert wire.serialise(plain) == wire.serialise(smooth)
+
+
+@pytest.mark.parametrize(
+    ("param", "skip"),
+    [(None, True), ("auto", True), ("on", True), ("off", False)],
+)
+def test_sessions_skip_the_last_video_decoder_unless_asked(
+    param: str | None, skip: bool
+) -> None:
+    """The server returns commands only, so its sessions skip the video decoder of
+    the last Euler step (``skip_video_decoder``: auto = on); ``off`` keeps it."""
+    factory = _single_arm_factory()
+    pipe = _pipe(factory)
+    opened: list[dict] = []
+    open_session = pipe.session
+
+    def session(**kw: object) -> Session:
+        opened.append(kw)
+        return open_session(**kw)
+
+    pipe.session = session  # ty: ignore[invalid-assignment]
+    overrides = {} if param is None else {"skip_video_decoder": param}
+    policy = factory(overrides)
+    assert opened[-1]["skip_last_video"] is skip
+    assert policy.session.skip_last_video is skip
+    assert policy.meta["skip_video_decoder"] is skip
+
+
+@pytest.mark.parametrize(
+    ("config", "param", "skip"),
+    [
+        ("off", None, False),
+        ("off", "on", True),
+        ("on", "off", False),
+        (False, "auto", True),
+        (None, None, True),
+    ],
+)
+def test_the_config_sets_the_skip_video_decoder_default(
+    config: object, param: str | None, skip: bool
+) -> None:
+    """``skip_video_decoder`` in the ``session`` block of the config is the
+    boot default, so a deploy can turn the skip off; a session parameter
+    replaces it for one session, and ``auto`` is the server's default (on)."""
+    factory = _single_arm_factory(skip_video_decoder=config)
+    overrides = {} if param is None else {"skip_video_decoder": param}
+    policy = factory(overrides)
+    assert policy.session.skip_last_video is skip
+    assert policy.meta["skip_video_decoder"] is skip
+
+
+@pytest.mark.parametrize("name", ["serve_droid.yaml", "serve_yam.yaml"])
+def test_serve_configs_skip_the_video_decoder(name: str) -> None:
+    """Both serve configs skip the last step's video decoder; ``off`` in the
+    ``session`` block is a known setting and turns it off."""
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "configs" / name).read_text())
+    assert cfg["session"]["skip_video_decoder"] is True
+    factory = _single_arm_factory(**{**cfg["session"], "skip_video_decoder": "off"})
+    assert factory({}).session.skip_last_video is False

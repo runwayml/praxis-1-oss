@@ -133,8 +133,16 @@ PYTHONPATH=$PRAXIS_DIR/eval/robolab/robolab_stock:<robolab checkout> \
 ```
 
 The default `--query` holds the recommended server settings:
-`declare_stop_on_fault=false&record_denoised=false&max_context_chunks=1&t_shift=12.5`.
+`schedule=chunked&declare_stop_on_fault=false&record_denoised=false&max_context_chunks=1&t_shift=12.5`.
 A server that accepts no session settings needs `--query ""`.
+
+The client asks for the chunked schedule: it adds `schedule=chunked` to a non-empty
+query that sets no `schedule` (`with_chunked_schedule` in `positronic_cfg/ee_frame_policy_cfg.py`).
+A deploy can make real-time chunking its default; that needs a Positronic client with the periodic
+components and a robot that keeps moving while the server computes the next chunk.
+RoboLab pauses the sim during each policy call, and the client runs Positronic's
+schedule on a virtual clock that stands still during a call. Real-time chunking
+would gain nothing there, so the client keeps the chunked schedule.
 
 The expected output, for a server that returns 24-action chunks at 15 Hz:
 policy calls at ticks 2, 23 and 47 (logged to `--calls-log`), and actions of
@@ -153,7 +161,7 @@ cd $ROBOLAB_DIR
 PYTHONPATH=$PRAXIS_DIR/eval/robolab/robolab_stock:$PYTHONPATH \
   uv run python $PRAXIS_DIR/eval/robolab/robolab_stock/run_praxis.py --headless \
     --num-envs 1 --num-runs 10 \
-    --policy-url 'wss://<endpoint>/api/v1/session?declare_stop_on_fault=false&record_denoised=false&max_context_chunks=1&t_shift=12.5' \
+    --policy-url 'wss://<endpoint>/api/v1/session?schedule=chunked&declare_stop_on_fault=false&record_denoised=false&max_context_chunks=1&t_shift=12.5' \
     --output-folder-name <name>
 ```
 

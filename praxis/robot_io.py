@@ -309,6 +309,13 @@ class ContiguousStreamContext:
     context holds at most ``max_context_chunks`` clean chunks (69 raws for
     3). When a new chunk overflows it, the stream drops the oldest 24 raws.
     The retained prefix then starts a new window with a new anchor frame.
+
+    Under real-time chunking a call comes every few raws, off the chunk grid.
+    :meth:`append_executed` with ``strict=False`` then takes any number of
+    raws and keeps the newest ``max_raws``. The window is the newest
+    ``21 + 24 (d - 1)`` raws, so it ends right before the current frame. On
+    the chunk grid the stream holds exactly the window, so both rules give the
+    same window.
     """
 
     def __init__(self, action_chunk: int = ACTION_CHUNK, max_context_chunks: int = 3):
@@ -334,7 +341,13 @@ class ContiguousStreamContext:
     @property
     def depth(self) -> int:
         """Return the number of complete clean chunks in the stream."""
-        t = self.n_raws
+        return self._depth_of(self.n_raws)
+
+    def depth_after(self, rows: int) -> int:
+        """Return the depth after an append of ``rows`` raws with ``strict=False``."""
+        return self._depth_of(min(self.n_raws + int(rows), self.max_raws))
+
+    def _depth_of(self, t: int) -> int:
         if t < self.first_len:
             return 0
         return min(1 + (t - self.first_len) // self.cont_len, self.max_context_chunks)
@@ -344,26 +357,45 @@ class ContiguousStreamContext:
         """Return the raw count of the next executed chunk (21 first, then 24)."""
         return self.first_len if self.n_raws == 0 else self.cont_len
 
+    def window_raws(self, depth: int | None = None) -> int:
+        """Return the raw count of the clean window at ``depth`` (default: the current one)."""
+        d = self.depth if depth is None else int(depth)
+        return 0 if d == 0 else self.first_len + self.cont_len * (d - 1)
+
+    @property
+    def window_start(self) -> int:
+        """Return the stream index of the first raw of the window (0 on the chunk grid)."""
+        return self.n_raws - self.window_raws()
+
     def boundary_offsets(self) -> list[int]:
-        """Return the window offsets of the retained clean chunk starts."""
+        """Return the stream offsets of the retained clean chunk starts."""
+        w0 = self.window_start
         return [
-            off
+            w0 + off
             for off, _ln in contiguous_chunk_geometry(
                 self.cont_len, self.max_context_chunks
             )
         ][: self.depth]
 
     def append_executed(
-        self, clip: torch.Tensor, poses: np.ndarray | None = None
+        self,
+        clip: torch.Tensor,
+        poses: np.ndarray | None = None,
+        *,
+        strict: bool = True,
     ) -> None:
         """Append the executed chunk and slide the window when it overflows.
 
         ``clip`` is a prepared ``(1, 3, T, H, W)`` clip in [0, 255] with
         ``T = expected_next_rows``. ``poses`` holds the matching pose rows.
         The pose stream stays valid only while every call supplies poses.
+        ``strict=False`` (real-time chunking) takes any ``T >= 1``.
         """
         t = int(clip.shape[2])
-        if t != self.expected_next_rows:
+        if not strict:
+            if t < 1:
+                raise ValueError("append at least one raw")
+        elif t != self.expected_next_rows:
             raise ValueError(
                 f"executed chunk spans {t} raws, expected {self.expected_next_rows} "
                 f"(window chunk {'0' if self.n_raws == 0 else 'k>=1'})"
@@ -394,14 +426,21 @@ class ContiguousStreamContext:
         if d == 0:
             return []
         assert self._clip is not None
-        n_raws = self.first_len + self.cont_len * (d - 1)
-        lat = encode(self._clip[:, :, :n_raws])
+        w0 = self.window_start
+        lat = encode(self._clip[:, :, w0 : w0 + self.window_raws(d)])
         n = self.lat_per_chunk
         return [lat.narrow(-3, k * n, n).contiguous() for k in range(d)]
 
     def anchor_frame(self) -> torch.Tensor | None:
-        """Return the window start frame ``(1, 3, 1, H, W)``, or ``None`` on cold start."""
-        return None if self._clip is None else self._clip[:, :, :1]
+        """Return the window start frame ``(1, 3, 1, H, W)``, or ``None`` on cold start.
+
+        A stream below one chunk (a real-time refill) has no window yet: the
+        caller anchors on the current frame.
+        """
+        if self._clip is None or self.depth == 0:
+            return None
+        w0 = self.window_start
+        return self._clip[:, :, w0 : w0 + 1]
 
     def latent_poses(self) -> np.ndarray | None:
         """Return the pose rows at the last raw of each retained clean latent."""
@@ -409,7 +448,8 @@ class ContiguousStreamContext:
         if self._poses is None or d == 0 or len(self._poses) != self.n_raws:
             return None
         n_lat = d * self.lat_per_chunk
-        offs = [0] + [4 * n for n in range(1, n_lat)]
+        w0 = self.window_start
+        offs = [w0] + [w0 + 4 * n for n in range(1, n_lat)]
         if offs[-1] >= len(self._poses):
             return None
         return np.stack([self._poses[o] for o in offs], axis=0)

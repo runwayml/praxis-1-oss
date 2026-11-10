@@ -117,7 +117,7 @@ def test_web_local_serves_the_server_app(
         time.sleep(0.02)
     try:
         addr = f"127.0.0.1:{port}"
-        ws, ready = _open(addr, "/api/v1/session?sample_seed=0")
+        ws, ready = _open(addr, "/api/v1/session?sample_seed=0&schedule=chunked")
         with ws:
             assert ready["meta"]["checkpoint"] == "/data/checkpoints/other"
             ws.send(wire.serialise(_droid_obs(1)))

@@ -111,6 +111,16 @@ The extras of `pyproject.toml`:
 | `train` | huggingface_hub, av, pyarrow | the fine-tune (`praxis/train/README.md`) |
 | `dev` | pytest, ruff | the tests |
 
+The policy server serves the chunked schedule by default (`schedule: chunked`
+in `configs/serve_*.yaml`). Real-time chunking is opt-in: a client asks for it
+with `?schedule=rtc` in the session URL (see "Real-time chunking" in
+`praxis/serve/README.md`). It needs Positronic 0.4.4 or later. A real-time
+session precomputes the window encode and the trunk passes of each
+prediction on the samples before it, with the same answer bits
+(`precompute: on`; `?precompute=off` turns it off). The precompute applies
+to real-time sessions only. A default session is chunked: it does not use
+the precompute and is not faster with it.
+
 The text encoder runs Qwen3.5 through `transformers`. If you install
 `flash-linear-attention` and `causal-conv1d`, `transformers` uses their
 kernels. We made the validation results with these kernels. Without them the

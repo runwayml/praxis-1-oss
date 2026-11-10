@@ -15,6 +15,7 @@ bimanual checkpoint (``"embodiment": "bimanual"``) on the bimanual rig
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,8 +25,8 @@ from torch import Tensor
 
 from praxis import bimanual, single_arm
 from praxis.checkpoint import model_variant
-from praxis.model import PraxisPolicy, SamplerSettings
-from praxis.robot_io import NormStats
+from praxis.model import PraxisPolicy, SamplerSettings, TrunkPlan
+from praxis.robot_io import NormStats, text_encoder_prompt
 from praxis.text_encoder import TextEncoder
 from praxis.vae import Autoencoder
 
@@ -44,7 +45,7 @@ class StepResult:
     commands: list[dict]
     action_rows_norm: np.ndarray
     action_rel: np.ndarray
-    pred_video_latent: Tensor
+    pred_video_latent: Tensor | None
     pred_action_norm: Tensor
     depth: int
     seed: int
@@ -100,6 +101,8 @@ class PraxisPipeline:
         control_mode: str | None = None,
         exec_horizon: int | None = 24,
         sampler: SamplerSettings | None = None,
+        skip_last_video: bool = False,
+        precompute: bool = False,
     ) -> Session:
         """Open a session for one robot episode.
 
@@ -108,6 +111,11 @@ class PraxisPipeline:
         and ``none`` on the bimanual rig.
         ``sampler`` replaces the sampler settings of the pipeline for this
         session.
+        ``skip_last_video`` skips the video decoder on the last Euler step of
+        each call: the commands keep their bits, and the call returns no
+        predicted video (:meth:`Session.decode_video` refuses it).
+        ``precompute`` lets the session take the latents and the trunk passes
+        of its next call made ahead of it (:meth:`Session.plan`).
         """
         return Session(
             self,
@@ -117,7 +125,52 @@ class PraxisPipeline:
             control_mode=control_mode,
             exec_horizon=exec_horizon,
             sampler=sampler,
+            skip_last_video=skip_last_video,
+            precompute=precompute,
         )
+
+
+class EncodeMemo:
+    """The encode of a rig session, with latents of the next call made ahead.
+
+    A real-time session with ``precompute`` encodes the window and the anchor
+    frame of its next prediction while the samples arrive
+    (:mod:`praxis.serve.precompute`), and keeps each latent here with its
+    clip (:meth:`put`, :meth:`store`). A call gets a kept latent only for a
+    clip equal to the kept clip (same shape, dtype and device,
+    ``torch.equal``). Any other clip is encoded.
+    """
+
+    def __init__(self, encode: Callable[[Tensor], Tensor]) -> None:
+        self.encode = encode
+        self.hits = 0
+        self._kept: list[tuple[Tensor, Tensor]] = []
+
+    def __call__(self, clip: Tensor) -> Tensor:
+        for kept, latent in self._kept:
+            if (
+                kept.shape == clip.shape
+                and kept.dtype == clip.dtype
+                and kept.device == clip.device
+                and torch.equal(kept, clip)
+            ):
+                self.hits += 1
+                return latent
+        return self.encode(clip)
+
+    def put(self, clip: Tensor, latent: Tensor) -> None:
+        """Keep ``latent``, the encode of ``clip``, for the next call."""
+        self._kept.append((clip, latent))
+
+    def store(self, clip: Tensor) -> Tensor:
+        """Encode ``clip`` now and keep its latent for the next call."""
+        latent = self.encode(clip)
+        self.put(clip, latent)
+        return latent
+
+    def clear(self) -> None:
+        self._kept = []
+        self.hits = 0
 
 
 class Session:
@@ -132,9 +185,12 @@ class Session:
         control_mode: str | None = None,
         exec_horizon: int | None = 24,
         sampler: SamplerSettings | None = None,
+        skip_last_video: bool = False,
+        precompute: bool = False,
     ) -> None:
         self.pipe = pipeline
         self.sampler = sampler or pipeline.sampler
+        self.skip_last_video = bool(skip_last_video)
         self.seed = int(seed)
         variant = model_variant(pipeline.policy.config)
         config = pipeline.policy.config
@@ -163,13 +219,89 @@ class Session:
             aspect_tol=variant.aspect_tol,
             antialias=variant.antialias,
         )
+        # The trunk passes of the next call, run ahead of it (plan), and
+        # the encode that serves its stored latents.
+        self._plan: TrunkPlan | None = None
+        self.memo: EncodeMemo | None = None
+        # "hit" when the last call used its plan, "miss" when its inputs
+        # differed from the plan's, None without a plan. memo_hits counts the
+        # latents of the last call that came from the memo.
+        self.plan_result: str | None = None
+        self.memo_hits = 0
+        if precompute:
+            self.memo = EncodeMemo(self.state.encode)
+            self.state.encode = self.memo
+
+    @property
+    def has_plan(self) -> bool:
+        return self._plan is not None
+
+    def drop_plan(self) -> None:
+        """Drop the plan of the next call and the latents kept for it."""
+        self._plan = None
+        if self.memo is not None:
+            self.memo.clear()
 
     @torch.no_grad()
-    def step(self, obs: dict) -> StepResult:
-        """Run one policy call on ``obs`` and return the commands of the chunk."""
+    def plan(
+        self,
+        anchor: Tensor,
+        cleans: list[Tensor],
+        prompt: str,
+        skip_last_video: bool = False,
+    ) -> None:
+        """Run the trunk passes of the next call now, on ``anchor`` and ``cleans``.
+
+        Needs a session opened with ``precompute=True``. The plan samples
+        with ``prompt`` and the seed and the settings of the next call
+        (:meth:`PraxisPolicy.plan_window_joint`). The next :meth:`step` uses
+        it only when all the trunk inputs of the call equal those of the plan
+        (:meth:`TrunkPlan.matches`); it then runs only the expert passes.
+        Otherwise the call samples as without a plan. One plan is kept at a
+        time, and every call drops it. ``skip_last_video`` skips the video
+        decoder of the last step: the call then returns no video. A session
+        with ``cfg_batched`` makes no plan: the plan runs the guidance passes
+        one after the other.
+        """
+        if self.memo is None:
+            raise RuntimeError("plan needs a session opened with precompute")
+        if self.sampler.cfg_batched:
+            # The plan runs the sequential passes: under cfg_batched a hit would
+            # not give the bits of the batched fallback. Sample in the call.
+            self._plan = None
+            return
+        text = self.pipe.encode_text(text_encoder_prompt(prompt))
+        uncond = self.pipe.encode_uncond_text() if self.sampler.guided else None
+        self._plan = self.pipe.policy.plan_window_joint(
+            text=text,
+            text_uncond=uncond,
+            anchor=anchor,
+            cleans=cleans,
+            seed=self.seed + self.state.chunk_index,
+            settings=self.sampler,
+            skip_last_video=skip_last_video,
+        )
+
+    @torch.no_grad()
+    def step(self, obs: dict, executed_rows: int | None = None) -> StepResult:
+        """Run one policy call on ``obs`` and return the commands of the chunk.
+
+        ``executed_rows`` (real-time chunking) is the number of rows that the
+        robot ran since the previous call, off the chunk grid (the
+        ``prepare`` of the rig session).
+        """
         state = self.state
-        inputs = state.prepare(obs)
-        video, actions, text = self._sample(inputs)
+        if self.memo is None:
+            inputs = state.prepare(obs, executed_rows)
+            video, actions, text = self._sample(inputs)
+        else:
+            self.plan_result = None
+            try:
+                inputs = state.prepare(obs, executed_rows)
+                self.memo_hits = self.memo.hits
+                video, actions, text = self._sample(inputs)
+            finally:
+                self.drop_plan()
         commands = state.finish(inputs, actions)
         rows, rel = state.decode_actions(inputs, actions)
         return StepResult(
@@ -195,10 +327,34 @@ class Session:
     def _sample(
         self,
         inputs: single_arm.SingleArmChunkInputs | bimanual.BimanualChunkInputs,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        """Sample one chunk. Return the video latent, the actions and the text."""
+    ) -> tuple[Tensor | None, Tensor, Tensor]:
+        """Sample one chunk. Return the video latent, the actions and the text.
+
+        The video latent is None when the session skips the video of the last
+        step (``skip_last_video``).
+
+        A plan of this call (:meth:`plan`) whose inputs equal the call's, made
+        with the session's ``skip_last_video``, gives the trunk passes. The
+        call then runs only the expert passes. A miss samples as without the
+        plan, with the same ``skip_last_video``.
+        """
         text = self.pipe.encode_text(inputs.prompt)
         uncond = self.pipe.encode_uncond_text() if self.sampler.guided else None
+        plan = getattr(self, "_plan", None)
+        if plan is not None:
+            self._plan = None
+            seed = self.seed + inputs.chunk_index
+            if plan.matches(
+                text, uncond, inputs.anchor, inputs.cleans, seed, self.sampler
+            ):
+                self.plan_result = "hit"
+                video, actions = self.pipe.policy.finish_window_joint(
+                    plan, inputs.proprio_all
+                )
+                return video, actions, text
+            self.plan_result = "miss"
+            # The fallback must not keep the taps of the stale plan alive.
+            del plan
         video, actions = self.pipe.policy.sample_window_joint(
             text=text,
             text_uncond=uncond,
@@ -207,6 +363,9 @@ class Session:
             proprio_all=inputs.proprio_all,
             seed=self.seed + inputs.chunk_index,
             settings=self.sampler,
+            # Always the session's value, so that False overrides the policy
+            # flag. The call with False gives the bits of the stock call.
+            skip_last_video=bool(getattr(self, "skip_last_video", False)),
         )
         return video, actions, text
 
@@ -225,6 +384,11 @@ class Session:
         Returns uint8 frames ``(len(result.commands), 3, H, W)``.
         """
         latent = result.pred_video_latent
+        if latent is None:
+            raise ValueError(
+                "this call skipped the predicted video (skip_last_video); open the"
+                " session with skip_last_video=False to decode it"
+            )
         cleans = result.inputs["cleans"]
         if cleans:
             dtype = cleans[0].dtype

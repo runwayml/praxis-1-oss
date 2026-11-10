@@ -11,11 +11,13 @@ Usage:
         --headers-file ~/.config/praxis/modal_headers.json --out outputs/latency.jsonl
 
 The client sends the calls of a Positronic client on the chunk grid, one after
-the other with no robot time between them. Each session sends a first
-observation with one frame, then observations with the frame stack of the
-handshake (``local_stack``). Each view is scaled down to fit the
-``restrict_image_size`` of the handshake and goes as JPEG frames of quality
-90. The frames are synthetic (a seeded noise pattern): a full request of
+the other with no robot time between them. It runs the chunked schedule: the
+default ``--query`` holds ``schedule=chunked``, so a deploy whose config sets
+real-time chunking (periodic samples on protocol v2) is timed chunked too.
+Each session sends a first observation with one frame, then observations with
+the frame stack of the handshake (``local_stack``). Each view is scaled down to
+fit the ``restrict_image_size`` of the handshake and goes as JPEG frames of
+quality 90. The frames are synthetic (a seeded noise pattern): a full request of
 2 x 25 frames at 416x234 is about 1.2 MB, in the range of the recorded client
 requests (see "Request size on Modal" in ``praxis/serve/README.md``).
 
@@ -272,7 +274,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--url", required=True, help="ws:// or wss:// session URL")
     ap.add_argument(
         "--query",
-        default="sample_seed=0",
+        default="sample_seed=0&schedule=chunked",
         help="session parameters, for example 'sample_seed=0&cfg_video_scale=1.0'",
     )
     ap.add_argument(

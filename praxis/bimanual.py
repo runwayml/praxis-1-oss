@@ -129,6 +129,27 @@ STACK_KEYS: tuple[str, ...] = (
 # The bimanual rig has no control law of its own: the arms keep theirs.
 CONTROL_MODES: dict[str, dict[str, object] | None] = {"none": None}
 
+# The reach model of the YAM arms (:func:`clamp_reach`). The IK target of the
+# arm driver is its TCP site, 0.1347 m along the tool z from the flange. The
+# shoulder is the axis of joint 2, 0.104 m above the arm base and 0.02 m out
+# along the azimuth of joint 1. The distance of the flange from the shoulder
+# bounds the reach: at most 0.625 m over the joint ranges.
+TCP_FROM_FLANGE_M = 0.1347
+SHOULDER_UP_M = 0.104
+SHOULDER_OUT_M = 0.02
+# The arm bases (left, right) in the world frame of the rig, as in
+# Positronic's ``yam_bimanual`` embodiment.
+ARM_MOUNTS_M: tuple[tuple[float, float, float], ...] = (
+    (0.30, 0.305, 0.311),
+    (0.30, -0.305, 0.311),
+)
+# The default reach radius of each arm. On recorded robot commands it caught
+# most targets that the IK of the arm driver refused (all of them on one run,
+# 113 of 128 on another), and every caught target passed the IK once moved.
+# It also moved 3.6 % of the reachable targets, by at most 2.4 cm. The reach
+# also depends on the orientation and the height, which a radius ignores.
+REACH_MAX_M = 0.595
+
 # ---------------------------------------------------------------------------
 # Checkpoint config
 # ---------------------------------------------------------------------------
@@ -471,6 +492,46 @@ def decode_actions(
     return rows, clip_grip(denormalize_rows(rows, stats, dims), GRIP_DIMS)
 
 
+def clamp_reach(
+    rows: np.ndarray,
+    start: int,
+    reach_max_m: tuple[float, ...],
+    mounts: tuple[tuple[float, float, float], ...] = ARM_MOUNTS_M,
+) -> int:
+    """Move the targets past the reach of their arm back onto it, in place.
+
+    ``rows`` is ``(T, 2, 13)`` (``xyz3 | R9 row-major | grip1`` per arm, the
+    world frame of the rig). For each row from ``start``, the flange of a
+    target (the TCP minus :data:`TCP_FROM_FLANGE_M` along the tool z) that
+    lies more than ``reach_max_m[arm]`` from the shoulder of its arm moves
+    toward the shoulder onto that radius. Only the xyz changes. Returns the
+    number of arm rows moved.
+    """
+    moved = 0
+    for a in range(rows.shape[1]):
+        r_max = float(reach_max_m[a])
+        base = np.asarray(mounts[a], np.float64)
+        for t in range(start, len(rows)):
+            tcp = rows[t, a, :3]
+            flange = tcp - TCP_FROM_FLANGE_M * rows[t, a, 3:12].reshape(3, 3)[:, 2]
+            rel = flange - base
+            az = np.arctan2(rel[1], rel[0])
+            shoulder = base + np.array(
+                [
+                    SHOULDER_OUT_M * np.cos(az),
+                    SHOULDER_OUT_M * np.sin(az),
+                    SHOULDER_UP_M,
+                ]
+            )
+            v = flange - shoulder
+            r = float(np.linalg.norm(v))
+            if r <= r_max:
+                continue
+            rows[t, a, :3] = tcp + v * (r_max / r - 1.0)
+            moved += 1
+    return moved
+
+
 def wire_to_arrays(wire: list[dict]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """Stack command dicts to ``{side: ((T, 12) poses, (T,) grips)}`` (float32)."""
     out = {}
@@ -599,8 +660,24 @@ class BimanualServeSession:
         th, tw = self.tile_size
         return canvas_clip(views, th, tw, self.aspect_tol, self.device, self.antialias)
 
-    def prepare(self, obs: dict) -> BimanualChunkInputs:
-        """Update the context from ``obs`` and return the inputs of this chunk."""
+    def frame_clip(self, obs: dict) -> torch.Tensor:
+        """Return the canvas clip ``(1, 3, 1, H, W)`` of the current frames of ``obs``.
+
+        A stack row's canvas does not depend on the other rows, so the clip of
+        one sample equals its row of a stacked clip.
+        """
+        return self._clip({v: s[-1:] for v, s in view_stacks(obs).items()})
+
+    def prepare(
+        self, obs: dict, executed_rows: int | None = None
+    ) -> BimanualChunkInputs:
+        """Update the context from ``obs`` and return the inputs of this chunk.
+
+        ``executed_rows`` (real-time chunking) is the number of rows that the
+        robot ran since the previous call, off the chunk grid. The stream then
+        appends that many stack rows (:meth:`_append_rows`). None keeps the
+        chunk grid.
+        """
         if bool(obs.get("reset_context") or obs.get("__reset_context__")):
             self.restart()
         override = obs.get("task") or obs.get("prompt")
@@ -615,6 +692,8 @@ class BimanualServeSession:
         cur_clip = self._clip({v: s[-1:] for v, s in stacks.items()})
         if self.stateless:
             self.restart()
+        elif executed_rows is not None:
+            self._append_rows(obs, stacks, int(executed_rows))
         elif self._boundary_latents:
             need = self.stream.expected_next_rows
             if any(s.shape[0] < need + 1 for s in stacks.values()):
@@ -649,6 +728,27 @@ class BimanualServeSession:
             chunk_index=self.chunk_index,
             prompt=text_encoder_prompt(self.prompt),
         )
+
+    def _append_rows(self, obs: dict, stacks: dict[str, np.ndarray], rows: int) -> None:
+        """Append the rows that the robot ran since the previous call (real-time chunking).
+
+        An empty stream (the start of a session, a restart) takes the whole
+        history of the stack, so the context fills without waiting for the
+        chunk grid. A stride past the history of the stack restarts the
+        context, then refills it the same way. A stream without its pose rows
+        restarts: off the chunk grid, the poses of the calls are not chunk
+        boundaries.
+        """
+        hist = min(s.shape[0] for s in stacks.values()) - 1
+        if self.stream.n_raws and rows > hist:
+            self.restart()
+        n = min(hist, self.stream.max_raws) if self.stream.n_raws == 0 else rows
+        if n < 1:
+            return
+        clip = self._clip({v: s[-(n + 1) : -1] for v, s in stacks.items()})
+        self.stream.append_executed(clip, pose16_history(obs, n), strict=False)
+        if self.stream.depth and self.stream.boundary_poses() is None:
+            self.restart()
 
     def decode_actions(
         self, inputs: BimanualChunkInputs, pred_action: torch.Tensor

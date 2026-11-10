@@ -33,7 +33,12 @@ RESET_Q = np.array(
 )
 RESET_EEF_POS = np.array([0.3597, 0.0, 0.4718], np.float32)
 RESET_EEF_QUAT = np.array([0.0, -0.70710677, 0.70710677, 0.0], np.float32)
-QUERY = "declare_stop_on_fault=false&record_denoised=false&max_context_chunks=1&t_shift=12.5"
+# The client runs the chunked schedule: RoboLab pauses the sim during each call,
+# so the robot never runs a chunk while the next one is computed.
+QUERY = (
+    "schedule=chunked&declare_stop_on_fault=false&record_denoised=false"
+    "&max_context_chunks=1&t_shift=12.5"
+)
 
 
 def fake_obs(rng: np.random.Generator) -> dict:
