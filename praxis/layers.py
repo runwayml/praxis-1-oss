@@ -322,6 +322,25 @@ class Attention(nn.Module):
         self.k_norm = RMSNorm(head_dim)
         self.out_proj = nn.Linear(self.num_heads * head_dim, dim)
 
+    def effective_backend(self, device: torch.device | str) -> AttentionBackend:
+        """Use the existing Triton path where Flash cannot run block sparsity."""
+        device = torch.device(device)
+        if self.backend == "flash" and device.type == "cuda":
+            if torch.cuda.get_device_capability(device)[0] == 12:
+                return "triton"
+        return self.backend
+
+    def backend_metadata(self, device: torch.device | str) -> dict[str, str | None]:
+        """Report the requested and actual backend without changing the config."""
+        effective = self.effective_backend(device)
+        return {
+            "requested": self.backend,
+            "effective": effective,
+            "reason": "Flash block sparsity is unsupported on SM120"
+            if effective != self.backend
+            else None,
+        }
+
     def forward(
         self, x: Tensor, rope: Tensor | None, block_mask: BlockMask | None
     ) -> Tensor:
@@ -344,7 +363,9 @@ class Attention(nn.Module):
             block_mask=block_mask,
             scale=None,
             enable_gqa=k.shape[1] != q.shape[1],
-            kernel_options=self._kernel_options,
+            kernel_options=self._kernel_options
+            if self.effective_backend(x.device) == self.backend
+            else None,
         )
         out = out * g
         out = out.permute(0, 2, 1, 3).reshape(b, s, -1)
@@ -763,7 +784,17 @@ class MoEFeedForward(nn.Module):
         if self.routing_hook is not None:
             self.routing_hook(self, logits, top_idx)
         y_shared = self.shared(x_flat)
-        if self.dispatch_chunk_size is not None:
+        if not isinstance(self.routed, RoutedExperts):
+            # Optional inference banks preserve routing and the shared branch.
+            # Their result already includes the routed scaling factor.
+            y_routed = self.routed.routed_forward(
+                x_flat,
+                top_idx,
+                gate,
+                scaling=self.routed_scaling_factor,
+                chunk_size=self.dispatch_chunk_size or max(1, x_flat.shape[0]),
+            )
+        elif self.dispatch_chunk_size is not None:
             # The chunked path applies the scaling factor itself.
             y_routed = self._routed_forward_chunked(x_flat, top_idx, gate)
         else:

@@ -1018,6 +1018,29 @@ def test_boot_checks_the_rig_of_the_checkpoint(
             server_module.build_factory(cfg)
 
 
+@pytest.mark.parametrize("quantized", [False, True])
+def test_build_factory_passes_routed_precision(
+    monkeypatch: pytest.MonkeyPatch, quantized: bool
+) -> None:
+    seen: list[dict] = []
+
+    def pipeline(**kwargs: object) -> FakePipeline:
+        seen.append(kwargs)
+        sampler = kwargs["sampler"]
+        assert isinstance(sampler, SamplerSettings)
+        return FakePipeline(SINGLE_ARM, sampler)
+
+    overrides = ["model.device=cpu"]
+    if quantized:
+        overrides += ["model.routed_precision=nvfp4", "model.nvfp4_cache=cache"]
+    monkeypatch.setattr(server_module, "PraxisPipeline", pipeline)
+    server_module.build_factory(
+        server_module.load_config(ROOT / "configs" / "serve_droid.yaml", overrides)
+    )
+    assert seen[0]["routed_precision"] == ("nvfp4" if quantized else "bf16")
+    assert seen[0]["nvfp4_cache"] == ("cache" if quantized else None)
+
+
 def test_warmup_runs_each_context_depth() -> None:
     from praxis.serve.policy import warmup_obs
 

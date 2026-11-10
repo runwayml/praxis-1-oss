@@ -48,9 +48,86 @@ One policy call gives these outputs:
 The backbone and the action expert share one checkpoint (about 54 GB in
 bfloat16). The autoencoder and the text encoder use their public weights.
 
+## Optional routed NVFP4 inference (experimental)
+
+The `nvfp4` extra adds an inference-only path for SM120 GPUs (RTX 5090,
+RTX PRO 6000 Blackwell). It packs only the routed MoE experts as NVFP4 and runs
+them with FlashInfer grouped GEMMs. Dense layers, shared experts, routers,
+modulation, the action expert, the VAE and the text encoder keep their
+checkpoint dtypes. Router scores and the routed output accumulation retain the
+source FP32 operations. Other GPUs (H100, B200 and older) are refused when the
+model loads; the default bf16 path is unchanged on them.
+
+Enable it with `model.routed_precision: nvfp4` in the config of the policy
+server or of `scripts/run_inference.py` (`--set model.routed_precision=nvfp4`),
+or pass `routed_precision="nvfp4"` to `PraxisPipeline`. The default remains bf16.
+
+**Accuracy.** This option changes the actions, and has not been run in closed
+loop on an SM120 GPU yet. The released checkpoints are bf16 checkpoints, so
+for them NVFP4 is post-training quantization. Earlier checks simulated the
+same 4-bit rounding on H100s with two NVFP4 fine-tunes (quantization-aware training), and the results differ:
+- an NVFP4 fine-tune of `praxis-1-droid` on RoboLab (action CFG 1.0, video CFG 4.0,
+  `t_shift` 12.5): 279/600 with NVFP4, against 287/600 for the same weights in
+  bf16, no clear difference;
+- an NVFP4 fine-tune of `praxis-1-droid-k` on the `hard` simulation suite (action CFG 1.0,
+  video CFG 1.0, `t_shift` 8.0, 2 steps, `max_context_chunks` 3): 138/352 with
+  NVFP4, against 188/352 for `praxis-1-droid-k` in bf16, clearly lower. This compares with
+  the bf16 starting checkpoint, so the extra training is part of the gap. The
+  `praxis-1-droid-k` run here is a later run than the 175/352 of `praxis/sim/EVAL.md`, with
+  the same settings.
+
+Measure the checkpoint you use before you deploy it, for example on the `hard`
+simulation suite:
+
+```bash
+MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard \
+  --checkpoint CKPT --out outputs/eval/bf16
+MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard \
+  --checkpoint CKPT --set model.routed_precision=nvfp4 --out outputs/eval/nvfp4
+python scripts/compare_sim_eval.py outputs/eval/bf16 outputs/eval/nvfp4
+```
+
+**Rounding.** Weights and activations are rounded with the recipe of an NVFP4
+quantization-aware training forward: FP4 E2M1 values in blocks of 16, E4M3
+block scales, and one global scale per expert matrix (weights) and per
+expert's rows in each dispatch chunk (activations), both `amax / 2688`. A
+checkpoint trained with that recipe sees the same rounding at inference.
+
+**Memory.** The routed experts shrink from 51.3 GB to 14.4 GB, and the policy
+from 54.4 GB to 17.5 GB. With the text encoder (4.6 GB) and the VAE (1.4 GB),
+the weights take about 23.5 GB before activations, so a 32 GB RTX 5090 should
+fit (the peak is not measured yet) and a 24 GB GPU does not. The pipeline puts
+the text encoder on the policy's GPU and there is no option yet to keep it
+elsewhere; since each encoded prompt is cached, such an option would cost
+little after the first call of each prompt.
+
+**Speed.** Not yet measured. Measure it with
+`python scripts/benchmark_inference.py --config configs/serve_droid.yaml --set model.routed_precision=nvfp4`;
+the summary records the routed precision and the attention backend in effect.
+
+**Install and first run.** Run `pip install -e '.[nvfp4]'` in the CUDA 13
+environment of "Install". It resolves torch again, so repeat the cuDNN pin
+afterwards (`pip install --no-deps nvidia-cudnn-cu13==9.24.0.43`). The first
+call JIT-compiles FlashInfer's SM120 grouped GEMM with `nvcc` (CUDA 12.8 or
+newer, a few minutes; the server warm-up absorbs it). The first load packs the
+4,352 expert matrices on the CPU, which takes minutes (about 18 with 22
+threads). Set `model.nvfp4_cache` to keep the packed banks (14.4 GB on disk).
+The cache is keyed on the checkpoint, the packing recipe and the TorchAO
+version; a cached load still reads and hashes the bf16 banks.
+
+**On SM120, also with bf16.** FlashAttention-4 block sparsity cannot run on
+SM120, so attention uses the Triton backend of `praxis/layers.py` on that
+device. The text encoder pins the two-stage FLA recurrent kernel on GPUs
+whose supported settings omit three stages. Both change the bits from the
+H100 validation (see "Determinism").
+
+A non-finite value in a routed row makes the global scale of its expert
+non-finite for that dispatch chunk, so every row of that expert in the chunk
+is affected, not only the token's own row.
+
 ## Custom kernels
 
-The folder `praxis/kernels/` holds four custom Triton kernels. They are not
+The native path uses four custom Triton kernels in `praxis/kernels/`. They are not
 PyTorch built-ins. They set the rounding and the summation order of the
 checkpoint, so that praxis gives the same output bits as the original
 implementation. No kernel is necessary for speed.
@@ -76,7 +153,8 @@ The original implementation uses another kernel of the VAE encoder (see
 ## Install
 
 Use Python 3.12 and a CUDA GPU with at least 80 GB of memory (one H100 is
-sufficient). Run all the steps in the root directory of the repository. The
+sufficient). This is for the bf16 default; for SM120 GPUs with less memory, see
+"Optional routed NVFP4 inference". Run all the steps in the root directory of the repository. The
 example is for CUDA 13.0:
 
 ```bash
@@ -109,6 +187,7 @@ The extras of `pyproject.toml`:
 | `video` | imageio, imageio-ffmpeg | mp4 export of `scripts/run_inference.py` |
 | `serve` | the web server, the image decoders and the cloud host client | the policy server (`praxis/serve/README.md`) |
 | `train` | huggingface_hub, av, pyarrow | the fine-tune (`praxis/train/README.md`) |
+| `nvfp4` | FlashInfer, TorchAO, ninja | optional SM120 routed-expert inference |
 | `dev` | pytest, ruff | the tests |
 
 The policy server serves the chunked schedule by default (`schedule: chunked`
@@ -674,6 +753,10 @@ settings by timing in each new process. Some settings change the output
 bits. Thus the text encoder sets one kernel setting for each of these
 kernels: the setting of the validation runs (`FLA_KERNEL_CONFIGS` in
 `praxis/text_encoder.py`).
+
+On SM120 GPUs, attention runs on the Triton backend instead of Flash, and on
+GPUs with less shared memory one text-encoder kernel is pinned to two stages.
+The outputs there are deterministic but differ in bits from the H100 results.
 
 ## Validation
 

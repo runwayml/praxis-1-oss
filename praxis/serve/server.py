@@ -59,10 +59,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
+import torch
 import uvicorn
 import yaml
 from fastapi import FastAPI, WebSocket
 
+from praxis.layers import Attention
 from praxis.model import SamplerSettings
 from praxis.pipeline import PraxisPipeline
 from praxis.serve import params
@@ -326,6 +328,8 @@ def build_factory(cfg: dict) -> PolicyFactory:
         vae_norm_block_c={int(k): int(v) for k, v in block_c.items()}
         if block_c
         else None,
+        routed_precision=str(m.get("routed_precision", "bf16")),
+        nvfp4_cache=m.get("nvfp4_cache"),
         sampler=SamplerSettings.from_config(s),
     )
     if m.get("embodiment") != pipe.embodiment:
@@ -337,12 +341,17 @@ def build_factory(cfg: dict) -> PolicyFactory:
         )
     factory = PolicyFactory(pipe, dict(cfg.get("session") or {}), str(m["checkpoint"]))
     factory({}).close()  # a bad default fails the boot, not each session
+    modules = pipe.policy.modules() if isinstance(pipe.policy, torch.nn.Module) else ()
+    attention = next((a for a in modules if isinstance(a, Attention)), None)
     logger.info(
-        "loaded %s (%s rig), VAE norm BLOCK_C %s, sampler %s",
+        "loaded %s (%s rig), VAE norm BLOCK_C %s, sampler %s, routed experts %s,"
+        " attention %s",
         m["checkpoint"],
         pipe.embodiment,
         pipe.vae.norm_block_c,
         pipe.sampler,
+        getattr(pipe.policy, "routed_quantization", {}).get("format", "bf16"),
+        attention.effective_backend(pipe.device) if attention else None,
     )
     return factory
 

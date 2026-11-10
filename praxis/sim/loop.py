@@ -315,6 +315,8 @@ class ModelPolicy:
             text_encoder=m.text_encoder,
             device=m.device,
             vae_norm_block_c=m.vae_norm_block_c or None,
+            routed_precision=m.routed_precision,
+            nvfp4_cache=m.nvfp4_cache,
             sampler=SamplerSettings(
                 num_steps=s.num_steps,
                 t_shift=s.t_shift,

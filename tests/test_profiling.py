@@ -245,3 +245,11 @@ def test_synthetic_obs_has_the_client_shapes() -> None:
     assert obs["image.wrist"].dtype == np.uint8
     assert obs["robot_state.ee_pose"].shape == (25, 7)
     assert obs["grip"].shape == (25,)
+
+
+def test_environment_reports_the_routed_precision() -> None:
+    bench = _script()
+    pipe = _pipe(1.0)
+    assert bench.environment(pipe)["routed_precision"] == "bf16"
+    pipe.policy.routed_quantization = {"format": "nvfp4"}
+    assert bench.environment(pipe)["routed_precision"] == "nvfp4"
