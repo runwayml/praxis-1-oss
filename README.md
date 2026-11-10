@@ -31,7 +31,7 @@ pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytor
 pip install packaging ninja wheel
 CAUSAL_CONV1D_FORCE_BUILD=TRUE MAX_JOBS=16 \
   pip install --no-cache-dir --no-build-isolation causal-conv1d==1.6.1
-pip install -e ".[kernels,sim]"
+pip install -e packages/praxis-sim -e ".[kernels]" "imageio>=2.30" "imageio-ffmpeg>=0.4"   # praxis and praxis-sim from this checkout
 pip install "flash-attn-4[cu13]==4.0.0b36"
 pip install --no-deps nvidia-cudnn-cu13==9.24.0.43   # after every install that resolves torch
 
