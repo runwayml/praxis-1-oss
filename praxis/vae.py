@@ -965,7 +965,22 @@ class Autoencoder(nn.Module):
 
     @torch.no_grad()
     def decode(self, latent: Tensor) -> Tensor:
-        """Decode a policy latent ``(1, 192, T, h, w)`` to uint8 frames ``(T', 3, H, W)``."""
+        """Decode a policy latent ``(1, 192, T, h, w)`` to uint8 frames ``(T', 3, H, W)``.
+
+        The frames are :meth:`decode_unit` mapped to ``[0, 1]`` and scaled by
+        255, with a truncation to uint8.
+        """
+        video = self.decode_unit(latent)
+        v = video[0].permute(1, 0, 2, 3).float().mul(0.5).add(0.5).clamp(0, 1)
+        return (v * 255).to(torch.uint8)
+
+    @torch.no_grad()
+    def decode_unit(self, latent: Tensor) -> Tensor:
+        """Decode a policy latent ``(1, 192, T, h, w)`` to ``(1, 3, T', H, W)`` in [-1, 1].
+
+        The values are float32. The autoregressive eval rounds them to uint8
+        with ``round((x + 1) * 127.5)``, the rule of its reference rollouts.
+        """
         z = from_policy_latent(latent.to(torch.bfloat16))
         dev_type = z.device.type
         with (
@@ -983,6 +998,4 @@ class Autoencoder(nn.Module):
                     self.decoder(x[:, :, i : i + 1], caches, first_chunk=i == 0)
                 )
             out = unpatchify(torch.cat(outs, dim=2))
-            video = out.float().clamp_(-1, 1)
-        v = video[0].permute(1, 0, 2, 3).float().mul(0.5).add(0.5).clamp(0, 1)
-        return (v * 255).to(torch.uint8)
+            return out.float().clamp_(-1, 1)

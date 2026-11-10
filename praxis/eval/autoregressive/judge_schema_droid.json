@@ -1,0 +1,127 @@
+{
+ "type": "object",
+ "properties": {
+  "robot_moved": {
+   "type": "boolean"
+  },
+  "subtasks": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "properties": {
+     "index": {
+      "type": "integer"
+     },
+     "text": {
+      "type": "string"
+     },
+     "attempted": {
+      "type": "boolean"
+     },
+     "completed": {
+      "type": "boolean"
+     },
+     "evidence": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "index",
+     "text",
+     "attempted",
+     "completed",
+     "evidence"
+    ],
+    "additionalProperties": false
+   }
+  },
+  "overall_success": {
+   "type": "boolean"
+  },
+  "progress": {
+   "type": "number",
+   "description": "fraction of subtasks completed, 0..1"
+  },
+  "physically_plausible": {
+   "type": "boolean"
+  },
+  "visual_quality": {
+   "type": "integer",
+   "description": "1 (unusable) to 5 (clean)"
+  },
+  "failure_mode": {
+   "type": "string",
+   "description": "one of: none, static, wrong_object, wrong_place, dropped, incomplete, hallucination, scene_collapse, other"
+  },
+  "reasoning": {
+   "type": "string"
+  },
+  "target_object": {
+   "type": "string",
+   "description": "target object named by the task"
+  },
+  "target_destination": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "target destination/receptacle named by the task, null if none"
+  },
+  "target_object_acted_on": {
+   "type": "boolean"
+  },
+  "target_destination_used": {
+   "type": "boolean"
+  },
+  "action_correct": {
+   "type": "boolean",
+   "description": "the named action verb was executed as stated (in vs on vs next to vs stacked ...)"
+  },
+  "wrong_object": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "wrong_destination": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "confused_attribute": {
+   "type": "string",
+   "enum": [
+    "colour",
+    "size",
+    "shape",
+    "none",
+    "unknown"
+   ]
+  },
+  "adherence_evidence": {
+   "type": "string",
+   "description": "one or two sentences: what was grasped, where it went, how (in/on/next to)"
+  }
+ },
+ "required": [
+  "robot_moved",
+  "subtasks",
+  "overall_success",
+  "progress",
+  "physically_plausible",
+  "visual_quality",
+  "failure_mode",
+  "reasoning",
+  "target_object",
+  "target_destination",
+  "target_object_acted_on",
+  "target_destination_used",
+  "action_correct",
+  "wrong_object",
+  "wrong_destination",
+  "confused_attribute",
+  "adherence_evidence"
+ ],
+ "additionalProperties": false
+}

@@ -1,0 +1,27 @@
+# Autoregressive prompt-adherence eval: the video-only self-rollout of Praxis-1.
+# Start: python scripts/run_autoregressive_eval.py --config configs/autoregressive_droid.yaml --out OUT
+# The checkpoint of the published DROID results (praxis-1-droid).
+# These settings made every published Praxis-1 result of the eval
+# (praxis/eval/autoregressive/README.md). They are not the serve settings.
+
+model:
+  checkpoint: checkpoints/praxis-1-droid
+  vae_weights: weights/Wan2.2_VAE.pth
+  text_encoder: weights/Qwen3.5-2B
+  device: cuda
+
+sampler:
+  num_steps: 10          # Euler steps per chunk
+  t_shift: 8.0           # flow shift of the timestep grid
+  solver: euler
+  action_steps: null
+  layout: window_joint
+  cfg_scale: 1.0         # the actions are not read
+  cfg_video_scale: 3.0   # text guidance of the video
+  cfg_batched: false
+
+rollout:
+  set: droid
+  chunks: 8              # 21 + 7 x 24 = 189 frames, 12.6 s at 15 fps
+  max_chunks: 4          # window: the anchor and at most 3 clean chunks
+  negative_prompt: "The robot does not move. Static scene, blurry, flickering, objects morphing, duplicated objects."
