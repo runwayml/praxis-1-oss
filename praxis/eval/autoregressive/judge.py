@@ -79,7 +79,8 @@ FONT_SHA256 = "5c1247acef7f2b8522a31742c76d6adcb5569bacc0be7ceaa4dc39dd252ce895"
 #: The ``Source:`` token of the question of each set. The tokens are the
 #: ones of the published requests; they stay as they are so that the
 #: requests stay byte-identical. The camera names, the judge prompt and the
-#: tile sizes come from :data:`praxis.eval.autoregressive.sets.SETS`.
+#: tile sizes come from :data:`praxis.eval.autoregressive.sets.SETS`. The YAM
+#: sets add their tokens when they ship.
 SOURCES: dict[str, str] = {
     "droid": "droid",
 }

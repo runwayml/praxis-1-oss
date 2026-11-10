@@ -61,7 +61,7 @@ repository (34.0 to 34.8 dB). A CRF-18 encode of the real frame alone gives
 37.5 dB.
 
 The Praxis-1 rollout of this repository is `rollout.py`, run by
-`scripts/run_autoregressive_eval.py` with `configs/autoregressive_droid.yaml`:
+`scripts/run_autoregressive_eval.py` with `configs/autoregressive_droid.yaml`.
 
 The rollout needs the install of the main `README.md`, with the
 `flash-attn-4` step of "Get the weights" (or the `triton` backend of the
@@ -150,7 +150,11 @@ not reliable.
 
 The scope of this check:
 
-- The 80 labels are YAM rollouts only, from one labeller.
+- The 80 labels are YAM rollouts only, from one labeller. The YAM sets are
+  not in this release.
+- The DROID set has no human labels. The DROID judge was checked against
+  the earlier judge only, a model-vs-model check: the three fields agree on
+  102 of 104 Praxis-1 rollouts.
 - Full adherence scores the generated video only. It is not validated as a
   predictor of real-robot task success.
 - It is not validated for ranking checkpoints of one model.

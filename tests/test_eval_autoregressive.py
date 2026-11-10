@@ -675,3 +675,88 @@ def test_call_retries_a_server_error_and_falls_back_only_on_a_schema_refusal() -
         "json_schema",
         "json_object",
     ]
+
+
+# ---------------------------------------------------------------------------
+# The set-generic code that no released set reaches yet (the feature section
+# and the per-tile resize of a later bimanual release), on a synthetic set
+# ---------------------------------------------------------------------------
+
+
+def _bimanual_spec() -> sets_mod.SetSpec:
+    return sets_mod.SetSpec(
+        name="synthetic_bimanual",
+        rig="bimanual",
+        views=("top", "left wrist", "right wrist"),
+        judge_views=("top", "left wrist", "right wrist"),
+        tile_wh=(320, 176),
+        praxis_tile_wh=(416, 256),
+        judge="yam",
+        rollouts_sha256="",
+        scenes_sha256="",
+        n_rollouts=1,
+        n_scenes=1,
+    )
+
+
+def test_feature_section_of_a_count_and_a_spatial_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sets_mod.SETS, "synthetic_bimanual", _bimanual_spec())
+    count = {
+        "target_object": "red_cube",
+        "destination": "bowl",
+        "action": "place_in",
+        "feature": "count",
+        "level": "hard",
+        "required_count": 2,
+        "count_mode": "exact",
+        "n_present": 3,
+        "target_instances": ["red_cube_1", "red_cube_2", "red_cube_3"],
+    }
+    spec = J.adherence_spec(count, "synthetic_bimanual")
+    assert spec["required_count"] == 2 and spec["distractors"] == []
+    assert spec["distance_confounded"] is False
+    text = J.feature_text(spec, {})
+    assert "EXACTLY 2 red cube item(s) in/on bowl" in text
+    assert "red_cube_1, red_cube_2, red_cube_3" in text
+    spatial = {
+        "target_object": "cup_left",
+        "destination": "plate",
+        "action": "place_on",
+        "feature": "spatial",
+        "level": "medium",
+        "relation": "left of the bowl",
+        "relation_applies_to": "object",
+    }
+    scene = {
+        "twins": ["cup_left", "cup_right"],
+        "top_center_px": {"cup_left": [100, 120], "cup_right": [300, 118]},
+        "objects": [{"name": "cup_left", "rests_in": "table", "state": None}],
+    }
+    spec = J.adherence_spec(spatial, "synthetic_bimanual")
+    assert spec["distance_confounded"] is True
+    text = J.feature_text(spec, scene)
+    assert "cup_left at [100, 120] (resting table)" in text
+    assert "cup_right at [300, 118]" in text
+    assert "distance-confounded" in text
+    # A set without the feature section keeps the adherence targets only.
+    assert "feature" not in J.adherence_spec(spatial, "droid")
+
+
+def test_judge_resizes_a_native_canvas_per_tile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _bimanual_spec()
+    monkeypatch.setitem(sets_mod.SETS, "synthetic_bimanual", spec)
+    native = synthetic_frames(960, 176, 3)
+    resized = sets_mod.resize_tiles(native[0], spec)
+    assert resized.shape == (256, 1248, 3)
+    want = Image.fromarray(np.ascontiguousarray(native[0][:, 320:640])).resize(
+        (416, 256), Image.Resampling.BICUBIC
+    )
+    assert np.array_equal(resized[:, 416:832], np.asarray(want))
+    out = J.judged_frames(native, 15.0, "synthetic_bimanual")
+    assert np.array_equal(out[0], resized)
+    kept = [np.zeros((256, 1248, 3), np.uint8)] * 189
+    assert J.judged_frames(kept, 15.0, "synthetic_bimanual") is kept
