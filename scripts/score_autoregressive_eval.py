@@ -13,6 +13,8 @@ Usage:
     python scripts/score_autoregressive_eval.py score --set droid \\
         outputs/ar/praxis-1-droid outputs/ar/mine [--cutoff 11.894] [--out summary.json]
 
+``--out`` writes the summary to a file under the current folder.
+
 ``--set-dir`` reads the set from a local copy instead of the pinned
 Hugging Face revision. A run must hold a verdict for every rollout of the
 set, else the score stops. With ``--cutoff`` every fully adherent rollout
@@ -53,6 +55,15 @@ def _run_file(run: Path, rollout_id: str, suffix: str) -> Path:
     return Path(path)
 
 
+def _inside(run: Path, path: Path) -> Path:
+    """Return ``path`` if it resolves inside ``run``, else raise ``ValueError``."""
+    base_real = os.path.realpath(run)
+    target_real = os.path.realpath(path)
+    if os.path.commonpath([base_real, target_real]) != base_real:
+        raise ValueError(f"{path} is outside the run folder {run}")
+    return Path(target_real)
+
+
 def _judge_one(es: sets.EvalSet, run: Path, ro: dict, tts: bool, model: str) -> str:
     mp4 = _run_file(run, ro["id"], ".mp4")
     scene = es.scenes[ro["scene"]]
@@ -62,8 +73,8 @@ def _judge_one(es: sets.EvalSet, run: Path, ro: dict, tts: bool, model: str) -> 
         frames, fps = J.read_video(mp4)
         v = J.call(J.request(ro, scene, es.spec.name, frames, fps, model))
         S.full_adherence(v)  # refuses an answer without the three booleans
-        out.write_text(json.dumps(v, indent=1))
-    v = json.loads(out.read_text())
+        _inside(run, out).write_text(json.dumps(v, indent=1))
+    v = json.loads(_inside(run, out).read_text())
     tts_out = _run_file(run, ro["id"], ".tts.json")
     if tts and S.full_adherence(v) and not tts_out.exists():
         if frames is None:
@@ -72,7 +83,7 @@ def _judge_one(es: sets.EvalSet, run: Path, ro: dict, tts: bool, model: str) -> 
             raise ValueError(f"{mp4} has no frame rate")
         t = J.call(J.tts_request(ro, scene, es.spec.name, frames, fps, model))
         S.success_time(t)  # refuses an answer without a valid success_time_s
-        tts_out.write_text(json.dumps(t, indent=1))
+        _inside(run, tts_out).write_text(json.dumps(t, indent=1))
     return f"{ro['id']}: full adherence {int(S.full_adherence(v))}"
 
 
@@ -127,8 +138,10 @@ def score(args: argparse.Namespace) -> None:
             )
         print(line)
     if args.out:
-        # --out is a path the user gives on the command line; only a folder is refused.
-        dest = Path(os.path.realpath(args.out))
+        # --out is a file under the current folder: no "..", no folder.
+        if ".." in Path(args.out).parts:
+            raise SystemExit(f"--out {args.out}: give a path without '..'")
+        dest = _inside(Path.cwd(), Path(args.out))
         if dest.is_dir():
             raise SystemExit(f"--out {args.out} is a folder; give a file path")
         dest.write_text(json.dumps(out, indent=1))
