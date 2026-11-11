@@ -746,10 +746,16 @@ def test_default_imports_load_no_nvfp4_code():
     subprocess.run([sys.executable, "-c", code], check=True, cwd=root, env=env)
 
 
-# The Triton kernels of praxis/kernels/nvfp4.py run on any CUDA GPU; only the
+# The combine kernel of praxis/kernels/nvfp4.py runs on any CUDA GPU. The
 # grouped GEMMs need a Blackwell GPU, and these tests do not call them.
 cuda_kernels = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="the NVFP4 Triton kernels need a CUDA GPU"
+)
+# The activation quantize kernel packs the FP4 codes with the e2m1x2 convert
+# instruction, which exists from SM100 on: an older GPU cannot compile it.
+sm100_kernels = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10,
+    reason="the NVFP4 quantize kernel needs an SM100 or newer GPU",
 )
 
 FP4_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
@@ -803,7 +809,7 @@ def dispatched_rows(experts, width, top_k, tokens):
     return x, order, rows, sorted_gate, F.pad(offsets, (1, 0))
 
 
-@cuda_kernels
+@sm100_kernels
 @pytest.mark.parametrize("shape", KERNEL_SHAPES)
 def test_activation_quantize_kernel_equals_the_qat_rounding(shape):
     pytest.importorskip("torchao")
@@ -841,7 +847,7 @@ def test_activation_quantize_kernel_equals_the_qat_rounding(shape):
         )
 
 
-@cuda_kernels
+@sm100_kernels
 @pytest.mark.parametrize("projection", ["gate_up", "down"])
 @pytest.mark.parametrize("shape", KERNEL_SHAPES)
 def test_rescale_kernel_equals_torch(shape, projection):
