@@ -11,6 +11,13 @@ camera and two wrist cameras (see [Bimanual rig](#bimanual-rig)).
 For each policy call, the model predicts the next video chunk and the next
 action chunk. The robot then executes the action chunk.
 
+Both checkpoints also have NVFP4 versions, fine-tuned with quantization-aware
+training of the routed experts:
+[`runwayml/praxis-1-droid-nvfp4`](https://huggingface.co/runwayml/praxis-1-droid-nvfp4)
+and [`runwayml/praxis-1-yam-nvfp4`](https://huggingface.co/runwayml/praxis-1-yam-nvfp4)
+(see [Get the weights](#get-the-weights)). A checkpoint for the SO-101 arm is
+coming.
+
 This repository holds the inference code and the instructions to run it. The
 code needs PyTorch and a few small packages. It does not need any other code
 base. `praxis/train/README.md` tells how to fine-tune `praxis-1-base` for
