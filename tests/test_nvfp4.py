@@ -202,6 +202,72 @@ def test_backend_protocol_keeps_router_shared_branch_and_scaling_exact():
     assert layer.expert_bias.dtype == torch.float32
 
 
+def test_backend_can_add_shared_output_after_the_routed_bf16_boundary():
+    layer = next(
+        value for value in tiny_policy().modules() if isinstance(value, MoEFeedForward)
+    ).eval()
+    original = layer.routed
+    x = torch.randn(2, 43, 64).to(torch.bfloat16)
+    observed = []
+
+    class SharedOracle(nn.Module):
+        def routed_forward_with_shared(
+            self, x, top_idx, gate, *, scaling, chunk_size, shared
+        ):
+            observed.append((shared.clone(), scaling, chunk_size))
+            routed = _routed_chunks(
+                x,
+                top_idx,
+                gate,
+                original.gate_up_weight,
+                original.down_weight,
+                scaling,
+                chunk_size,
+            )
+            return routed + shared
+
+        def routed_forward(self, *args, **kwargs):
+            pytest.fail("The shared-output backend used the separate addition path")
+
+    with torch.no_grad():
+        expected = layer(x)
+        expected_shared = layer.shared(x.reshape(-1, x.shape[-1]))
+        layer.routed = SharedOracle()
+        actual = layer(x)
+    assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+    assert torch.equal(observed[0][0], expected_shared)
+    assert observed[0][1:] == (2.5, 40)
+
+
+@pytest.mark.parametrize("kind", ["float32", "noncontiguous", "gradient"])
+def test_shared_output_fallback_preserves_native_addition(monkeypatch, kind):
+    bank = nvfp4.NVFP4RoutedExperts.from_packed(packed_state())
+    x = torch.zeros(2, 128, dtype=torch.bfloat16)
+    routed = torch.randn_like(x)
+    shared = torch.randn_like(x)
+    if kind == "float32":
+        shared = shared.float()
+    elif kind == "noncontiguous":
+        shared = torch.randn(128, 2, dtype=torch.bfloat16).T
+    else:
+        shared.requires_grad_(True)
+    monkeypatch.setattr(bank, "routed_forward", lambda *args, **kwargs: routed)
+    actual = bank.routed_forward_with_shared(
+        x,
+        torch.zeros(2, 1, dtype=torch.int64),
+        torch.ones(2, 1, dtype=torch.bfloat16),
+        scaling=2.5,
+        chunk_size=2,
+        shared=shared,
+    )
+    expected = routed + shared
+    assert actual.dtype == expected.dtype
+    assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+    if kind == "gradient":
+        actual.float().sum().backward()
+        assert torch.equal(shared.grad, torch.ones_like(shared))
+
+
 @pytest.fixture
 def source_checkpoint(tmp_path):
     config = tiny_config()
@@ -385,7 +451,12 @@ def test_pipeline_forwards_precision_options_without_changing_native_loads(
         lambda *a, **kw: (calls.append((a, kw)), SimpleNamespace(config=config))[1],
     )
     monkeypatch.setattr(
-        pipeline.Autoencoder, "from_pretrained", lambda *a, **kw: calls.append((a, kw))
+        pipeline.Autoencoder,
+        "from_pretrained",
+        lambda *a, **kw: (
+            calls.append((a, kw)),
+            SimpleNamespace(enable_fused_decoder=lambda: None),
+        )[1],
     )
     monkeypatch.setattr(pipeline, "TextEncoder", lambda *a, **kw: calls.append((a, kw)))
     options = (
@@ -399,10 +470,16 @@ def test_pipeline_forwards_precision_options_without_changing_native_loads(
     pipeline.PraxisPipeline("checkpoint", "vae", "text", device="cpu", **options)
     assert calls[0][1] == dict(
         device=torch.device("cpu"),
+        # None keeps the checkpoint's attention backend.
+        decoder_attention_backend=None,
+        encoder_attention_backend=None,
         routed_precision="nvfp4" if quantized else "bf16",
         nvfp4_cache=Path("cache") if quantized else None,
     )
-    assert calls[1] == (("vae",), dict(device=torch.device("cpu"), norm_block_c=None))
+    assert calls[1] == (
+        ("vae",),
+        dict(device=torch.device("cpu"), norm_block_c=None, decoder_impl="reference"),
+    )
     assert calls[2] == (("text",), dict(device=torch.device("cpu")))
 
 
@@ -524,6 +601,57 @@ def test_activation_global_scales_ignore_zero_padding_rows():
     )
 
 
+def test_activation_global_scale_clamp_rounds_to_bf16_before_float32_multiply():
+    pytest.importorskip("triton")
+    from praxis.kernels.nvfp4 import expert_global_scales
+
+    rows = torch.zeros(3, 128, dtype=torch.bfloat16)
+    rows[0] = -0.0
+    csr = torch.tensor([0, 0, 2, 3], dtype=torch.int32)
+    expected = torch.tensor(1e-12, dtype=torch.bfloat16).float() * (1.0 / 2688.0)
+    actual = expert_global_scales(rows, csr)
+    assert torch.equal(actual.view(torch.int32), expected.expand(3).view(torch.int32))
+
+
+@pytest.mark.parametrize("gather", [False, True])
+def test_activation_global_scales_assign_trailing_rows_to_last_expert(gather):
+    pytest.importorskip("triton")
+    from praxis.kernels.nvfp4 import expert_global_scales
+
+    rows = torch.tensor([2, 4, 8, 16, 32, 64], dtype=torch.bfloat16)
+    rows = rows[:, None].expand(-1, 128).contiguous()
+    if gather:
+        indices = torch.tensor([1, 0, 5, -2])
+        csr = torch.tensor([0, 0, 2, 2], dtype=torch.int32)
+        maxima = torch.tensor([0, 4, 64], dtype=torch.bfloat16)
+    else:
+        indices = None
+        csr = torch.tensor([0, 1, 2, 2], dtype=torch.int32)
+        maxima = torch.tensor([2, 4, 64], dtype=torch.bfloat16)
+    expected = maxima.clamp_min(1e-12).float() * (1.0 / 2688.0)
+    assert torch.equal(expert_global_scales(rows, csr, indices), expected)
+
+
+@pytest.mark.parametrize("invalid", ["shape", "dtype", "device"])
+def test_precomputed_activation_globals_are_validated_before_kernel_launch(invalid):
+    pytest.importorskip("triton")
+    from praxis.kernels.nvfp4 import quantize_activations
+
+    x = torch.zeros(2, 128, dtype=torch.bfloat16)
+    csr = torch.tensor([0, 2], dtype=torch.int32)
+    scales = torch.ones(1)
+    if invalid == "shape":
+        scales = torch.ones(2)
+    elif invalid == "dtype":
+        scales = scales.bfloat16()
+    else:
+        scales = scales.to("meta")
+    with pytest.raises(ValueError, match="FP32 activation global"):
+        quantize_activations(
+            x, csr, padded_csr=csr, padded_rows=2, activation_globals=scales
+        )
+
+
 class _StopAfterPipeline(Exception):
     pass
 
@@ -554,7 +682,27 @@ def test_run_inference_passes_routed_precision(monkeypatch, quantized):
     assert seen[0]["nvfp4_cache"] == ("cache" if quantized else None)
 
 
-def test_nvfp4_refuses_a_gpu_without_sm120_before_loading(monkeypatch):
+@pytest.mark.parametrize(
+    ("capability", "backend"),
+    [
+        ((10, 0), "flashinfer_sm100_contiguous_nvfp4"),
+        ((10, 3), "flashinfer_sm100_contiguous_nvfp4"),
+        ((12, 0), "flashinfer_sm120_grouped_nvfp4"),
+    ],
+)
+def test_nvfp4_selects_native_backend_for_device(monkeypatch, capability, backend):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: capability)
+    assert nvfp4.backend_for_device("cuda:0") == backend
+
+
+@pytest.mark.parametrize("capability", [(8, 0), (9, 0)])
+def test_hopper_nvfp4_rejected_before_checkpoint_reads(monkeypatch, capability):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: capability)
+    with pytest.raises(RuntimeError, match=r"bf16.*H100"):
+        loading.load_routed_nvfp4(nn.Module(), "does-not-exist", device="cuda")
+
+
+def test_nvfp4_refuses_a_gpu_without_nvfp4_before_loading(monkeypatch):
     from praxis.quantization import loading
 
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _d=None: (9, 0))
@@ -566,16 +714,19 @@ def test_nvfp4_refuses_a_gpu_without_sm120_before_loading(monkeypatch):
     )
     monkeypatch.setattr(PraxisPolicy, "from_config", classmethod(lambda cls, _c: cls))
     monkeypatch.setattr("praxis.model.load_config", lambda _p: {})
-    with pytest.raises(RuntimeError, match="SM120"):
+    with pytest.raises(RuntimeError, match="SM110, or SM120"):
         PraxisPolicy.from_pretrained("unused", device="cuda", routed_precision="nvfp4")
 
 
-def test_nvfp4_device_check_needs_flashinfer_on_sm120(monkeypatch):
+@pytest.mark.parametrize(
+    ("capability", "extra"), [((10, 0), "nvfp4"), ((11, 0), "thor"), ((12, 0), "nvfp4")]
+)
+def test_nvfp4_device_check_needs_the_backend_package(monkeypatch, capability, extra):
     from praxis.quantization import loading
 
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _d=None: (12, 0))
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _d=None: capability)
     monkeypatch.setattr(loading.importlib.util, "find_spec", lambda _name: None)
-    with pytest.raises(ImportError, match="nvfp4"):
+    with pytest.raises(ImportError, match=rf"\[{extra}\]"):
         loading.check_nvfp4_device("cuda")
     loading.check_nvfp4_device("cpu")
 
@@ -596,7 +747,7 @@ def test_default_imports_load_no_nvfp4_code():
 
 
 # The Triton kernels of praxis/kernels/nvfp4.py run on any CUDA GPU; only the
-# grouped GEMM needs SM120, and these tests do not call it.
+# grouped GEMMs need a Blackwell GPU, and these tests do not call them.
 cuda_kernels = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="the NVFP4 Triton kernels need a CUDA GPU"
 )

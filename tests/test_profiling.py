@@ -78,6 +78,38 @@ def test_each_timed_stage_is_an_nvtx_range() -> None:
     assert ranges == ["expert"]
 
 
+@pytest.mark.parametrize("direct", [False, True])
+def test_instrument_times_direct_towers_without_double_counting(direct: bool) -> None:
+    encoder = SimpleNamespace(forward_chunk_causal=lambda x: x + 1)
+    decoder = SimpleNamespace(forward_chunk_causal=lambda x: x * 2)
+
+    def forward(x):
+        return decoder.forward_chunk_causal(encoder.forward_chunk_causal(x))
+
+    backbone = SimpleNamespace(
+        encoder=encoder, decoder=decoder, forward_chunk_causal=forward
+    )
+    pipe = SimpleNamespace(
+        policy=SimpleNamespace(backbone=backbone),
+        text=SimpleNamespace(encode=lambda x: x),
+        vae=SimpleNamespace(encode=lambda x: x),
+    )
+    original_encoder = encoder.forward_chunk_causal
+    original_decoder = decoder.forward_chunk_causal
+    timer = profiling.StageTimer(sync=lambda: None)
+    with profiling.instrument(pipe, timer), timer.call() as record:
+        if direct:
+            result = decoder.forward_chunk_causal(encoder.forward_chunk_causal(3))
+        else:
+            result = backbone.forward_chunk_causal(3)
+    assert result == 8
+    assert record["backbone_calls"] == (2 if direct else 1)
+    assert record["total"] >= record["backbone"] > 0
+    assert encoder.forward_chunk_causal is original_encoder
+    assert decoder.forward_chunk_causal is original_decoder
+    assert backbone.forward_chunk_causal is forward
+
+
 def _pipe(cfg_video_scale: float) -> PraxisPipeline:
     """A pipeline with the real session and sampler, and stub networks."""
     calls = Calls()
@@ -153,7 +185,7 @@ def test_benchmark_times_each_stage_of_the_real_session(
         # may skip the expert of a pass whose actions it does not need).
         assert r["backbone_calls"] == passes + 1
         assert 2 <= r["expert_calls"] <= r["backbone_calls"]
-        assert r["vae_encode_calls"] == (1 if r["depth"] == 0 else 3)
+        assert r["vae_encode_calls"] == 1
         assert r["total"] >= r["backbone"] + r["expert"] + r["vae_encode"]
     # The plain calls have no stage times.
     assert all(set(r) >= {"total"} and "backbone" not in r for r in records[6:])
@@ -207,6 +239,38 @@ def test_benchmark_skips_the_last_video_decoder_as_the_server(
     assert bench.settings(pipe, session)["skip_video_decoder"] is skip
 
 
+def test_default_sessions_match_unoptimized_outputs(
+    stub_expert: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from praxis import layers
+
+    bench = _script()
+    pipe = _pipe(4.0)
+    default_session = pipe.session()
+    assert default_session.ctx_cache and default_session.overlap_expert
+    assert default_session.state.dedup_encodes
+    # Keep the last video decoder, so that the predicted videos compare too.
+    session = {"max_context_chunks": 1, "exec_horizon": 24, "skip_video_decoder": "off"}
+    optimized = tmp_path / "optimized"
+    reference = tmp_path / "reference"
+    bench.run(pipe, session, 2, 3, 3, save_outputs=optimized)
+    # Restore the module defaults after exercising the benchmark opt-out.
+    monkeypatch.setattr(layers, "FUSED_ROPE", layers.FUSED_ROPE)
+    monkeypatch.setattr(layers, "CACHE_DEVICE_TABLES", layers.CACHE_DEVICE_TABLES)
+    options = bench.configure_optimizations(pipe, False)
+    assert not any(options.values())
+    bench.run(pipe, session, 2, 3, 3, save_outputs=reference)
+    for path in sorted(optimized.glob("*.pt")):
+        actual = torch.load(path, weights_only=False)
+        expected = torch.load(reference / path.name, weights_only=False)
+        for key in ("actions", "video"):
+            assert torch.equal(actual[key], expected[key])
+        serialize = lambda x: json.dumps(
+            x, sort_keys=True, default=lambda a: a.tolist()
+        )
+        assert serialize(actual["commands"]) == serialize(expected["commands"])
+
+
 def test_the_trace_session_is_extra_and_not_counted(
     stub_expert: None, tmp_path: Path
 ) -> None:
@@ -229,9 +293,39 @@ def test_the_trace_session_is_extra_and_not_counted(
     assert "backbone" in (tmp_path / "kernels.txt").read_text()
 
 
-def test_benchmark_reads_the_serve_config() -> None:
+def test_total_timing_bypasses_stage_instrumentation(
+    stub_expert: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench = _script()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("total timing must not wrap the model stages")
+
+    monkeypatch.setattr(bench, "instrument", forbidden)
+    records = bench.run(
+        _pipe(4.0),
+        {"max_context_chunks": 1, "exec_horizon": 24},
+        sessions=2,
+        calls=2,
+        warmup_calls=2,
+        stage_timing=False,
+    )
+    assert [row["depth"] for row in records] == [0, 1, 0, 1]
+    assert all(row["total"] > 0 and not row["stage_timing"] for row in records)
+    assert all(
+        row.get("backbone_calls", 0) == row.get("expert_calls", 0) == 0
+        for row in records
+    )
+    assert set(bench.summary(records)["later"]) == {"total"}
+
+
+@pytest.mark.parametrize("decoder_backend", ["flash", "cudnn"])
+def test_benchmark_reads_the_serve_config(decoder_backend: str) -> None:
     bench = _script()
     cfg = bench.load_config(str(ROOT / "configs" / "serve_droid.yaml"), [])
+    cfg["model"].update(
+        decoder_attention_backend=decoder_backend, encoder_attention_backend="flash"
+    )
     calls: list[dict] = []
 
     class Pipe:
@@ -246,7 +340,9 @@ def test_benchmark_reads_the_serve_config() -> None:
         bench.build_pipeline.__globals__["PraxisPipeline"] = original
     (kw,) = calls
     assert kw["sampler"] == SamplerSettings(**cfg["sampler"])
-    assert kw["checkpoint"] == "checkpoints/praxis-1-droid"
+    assert kw["checkpoint"] == cfg["model"]["checkpoint"]
+    assert kw["decoder_attention_backend"] == decoder_backend
+    assert kw["encoder_attention_backend"] == "flash"
 
 
 def test_benchmark_refuses_a_bimanual_checkpoint_before_the_load(
@@ -288,3 +384,23 @@ def test_environment_reports_the_routed_precision() -> None:
     assert bench.environment(pipe)["routed_precision"] == "bf16"
     pipe.policy.routed_quantization = {"format": "nvfp4"}
     assert bench.environment(pipe)["routed_precision"] == "nvfp4"
+
+
+def test_instrument_counts_paired_encoder_as_one_backbone_stage() -> None:
+    encoder = SimpleNamespace(forward_chunk_causal=lambda x: x + 1)
+    encoder.forward_chunk_causal_pair = lambda xs: [
+        encoder.forward_chunk_causal(x) for x in xs
+    ]
+    pair = encoder.forward_chunk_causal_pair
+    backbone = SimpleNamespace(encoder=encoder, forward_chunk_causal=lambda x: x)
+    pipe = SimpleNamespace(
+        policy=SimpleNamespace(backbone=backbone),
+        text=SimpleNamespace(encode=lambda x: x),
+        vae=SimpleNamespace(encode=lambda x: x),
+    )
+    timer = profiling.StageTimer(sync=lambda: None)
+    with profiling.instrument(pipe, timer), timer.call() as record:
+        assert encoder.forward_chunk_causal_pair([2, 3]) == [3, 4]
+    assert record["backbone_calls"] == 1
+    assert record["backbone"] > 0
+    assert encoder.forward_chunk_causal_pair is pair

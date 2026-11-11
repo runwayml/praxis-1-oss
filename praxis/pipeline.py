@@ -15,6 +15,7 @@ bimanual checkpoint (``"embodiment": "bimanual"``) on the bimanual rig
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,20 +65,47 @@ class PraxisPipeline:
         device: str | torch.device = "cuda",
         sampler: SamplerSettings | None = None,
         vae_norm_block_c: dict[int, int] | None = None,
+        vae_decoder_impl: str | None = None,
+        decoder_attention_backend: str | None = None,
+        encoder_attention_backend: str | None = None,
         *,
         routed_precision: str = "bf16",
         nvfp4_cache: str | Path | None = None,
+        action_cuda_graphs: bool = True,
+        nvfp4_moe_cuda_graphs: bool = True,
     ) -> None:
         self.device = torch.device(device)
+        decoder_attention_backend = decoder_attention_backend or os.environ.get(
+            "PRAXIS_DECODER_ATTENTION_BACKEND"
+        )
+        encoder_attention_backend = encoder_attention_backend or os.environ.get(
+            "PRAXIS_ENCODER_ATTENTION_BACKEND"
+        )
         self.policy = PraxisPolicy.from_pretrained(
             checkpoint,
             device=self.device,
+            decoder_attention_backend=decoder_attention_backend,
+            encoder_attention_backend=encoder_attention_backend,
             routed_precision=routed_precision,
             nvfp4_cache=nvfp4_cache,
         )
-        self.vae = Autoencoder.from_pretrained(
-            vae_weights, device=self.device, norm_block_c=vae_norm_block_c
+        decoder_impl = vae_decoder_impl or os.environ.get(
+            "PRAXIS_VAE_DECODER_IMPL", "fused"
         )
+        if decoder_impl not in ("reference", "fused"):
+            raise ValueError(f"Unknown VAE decoder implementation: {decoder_impl}")
+        self.vae = Autoencoder.from_pretrained(
+            vae_weights,
+            device=self.device,
+            norm_block_c=vae_norm_block_c,
+            decoder_impl="reference",
+        )
+        # The fused decoder runs CUDA kernels; other devices keep the reference.
+        if decoder_impl == "fused" and self.device.type == "cuda":
+            self.vae.enable_fused_decoder()
+        else:
+            decoder_impl = "reference"
+        self.vae_decoder_impl = decoder_impl
         self.text = TextEncoder(text_encoder, device=self.device)
         self.sampler = sampler or SamplerSettings()
         # The loader refuses every config but the single-arm and bimanual ones.
@@ -91,11 +119,53 @@ class PraxisPipeline:
             proprio_std=np.asarray(norm["proprio_std"], dtype=np.float32),
         )
         self._text_cache: dict[str, Tensor] = {}
+        if (
+            action_cuda_graphs
+            and self.device.type == "cuda"
+            and self.variant.backbone_layout == "chunk_causal"
+            and self.sampler.layout == "window_joint"
+        ):
+            self.enable_action_cuda_graphs()
+        if (
+            nvfp4_moe_cuda_graphs
+            and routed_precision == "nvfp4"
+            and self.device.type == "cuda"
+            and torch.cuda.get_device_capability(self.device) == (10, 0)
+            and self.variant.backbone_layout == "chunk_causal"
+            and self.sampler.layout == "window_joint"
+        ):
+            self.enable_nvfp4_moe_cuda_graphs()
+
+    def enable_nvfp4_moe_cuda_graphs(self, **kwargs):
+        """Capture frozen SM100 NVFP4 MoEs; validate each shape on first use."""
+        from praxis.cuda_graphs import enable_nvfp4_moe_cuda_graphs
+
+        return enable_nvfp4_moe_cuda_graphs(self, **kwargs)
 
     def encode_text(self, prompt: str) -> Tensor:
         if prompt not in self._text_cache:
             self._text_cache[prompt] = self.text.encode([prompt])[0]
         return self._text_cache[prompt]
+
+    def enable_cuda_graphs(self, **kwargs):
+        """Capture text and action-expert stages; enable before creating sessions.
+
+        See :func:`praxis.cuda_graphs.enable_cuda_graphs`. CPU preprocessing,
+        tokenization, command formatting, DiT and VAE stay outside capture.
+        """
+        from praxis.cuda_graphs import enable_cuda_graphs
+
+        return enable_cuda_graphs(self, **kwargs)
+
+    def enable_action_cuda_graphs(self, **kwargs):
+        """Capture the window-joint action expert before opening sessions.
+
+        First use warms and validates each shape. Call the returned pool's
+        ``freeze()`` after warming all intended context depths and prompts.
+        """
+        from praxis.cuda_graphs import enable_action_cuda_graphs
+
+        return enable_action_cuda_graphs(self, **kwargs)
 
     def encode_uncond_text(self) -> Tensor:
         """Return the encoded blank caption of the unguided pass."""
@@ -184,6 +254,9 @@ class EncodeMemo:
 class Session:
     """The context state of one robot episode."""
 
+    # Paired CFG default, also for sessions built without __init__.
+    pair_cfg = True
+
     def __init__(
         self,
         pipeline: PraxisPipeline,
@@ -199,6 +272,27 @@ class Session:
         self.pipe = pipeline
         self.sampler = sampler or pipeline.sampler
         self.skip_last_video = bool(skip_last_video)
+        if (
+            hasattr(pipeline, "action_cuda_graphs")
+            and self.sampler.layout != "window_joint"
+        ):
+            raise ValueError("Action CUDA Graph sessions require window_joint")
+        # True: the window_joint encoder computes the context tokens once per
+        # call and later Euler steps reuse them (exact bits, see
+        # PraxisPolicy.sample_window_joint). NVFP4 cannot reuse context rows:
+        # its expert activation scales also depend on the current query rows.
+        self.ctx_cache = getattr(pipeline.policy, "supports_context_cache", True)
+        # True: guided window_joint runs the action experts on a side stream
+        # beside the decoder (exact bits). Other layouts ignore it.
+        self.overlap_expert = True
+        # True (with overlap_expert): the guided and unguided
+        # encoder passes run in lockstep and share each expert-weight read
+        # (exact bits). Other layouts ignore it.
+        self.pair_cfg = True
+        if hasattr(pipeline, "cuda_graphs") and (
+            self.sampler.layout != "chunk" or self.sampler.guided
+        ):
+            raise ValueError("CUDA Graph sessions require the unguided chunk sampler")
         self.seed = int(seed)
         variant = model_variant(pipeline.policy.config)
         config = pipeline.policy.config
@@ -377,6 +471,9 @@ class Session:
             # Always the session's value, so that False overrides the policy
             # flag. The call with False gives the bits of the stock call.
             skip_last_video=bool(getattr(self, "skip_last_video", False)),
+            ctx_cache=self.ctx_cache,
+            overlap_expert=self.overlap_expert,
+            **({"pair_cfg": True} if self.pair_cfg else {}),
         )
         return video, actions, text
 

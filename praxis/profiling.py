@@ -113,21 +113,26 @@ class StageTimer:
         self.nvtx = nvtx
         self.calls: list[dict[str, float]] = []
         self._current: dict[str, float] | None = None
+        self._active_stages: set[str] = set()
 
     def wrap(self, stage: str, fn: F) -> F:
         """Return ``fn`` with its time added to ``stage`` of the current call."""
 
         def timed(*args: object, **kwargs: object) -> object:
-            if self._current is None:
+            if self._current is None or stage in self._active_stages:
                 return fn(*args, **kwargs)
-            self.sync()
-            t0 = time.monotonic()
-            with torch.profiler.record_function(stage), self.nvtx(stage):
-                out = fn(*args, **kwargs)
-            self.sync()
-            self._current[stage] += (time.monotonic() - t0) * 1e3
-            self._current[f"{stage}_calls"] += 1
-            return out
+            self._active_stages.add(stage)
+            try:
+                self.sync()
+                t0 = time.monotonic()
+                with torch.profiler.record_function(stage), self.nvtx(stage):
+                    out = fn(*args, **kwargs)
+                self.sync()
+                self._current[stage] += (time.monotonic() - t0) * 1e3
+                self._current[f"{stage}_calls"] += 1
+                return out
+            finally:
+                self._active_stages.remove(stage)
 
         return timed  # ty: ignore[invalid-return-type]
 
@@ -163,6 +168,14 @@ def instrument(pipe: PraxisPipeline, timer: StageTimer) -> Iterator[StageTimer]:
         (pipe.vae, "encode", "vae_encode"),
         (pipe.policy.backbone, "forward_chunk_causal", "backbone"),
     )
+    # Expert overlap calls the towers directly. The stage guard prevents
+    # counting them twice when the ordinary backbone entry point calls them.
+    for name in ("encoder", "decoder"):
+        tower = getattr(pipe.policy.backbone, name, None)
+        if tower is not None and hasattr(tower, "forward_chunk_causal"):
+            targets += ((tower, "forward_chunk_causal", "backbone"),)
+        if tower is not None and hasattr(tower, "forward_chunk_causal_pair"):
+            targets += ((tower, "forward_chunk_causal_pair", "backbone"),)
     # An instance attribute shadows a method until the context closes. An
     # attribute that was an instance attribute already gets its value back.
     saved = [vars(obj).get(name) for obj, name, _stage in targets]

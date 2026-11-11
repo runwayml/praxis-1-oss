@@ -22,8 +22,12 @@ The encoder has two paths:
 * ``encode_eager`` is plain PyTorch. It needs no Triton. Its output is not
   bitwise equal to the fused path. The rounding differs.
 
-The decoder runs plain PyTorch. Its output is bitwise equal to the decoder
-of the original implementation.
+On a CUDA device, ``Autoencoder.from_pretrained`` (and the pipeline)
+default to the fused decoder: fused RMSNorm/SiLU, implicit spatial padding and
+streamed RGB output with FP16 convolutions. Other devices, and an
+``Autoencoder`` built directly, use the original plain PyTorch decoder
+(``decoder_impl="reference"``); fused decoding requires numerical validation
+rather than bitwise reference parity.
 """
 
 from __future__ import annotations
@@ -38,6 +42,33 @@ from praxis.kernels import vae_encoder_triton as K
 
 Z_DIM = 48
 CACHE_T = 2
+
+# True: the fused encoder keeps its causal caches as views of the
+# halo and output buffers they come from instead of clones. Those buffers are
+# never written after the cache is taken, so the values are the same (no
+# arithmetic changes); this removes one device copy per cache per chunk.
+# Default on.
+ENCODER_CACHE_VIEWS = True
+
+# True: the fused encoder hands its convolutions float16 copies
+# of the bf16 weights and biases, made once, instead of letting float16 autocast
+# cast them on every call; the input chunk buffer is built in float16 directly.
+# The casts are the same ``.to(float16)`` autocast applies, so values are equal.
+# Default on.
+VAE_HOIST_CASTS = True
+
+# True: in a down block, the residual sum ``x + h`` of a residual block that feeds
+# another residual block is not computed by itself; the next block's first norm
+# computes it (K.add_rmsnorm_silu: the same fp16 add, stored once, then the norm
+# of ``_rmsnorm_silu_kernel``). Default on.
+VAE_FUSED_ADD_NORM = True
+
+
+def _keep(t: Tensor) -> Tensor:
+    """A fused-encoder cache entry: ``t`` itself (ENCODER_CACHE_VIEWS) or a clone."""
+    return t if ENCODER_CACHE_VIEWS else t.clone()
+
+
 CL3D = torch.channels_last_3d
 
 # Latent normalisation constants of the Wan2.2 VAE.
@@ -72,8 +103,11 @@ class CausalConv3d(nn.Conv3d):
         pt, ph, pw = self.padding  # ty: ignore[not-iterable]
         self._pad = (pw, pw, ph, ph, 2 * pt, 0)
         self.padding = (0, 0, 0)
+        self._decoder_adapter = None
 
     def forward(self, x: Tensor, cache: Tensor | None = None) -> Tensor:
+        if self._decoder_adapter is not None:
+            return self._decoder_adapter(self, x, cache)
         pad = list(self._pad)
         if cache is not None and pad[4] > 0:
             x = torch.cat([cache.to(x.device), x], dim=2)
@@ -123,6 +157,11 @@ def _conv_with_cache(conv: CausalConv3d, x: Tensor, caches: Caches) -> Tensor:
     i = caches.next_index()
     old = caches.items[i]
     old_t = old if isinstance(old, Tensor) else None
+    adapter = conv._decoder_adapter
+    if getattr(adapter, "fuse_cache_input", False) and adapter.supports(x, old_t):
+        out, new = adapter.with_cache(conv, x, old_t)
+        caches.items[i] = new
+        return out
     new = _time_cache(x, old_t)
     out = conv(x, old_t)
     caches.items[i] = new
@@ -500,8 +539,46 @@ class _FusedNormSiLU:
             y[:, :, :CACHE_T].zero_()
         else:
             y[:, :, :CACHE_T].copy_(cache)
-        K.rmsnorm_silu(x, y[:, :, CACHE_T:], self.gamma, self.sqrt_c, self.block_c)
+        # Pass the complete halo allocation to the mutating Triton kernel.
+        # Functionalizing a write through its body view can otherwise shrink
+        # the allocation while a generated clone still reads the full storage.
+        K.rmsnorm_silu(
+            x, y, self.gamma, self.sqrt_c, self.block_c, output_t_offset=CACHE_T
+        )
         return y
+
+    def add_halo(
+        self, a: Tensor, b: Tensor, cache: Tensor | None
+    ) -> tuple[Tensor, Tensor] | None:
+        """``(a + b, self(a + b, cache, halo=True))`` from one kernel, or None if
+        ``a`` and ``b`` are not channels-last tensors of one shape and dtype
+        (VAE_FUSED_ADD_NORM)."""
+        if not (
+            a.shape == b.shape
+            and a.dtype == b.dtype
+            and a.is_contiguous(memory_format=CL3D)
+            and b.is_contiguous(memory_format=CL3D)
+            and a.stride() == b.stride()
+        ):
+            return None
+        bsz, c, t, h, w = a.shape
+        s = torch.empty_like(a)
+        if s.stride() != a.stride():
+            return None
+        y = torch.empty(
+            (bsz, c, t + CACHE_T, h, w),
+            dtype=a.dtype,
+            device=a.device,
+            memory_format=CL3D,
+        )
+        if cache is None:
+            y[:, :, :CACHE_T].zero_()
+        else:
+            y[:, :, :CACHE_T].copy_(cache)
+        K.add_rmsnorm_silu(
+            a, b, s, y, self.gamma, self.sqrt_c, self.block_c, output_t_offset=CACHE_T
+        )
+        return s, y
 
 
 def _conv_cl(
@@ -578,6 +655,25 @@ class FusedEncoder:
                     conv2d.weight.detach().unsqueeze(2).contiguous(memory_format=CL3D)
                 )
 
+    def _h(self, t: Tensor | None) -> Tensor | None:
+        """``t`` as float16 under float16 autocast (cached per tensor), else
+        ``t`` (VAE_HOIST_CASTS)."""
+        if (
+            t is None
+            or not VAE_HOIST_CASTS
+            or t.dtype == torch.float16
+            or not t.is_floating_point()
+            or not torch.is_autocast_enabled("cuda")
+            or torch.get_autocast_dtype("cuda") != torch.float16
+        ):
+            return t
+        cache = self.__dict__.setdefault("_half", {})
+        hit = cache.get(id(t))
+        if hit is None or hit[0] is not t:
+            hit = (t, t.to(torch.float16))
+            cache[id(t)] = hit
+        return hit[1]
+
     def _conv(
         self, conv: CausalConv3d, x: Tensor, cache: Tensor | None = None
     ) -> Tensor:
@@ -589,8 +685,8 @@ class FusedEncoder:
             x = F.pad(x, (0, 0, 0, 0, t_pad, 0))
         return F.conv3d(
             x,
-            self.weights[id(conv)],
-            conv.bias,
+            self._h(self.weights[id(conv)]),
+            self._h(conv.bias),
             conv.stride,
             (0, conv._pad[2], conv._pad[0]),
             conv.dilation,
@@ -601,8 +697,8 @@ class FusedEncoder:
         """Convolve a halo buffer whose first frames hold the causal context."""
         return F.conv3d(
             buf,
-            self.weights[id(conv)],
-            conv.bias,
+            self._h(self.weights[id(conv)]),
+            self._h(conv.bias),
             conv.stride,
             (0, conv._pad[2], conv._pad[0]),
             conv.dilation,
@@ -610,23 +706,65 @@ class FusedEncoder:
         )
 
     def _residual(
-        self, rb: ResidualBlock, x: Tensor, caches: Caches, prepad: bool
-    ) -> Tensor:
+        self,
+        rb: ResidualBlock,
+        x: Tensor | tuple[Tensor, Tensor],
+        caches: Caches,
+        prepad: bool,
+        defer: bool = False,
+    ) -> Tensor | tuple[Tensor, Tensor]:
+        """``rb(x)``. ``x`` may be a pair ``(a, b)`` whose sum is the input; with
+        ``defer`` (and no ``prepad``) the block returns its pair ``(x, h)``
+        (VAE_FUSED_ADD_NORM). Without either, the ordinary operations."""
         seq = rb.residual
-        h = (
-            rb.shortcut(x)
-            if isinstance(rb.shortcut, nn.Identity)
-            else self._conv(rb.shortcut, x)
-        )
-        i = caches.next_index()
-        y = self.norms[id(seq[0])](x, caches.items[i], halo=True)  # ty: ignore[invalid-argument-type]
-        caches.items[i] = y[:, :, -CACHE_T:].clone()
+        if isinstance(x, tuple):
+            i = caches.next_index()
+            r = self.norms[id(seq[0])].add_halo(
+                x[0],
+                x[1],
+                caches.items[i],  # ty: ignore[invalid-argument-type]
+            )
+            if r is None:
+                x = x[0] + x[1]
+                y = None
+            else:
+                x, y = r
+            h = (
+                rb.shortcut(x)
+                if isinstance(rb.shortcut, nn.Identity)
+                else self._conv(rb.shortcut, x)
+            )
+            if y is None:
+                y = self.norms[id(seq[0])](
+                    x,
+                    caches.items[i],
+                    halo=True,  # ty: ignore[invalid-argument-type]
+                )
+        else:
+            h = (
+                rb.shortcut(x)
+                if isinstance(rb.shortcut, nn.Identity)
+                else self._conv(rb.shortcut, x)
+            )
+            i = caches.next_index()
+            y = self.norms[id(seq[0])](
+                x,
+                caches.items[i],
+                halo=True,  # ty: ignore[invalid-argument-type]
+            )
+        caches.items[i] = _keep(y[:, :, -CACHE_T:])
         x = self._conv_halo(seq[2], y)
         i = caches.next_index()
-        y = self.norms[id(seq[3])](x, caches.items[i], halo=True)  # ty: ignore[invalid-argument-type]
-        caches.items[i] = y[:, :, -CACHE_T:].clone()
+        y = self.norms[id(seq[3])](
+            x,
+            caches.items[i],
+            halo=True,  # ty: ignore[invalid-argument-type]
+        )
+        caches.items[i] = _keep(y[:, :, -CACHE_T:])
         x = self._conv_halo(seq[6], y)
-        if not prepad:
+        if defer and not prepad and not torch.compiler.is_compiling():
+            return x, h
+        if not prepad or torch.compiler.is_compiling():
             return x + h
         # Write the sum into a buffer with a zero right and bottom ring. The
         # next downsampling convolution reads the buffer without F.pad.
@@ -645,17 +783,27 @@ class FusedEncoder:
         return out
 
     def _resample(self, rs: Resample, x: Tensor, caches: Caches) -> Tensor:
-        buf = self._prepadded.pop(id(x), None)
+        # Dynamo cannot trace add(out=noncontiguous_view). In compiled execution
+        # add and padding are expressed functionally and can fuse without the
+        # eager path's identity-keyed prepadding side channel.
+        buf = (
+            None if torch.compiler.is_compiling() else self._prepadded.pop(id(x), None)
+        )
         x = buf if buf is not None else F.pad(x, (0, 1, 0, 1))
-        x = F.conv3d(x, self.resample_w[id(rs)], rs.resample[1].bias, stride=(1, 2, 2))
+        x = F.conv3d(
+            x,
+            self._h(self.resample_w[id(rs)]),
+            self._h(rs.resample[1].bias),
+            stride=(1, 2, 2),
+        )
         if rs.mode == "downsample3d":
             i = caches.next_index()
             old = caches.items[i]
             if old is None:
-                caches.items[i] = x[:, :, -1:].clone()
+                caches.items[i] = _keep(x[:, :, -1:])
             else:
                 assert isinstance(old, Tensor)
-                new = x[:, :, -1:].clone()
+                new = _keep(x[:, :, -1:])
                 x = self._conv(rs.time_conv, torch.cat([old[:, :, -1:], x], 2))
                 caches.items[i] = new
         return x
@@ -687,7 +835,12 @@ class FusedEncoder:
         for j, m in enumerate(mods):
             if isinstance(m, ResidualBlock):
                 prepad = j + 1 < len(mods) and isinstance(mods[j + 1], Resample)
-                x = self._residual(m, x, caches, prepad)
+                defer = (
+                    VAE_FUSED_ADD_NORM
+                    and j + 1 < len(mods)
+                    and isinstance(mods[j + 1], ResidualBlock)
+                )
+                x = self._residual(m, x, caches, prepad, defer)
             else:
                 assert isinstance(m, Resample)
                 x = self._resample(m, x, caches)
@@ -696,7 +849,7 @@ class FusedEncoder:
     def _forward(self, buf: Tensor, caches: Caches) -> Tensor:
         enc = self.enc
         i = caches.next_index()
-        caches.items[i] = buf[:, :, -CACHE_T:].clone()
+        caches.items[i] = _keep(buf[:, :, -CACHE_T:])
         x = self._conv_halo(enc.conv1, buf)
         for blk in enc.downsamples:
             x = self._down_block(blk, x, caches)
@@ -706,11 +859,19 @@ class FusedEncoder:
             else:
                 x = layer(x)
         i = caches.next_index()
-        y = self.norms[id(enc.head[0])](x, caches.items[i], halo=True)  # ty: ignore[invalid-argument-type]
-        caches.items[i] = y[:, :, -CACHE_T:].clone()
+        y = self.norms[id(enc.head[0])](
+            x,
+            caches.items[i],
+            halo=True,  # ty: ignore[invalid-argument-type]
+        )
+        caches.items[i] = _keep(y[:, :, -CACHE_T:])
         head = enc.head[2]
         return F.conv3d(
-            y, self.head_w, self.head_b, head.stride, (0, head._pad[2], head._pad[0])
+            y,
+            self._h(self.head_w),
+            self._h(self.head_b),
+            head.stride,
+            (0, head._pad[2], head._pad[0]),
         )
 
     @torch.no_grad()
@@ -733,7 +894,7 @@ class FusedEncoder:
             for cut in boundaries:
                 buf = torch.empty(
                     (rows, 12, cut - prev + CACHE_T, h2, w2),
-                    dtype=video.dtype,
+                    dtype=torch.float16 if VAE_HOIST_CASTS else video.dtype,
                     device=video.device,
                     memory_format=CL3D,
                 )
@@ -741,7 +902,9 @@ class FusedEncoder:
                 if first is None:
                     buf[:, :, :CACHE_T].zero_()
                 else:
-                    buf[:, :, :CACHE_T].copy_(first)  # ty: ignore[invalid-argument-type]
+                    buf[:, :, :CACHE_T].copy_(
+                        first  # ty: ignore[invalid-argument-type]
+                    )
                 body = buf[:, :, CACHE_T:]
                 t_hi = min(cut, video.shape[2])
                 tlen = t_hi - prev
@@ -827,7 +990,7 @@ class StreamEncode:
         h2, w2 = seg.shape[-2] // 2, seg.shape[-1] // 2
         buf = torch.empty(
             (1, 12, cut - prev + CACHE_T, h2, w2),
-            dtype=seg.dtype,
+            dtype=torch.float16 if VAE_HOIST_CASTS else seg.dtype,
             device=seg.device,
             memory_format=CL3D,
         )
@@ -868,8 +1031,15 @@ class StreamEncode:
 class Autoencoder(nn.Module):
     """The Wan2.2 video autoencoder with the policy pre- and post-processing."""
 
-    def __init__(self, norm_block_c: dict[int, int] | None = None) -> None:
+    def __init__(
+        self,
+        norm_block_c: dict[int, int] | None = None,
+        *,
+        decoder_impl: str = "reference",
+    ) -> None:
         super().__init__()
+        if decoder_impl not in ("reference", "fused"):
+            raise ValueError(f"Unknown VAE decoder implementation: {decoder_impl}")
         self.norm_block_c = dict(norm_block_c or K.DEFAULT_NORM_BLOCK_C)
         self.encoder = Encoder()
         self.conv1 = CausalConv3d(2 * Z_DIM, 2 * Z_DIM, 1)
@@ -880,6 +1050,9 @@ class Autoencoder(nn.Module):
             "latent_inv_std", 1.0 / torch.tensor(LATENT_STD), persistent=False
         )
         self._fused: FusedEncoder | None = None
+        self._decoder_controller = None
+        if decoder_impl == "fused":
+            self.enable_fused_decoder()
 
     def _apply(self, fn, recurse: bool = True) -> nn.Module:
         mean, inv_std = self.latent_mean, self.latent_inv_std
@@ -888,7 +1061,50 @@ class Autoencoder(nn.Module):
         self.latent_mean = mean.to(device=self.latent_mean.device)
         self.latent_inv_std = inv_std.to(device=self.latent_inv_std.device)
         self._fused = None
+        if self._decoder_controller is not None:
+            self._decoder_controller.reset()
         return self
+
+    def enable_fused_decoder(
+        self,
+        *,
+        stream_output: bool = True,
+        compile_decoder: bool = False,
+        fuse_norm_silu: bool = True,
+        norm_output_dtype: str = "float32",
+        fuse_cache_input: bool = True,
+    ):
+        """Enable FP16 convolutions and fused video-decoder kernels.
+
+        Decoder-step compilation is opt-in through compile_decoder=True.
+        Causal convolution inputs and history use one Triton pass by default.
+        Set fuse_cache_input=False to disable it.
+        norm_output_dtype="bfloat16" stores normalized activations and history
+        in BF16 while retaining FP32 arithmetic. The default is "float32".
+        Configure before warmup. Original checkpoint parameters stay unchanged.
+        """
+        from praxis.vae_decoder import install
+
+        if self._decoder_controller is not None:
+            self.disable_decoder_optimizations()
+        return install(
+            self,
+            stream_output=stream_output,
+            compile_decoder=compile_decoder,
+            fuse_norm_silu=fuse_norm_silu,
+            norm_output_dtype=norm_output_dtype,
+            fuse_cache_input=fuse_cache_input,
+        )
+
+    def disable_decoder_optimizations(self) -> None:
+        """Restore the original reference decoder, including unfused norms."""
+        if self._decoder_controller is not None:
+            self.decoder.forward = self._decoder_controller.original_forward
+            self._decoder_controller.restore_norm_silu()
+        for module in self.modules():
+            if isinstance(module, CausalConv3d):
+                module._decoder_adapter = None
+        self._decoder_controller = None
 
     @classmethod
     def from_pretrained(
@@ -896,6 +1112,8 @@ class Autoencoder(nn.Module):
         path: str | Path,
         device: str | torch.device = "cuda",
         norm_block_c: dict[int, int] | None = None,
+        *,
+        decoder_impl: str = "fused",
     ) -> Autoencoder:
         """Load ``Wan2.2_VAE.pth`` (float32) with the rounding of the checkpoint.
 
@@ -905,12 +1123,18 @@ class Autoencoder(nn.Module):
         """
         state = torch.load(str(path), map_location="cpu", weights_only=True)
         with torch.device("meta"):
-            model = cls(norm_block_c)
+            model = cls(norm_block_c, decoder_impl="reference")
         state = {k: v.to(torch.float16).to(torch.bfloat16) for k, v in state.items()}
         model.load_state_dict(state, strict=True, assign=True)
         model.latent_mean = torch.tensor(LATENT_MEAN)
         model.latent_inv_std = 1.0 / torch.tensor(LATENT_STD)
-        return model.to(device).eval().requires_grad_(False)
+        model = model.to(device).eval().requires_grad_(False)
+        if decoder_impl not in ("reference", "fused"):
+            raise ValueError(f"Unknown VAE decoder implementation: {decoder_impl}")
+        # The fused decoder runs CUDA kernels; other devices keep the reference.
+        if decoder_impl == "fused" and torch.device(device).type == "cuda":
+            model.enable_fused_decoder()
+        return model
 
     @property
     def scale(self) -> tuple[Tensor, Tensor]:
@@ -968,8 +1192,14 @@ class Autoencoder(nn.Module):
         """Decode a policy latent ``(1, 192, T, h, w)`` to uint8 frames ``(T', 3, H, W)``.
 
         The frames are :meth:`decode_unit` mapped to ``[0, 1]`` and scaled by
-        255, with a truncation to uint8.
+        255, with a truncation to uint8. A streaming fused decoder returns its
+        own frames.
         """
+        if (
+            self._decoder_controller is not None
+            and self._decoder_controller.stream_output
+        ):
+            return self._decoder_controller.decode(latent)
         video = self.decode_unit(latent)
         v = video[0].permute(1, 0, 2, 3).float().mul(0.5).add(0.5).clamp(0, 1)
         return (v * 255).to(torch.uint8)

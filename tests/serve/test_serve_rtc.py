@@ -461,6 +461,9 @@ class _Policy:
         settings,
         trace=None,
         skip_last_video=None,
+        ctx_cache=False,
+        overlap_expert=False,
+        pair_cfg=False,
     ):
         self.calls.append({"depth": len(cleans), "seed": int(seed)})
         generator = torch.Generator().manual_seed(int(seed))

@@ -76,7 +76,7 @@ One policy call gives these outputs:
 |---|---|---|---|
 | Video backbone | `praxis/backbone.py`, `praxis/layers.py` | 14 + 6 transformer blocks | Denoises the video latents. Gives hidden states ("taps") to the action expert. |
 | Action expert | `praxis/action_expert.py` | 16 blocks, dim 1024 | Denoises the actions. Reads the taps through cross-attention. |
-| Video autoencoder | `praxis/vae.py` | Wan2.2 VAE | Maps frames to latents and back. Frozen. |
+| Video autoencoder | `praxis/vae.py`, `praxis/vae_decoder.py` | Wan2.2 VAE | Maps frames to latents and back. Frozen. |
 | Text encoder | `praxis/text_encoder.py` | Qwen3.5-2B | Maps the task string to tokens. Frozen. |
 | Sampler | `praxis/sampler.py` | - | Flow-matching Euler steps from noise to the sample. |
 | Robot input and output | `praxis/single_arm.py`, `praxis/bimanual.py`, `praxis/robot_io.py` | - | Camera canvas, pose conversions, normalization, context window, command format, control modes. |
@@ -85,19 +85,317 @@ One policy call gives these outputs:
 The backbone and the action expert share one checkpoint (about 54 GB in
 bfloat16). The autoencoder and the text encoder use their public weights.
 
-## Optional routed NVFP4 inference (experimental)
+## Execution
 
-The `nvfp4` extra adds an inference-only path for SM120 GPUs (RTX 5090,
-RTX PRO 6000 Blackwell). It packs only the routed MoE experts as NVFP4 and runs
-them with FlashInfer grouped GEMMs. Dense layers, shared experts, routers,
-modulation, the action expert, the VAE and the text encoder keep their
-checkpoint dtypes. Router scores and the routed output accumulation retain the
-source FP32 operations. Other GPUs (H100, B200 and older) are refused when the
-model loads; the default bf16 path is unchanged on them.
+### Inference optimizations
 
-Enable it with `model.routed_precision: nvfp4` in the config of the policy
-server or of `scripts/run_inference.py` (`--set model.routed_precision=nvfp4`),
-or pass `routed_precision="nvfp4"` to `PraxisPipeline`. The default remains bf16.
+The baseline operations are packed SwiGLU, fused decoder modulation, fused VAE
+encoder RMSNorm/SiLU and average pooling, and prompt embedding caching. The
+sampler also skips unused unconditional action/video branches. The
+optimizations below keep the checkpoint, sampler
+recipe and shared server/simulation pipeline. Defaults refer to
+`PraxisPipeline` sessions; lower-level APIs can have different defaults.
+
+The tables separate [default transformer operations](#default-transformer-and-sampler-optimizations),
+[camera, VAE and text operations](#default-camera-vae-and-text-optimizations),
+and [optional paths](#optional-and-hardware-specific-paths).
+[Thor and architecture selection](#thor-and-architecture-selection) summarizes
+the hardware guards. An enabled flag still requires compatible inputs.
+
+### Default transformer and sampler optimizations
+
+| Optimization | Baseline behavior | Current default and implementation |
+|---|---|---|
+| Rotary embedding | Separate eager rotation operations | `FUSED_ROPE=True`: one Triton pass with eager FP32 rounding; `layers.py`, `kernels/rope_triton.py`. |
+| Device tables and indices | Repeated table transfers and CPU-built expert indices | `CACHE_DEVICE_TABLES=True`: reuse rotary frequencies and position IDs on the device. Build action-expert tap indices on the device. |
+| Encoder context reuse | Recompute the full window at every Euler step | `session.ctx_cache=True`: cache context K/V and taps within each call and guidance branch; `model.py`, `backbone.py`. Disabled for tracing and NVFP4. |
+| Cached projection shapes | Full-window projections without query slicing | `CTX_FULL_ROWS=True`: preserve full attention-gate and FP32 router GEMM shapes when processing only current queries. `KV_INPLACE=True` updates current K/V rows without concatenation. |
+| Rotary Q/K normalization | RoPE followed by separate RMSNorm calls | `FUSED_ROPE_QK_NORM=None`: fuse supported BF16/FP16 CUDA rotation and normalization, retaining intermediate rounding. |
+| Transformer normalization | Separate residual addition, RMSNorm and layer scaling | `FUSED_NORM=None`: fuse supported BF16 CUDA calls. Reuse versioned affine weights and defer eligible residual additions into the next normalization. |
+| Decoder modulation and normalization | Fused modulation followed by separate normalization | `FUSED_MOD_NORM=True`: combine deferred residual addition, modulation, RMSNorm and layer scaling when supported. |
+| Attention output gate | Separate head merge and gate product | `FUSED_GATE=True`: merge heads and apply the gate in one kernel. |
+| Router input conversion | Widen each FP32 router input chunk | `ROUTER_F32=True`: reuse FP32 rows written by fused normalization. Router GEMM shapes and chunk boundaries stay fixed. |
+| Guided encoder execution | Run conditional and unconditional passes separately | `session.pair_cfg=True`: run encoder blocks in lockstep and share grouped expert-weight reads. `PAIR_BUFFER=True` makes merged feed-forward rows a buffer view. `PAIR_GEMM_CONFIG` fixes grouped-GEMM tiles. |
+| Shared-expert activation | Separate SiLU and product | `SHARED_SILU_MUL=True`: fuse the product after the ordinary shared-expert GEMM. |
+| MoE dispatch and output reduction | PyTorch gather, weighting, inverse permutation, reduction and scaling around grouped GEMMs | Automatic stable Triton dispatch and top-8 combine paths, including chunked FP32 accumulation and shared-output addition; `kernels/layers_triton.py`. Unsupported calls retain their ordinary path. |
+| Action-expert normalization | Separate RMSNorm/AdaLN tail operations | `FUSED_AE_NORM=True`: fuse supported normalization tails while retaining the eager square/mean calculation. |
+| Action-expert launch overhead | Eager launches | `action_cuda_graphs=True`: replay validated action-expert graphs on CUDA `window_joint` inference. DiT and VAE remain outside capture. |
+| Expert/decoder scheduling | Sequential execution | `session.overlap_expert=True`: guided inference runs the action expert on a side stream beside the video decoder. Tracing disables overlap. |
+| Teacher-forcing predicate | Read five per-token metadata tables | `TF_PACKED_MASK=True`: use one integer role/chunk code per token. Retain partial/full sparse tile lists and traversal. Interval and metadata predicates remain available. |
+| Attention compatibility and plan reuse | Checkpoint-selected attention with the original dispatch | Flash adapters cache converted masks and use compatible sparse block sizes. Unsupported SM110/SM120 Flash layouts fall back to Triton. Per-tower overrides and cuDNN plans are available. |
+| Flash compilation cache | Caller/PyTorch limits | `FLASH_RECOMPILE_LIMIT=64`: raise the process-wide minimum to 64 compiled variants and 1024 accumulated variants. `None` preserves caller limits. |
+
+### Default camera, VAE and text optimizations
+
+| Optimization | Baseline behavior | Current default and implementation |
+|---|---|---|
+| Causal VAE encode deduplication | Encode the current frame, context and anchor separately | `session.state.dedup_encodes=True`: reuse the causal context's first latent as the anchor at depth one and above; `single_arm.py`. |
+| Current-frame preparation | Build a current-frame clip on every call | `LAZY_CURRENT_CLIP=True`: build it only when an encode needs it. Resets, short stacks and stateless calls still build it. |
+| Camera crop/copy | CPU preparation before transfer | `TILE_ON_DEVICE=True`: prepare on CUDA only when neither view needs resizing. Other sizes keep CPU resizing to preserve input bytes. |
+| VAE encoder cache storage | Clone causal cache slices | `ENCODER_CACHE_VIEWS=True`: retain views of buffers that will not be overwritten. |
+| VAE encoder casts | Repeat FP16 autocast conversions | `VAE_HOIST_CASTS=True`: cache FP16 convolution weights/biases and construct FP16 input chunk buffers. |
+| VAE encoder residual normalization | Separate residual addition and the next normalization | `VAE_FUSED_ADD_NORM=True`: fuse the residual add with the next fixed-setting RMSNorm/SiLU kernel. |
+| VAE RGB decoding | Reference PyTorch decoder | `vae_decoder_impl="fused"`: fused RMSNorm/SiLU, FP16 convolutions, implicit spatial padding and streamed RGB assembly; `vae_decoder.py`. RGB pixels can differ from reference decoding. |
+| VAE decoder cache assembly | Separate history/input assembly | `fuse_cache_input=True`: one Triton pass assembles causal convolution inputs and history; `kernels/vae_decoder_cache_triton.py`. |
+| Text-kernel compatibility | Pin preferred FLA settings when available | Keep those fixed settings; use the supported two-stage recurrent-state setting when the preferred three-stage setting is unavailable. H100 retains its existing setting; `text_encoder.py`. |
+
+Automatic selection checks supported device, dtype, shape, layout, gradients,
+autocast and module hooks where applicable. `None` means automatic selection
+for `FUSED_NORM`, `FUSED_ROPE_QK_NORM` and `FUSED_MOE_SOLO`. Explicit booleans
+override selection. Set module switches before warmup and CUDA
+Graph capture. The DiT towers are not compiled as whole modules. Fixed kernel
+settings retain their specified accumulation and rounding order.
+
+The fused VAE decoder defaults are `fuse_norm_silu=True`,
+`stream_output=True`, `fuse_cache_input=True`, `compile_decoder=False` and
+`norm_output_dtype="float32"`. They control RGB decoding independently of
+the transformer and action-expert optimizations.
+
+### Optional and hardware-specific paths
+
+These paths are separate from the default portable operations above.
+
+| Path or control | Default | Scope |
+|---|---|---|
+| `FUSED_MOE` | `False` | Opt-in paired gather + gate/up + SwiGLU and combine fusion. Paired encoder execution still works while this flag is off. |
+| `FUSED_MOE_DEC` | `False` | Opt-in fused expert GEMMs outside the pair driver. H100 and B200 policy measurements found regressions. |
+| `FUSED_MOE_SOLO` | `None` | Unchunked combine/scale/shared-add fusion on supported CUDA calls except SM90. Inactive for the DROID checkpoint's chunked MoE. |
+| `PAIR_DEC` | `False` | Opt-in: with `session.pair_cfg` and both decoder guidance passes, run the decoder passes block by block in lockstep so each MoE layer reads its routed weights once (`forward_pair`). Bitwise equal to separate passes on Thor (BF16 with `FUSED_MOE`/`CUTE_EXPERTS`, NVFP4 with `PAIR_NVFP4`). Not measured on other GPUs. |
+| `MOE_TAIL_NORM` | `False` | Memory-traffic fusion: a chunked MoE layer driven by the block generator returns its routed tail unevaluated. The next block's fused residual-add/norm, or the residual add of a block that does not defer, then does the token combine and shared-expert add in the same kernel (`kernels/moe_tail_triton.py`; the ordinary roundings). The BF16 tail (with `FUSED_MOE`/`FUSED_MOE_DEC`) is pure Triton and selectable on every CUDA GPU. It is unmeasured off Thor and showed no gain with Thor BF16. The NVFP4 tails (one-chunk and paired combines) are limited to the SM110 NVFP4 backend and are faster with Thor NVFP4. Other NVFP4 backends keep their own combine. |
+| `ROUTER_FUSED` | `True` on SM100/SM103/SM110 | Requires CuTe DSL. H100, SM120 and other unsupported architectures keep ordinary routing. On supported GPUs, after the ordinary FP32 router GEMM, sigmoid, bias, top-8, gates and the expert-dispatch metadata run as one barrier-free CuTe DSL kernel pair (`kernels/router_fused.py`) instead of about ten PyTorch ops per MoE layer. Bitwise with the pinned torch: it reproduces `torch.topk` tie order and the gate-sum order, so a torch upgrade needs the `ROUTER_FUSED_AUDIT` replay audit rerun. |
+| `MOD_COMPACT` | `True` | Portable (torch + Triton): the decoder keeps its per-token conditioning as distinct rows (registers plus one row per conditioning token instead of each repeated per patch), runs each block's modulator GEMM on those rows (4x fewer rows for DROID), and the fused modulation-norm kernels read the shift/scale row of each token by index. Bitwise by construction (each GEMM row depends only on its own input); other consumers get the expanded tensors. Tested bytewise on H100 and Thor. |
+| `action_expert.FUSED_KV_SOURCE` | `True` for supported CUDA inputs | Portable Triton: the action expert's cross-attention KV source `(rms_norm(tap) * tap_norm_scale).to(dtype)` runs its widen, rstd product, cast, weight product and cast as one kernel after the eager mean of squares (`norm_triton.rms_scale`). Tested bytewise on H100 and Thor. `FUSED_AE_NORM` (default on) covers the other action-expert norms. |
+| `ENC_GATE_UP_AUTO`, `DEC_GATE_UP_CONFIG`, `DEC_DOWN_CONFIG` | Fixed tuning enabled/configured | Row-count-based encoder tiles and measured decoder tiles. These apply when the corresponding fused expert path is selected. They do not independently enable it. |
+| `routed_precision="nvfp4"` | Off; BF16 remains default | Native routed-expert NVFP4 on SM100/SM103, SM110 and SM120. Dense layers and the action expert retain checkpoint dtypes. H100 rejects this mode. |
+| `nvfp4_cache` | No disk cache | Reuse validated CPU-packed expert weights instead of repacking at startup. GPU execution retains no BF16 routed-weight masters. |
+| `praxis.kernels.nvfp4.QUANT_WIDE` | `True` within NVFP4 | Fixed 64-row packing tiles and eight warps for the native packing kernel. This is separate from the SM110 experiment with the same short name. |
+| `praxis.quantization.nvfp4.FUSED_NVFP4` | `True` within compatible NVFP4 backends | Fuse rescaling, SwiGLU, amax and output preparation where supported. SM100/SM103 retain their native fusion paths; SM110/SM120 use compatible elementwise stages. |
+| `praxis.quantization.nvfp4.PAIR_NVFP4` | `True` where compatible | Paired CFG dispatch requires the SM110 scale layout. Other backends retain ordinary dispatch. NVFP4 context caching stays disabled. |
+| `CUTE_DENSE_FFN` | `False` | Memory-traffic fusion for tcgen05 GPUs (SM100/SM103/SM110; needs Quack): the dense SwiGLU gate/up GEMM applies SiLU and the product in its epilogue, so the gate/up outputs never reach memory; down stays cuBLAS. Rows dispatch through a per-architecture table in `kernels/cute_dense.py`. Only SM110 has a measured table (bitwise; faster at 256 to 17,480 rows); SM100/SM103 run the ordinary ops until `scripts/tune_cute_dense.py` builds theirs. SM90 and SM120 are not selected. |
+| `nvfp4_sm110.NATIVE_E2M1` | `False` | Thor-specific (SM110 NVFP4 backend): the quantize kernels pack FP4 codes with the hardware E2M1 conversion, as the native SM100/SM120 packing kernel does, instead of seven threshold compares. Same codes for every float32 input. |
+| `CUTE_EXPERTS`, `SHARED_QUACK`, `ROUTED_QUACK_DOWN` | `False` | Thor-specific CuTe expert GEMMs, guarded for SM110 and loaded with optional dependencies. |
+| `single_arm.TILE_U8_PINNED` | `True` | Portable: when tiles are resized on the CPU for a CUDA device, write the uint8 tiles into a persistent pinned canvas, copy it non-blocking and convert to FP32 on the GPU (exact; same values, dtype and strides). Faster on Thor, partly through less shared-DRAM contention; not measured on discrete GPUs. |
+| `THOR_TILE_RESIZE`, `TILE_ON_DEVICE_ANTIALIAS` | `False` | Explicit Thor GPU-resize experiments. The default crop/copy path avoids GPU resizing. |
+| `nvfp4_sm110.EPI_SWIGLU`, `ZERO_PAD_ONLY`, `QUANT_WIDE` | `False` | Thor-specific epilogue, padding-only initialization and quantization-tile experiments. |
+| `praxis.attention.SM110_FLASH_MASK_256`, `praxis.backbone.SM110_INTERVAL_MASK` | `True` / `False` | Thor only (`is_thor`). The first selects 256-row Flash masks on SM110 (`False`: 128-row masks and the Triton fallback). The second selects the interval predicate for Thor Flash masks. FA4 on Thor changes action and latent bits relative to Triton attention. |
+| Per-tower attention overrides | The checkpoint's backend (Flash in the released checkpoints) | Select Triton or opt-in cuDNN independently for encoder and decoder. Switching attention backend can change action and latent bits. |
+| `skip_last_video` (`session.skip_video_decoder` in configs) | Off in `PraxisPipeline.session`; on in the serve configs and the benchmark | Skips the video decoder of the last Euler step, and its unguided pass when action guidance is 1.0. Actions and commands keep their bits, but no predicted video latent is returned. Keep it off when latents are required. |
+| Decoder-step compilation / BF16 norm history | Off / FP32 history | `compile_decoder=True` and `norm_output_dtype="bfloat16"` are explicit decoder experiments. Validate RGB behavior separately. |
+| Historical bimanual CUDA Graph helper | Off | `pipe.enable_cuda_graphs()` captures the unguided bimanual `chunk` path. It is separate from the default action-expert graphs. |
+
+Tuning or validating an opt-in fusion on a new GPU: first compare action, command
+and predicted-latent bytes of the full policy with the flag off and on, using
+fixed inputs and the same GPU. Then compare policy latency. For
+`CUTE_DENSE_FFN`, run `python scripts/tune_cute_dense.py OUT [--ckpt DIR]` on that
+GPU. It checks each candidate configuration bitwise against the eager module, times
+it, and prints the `GATE_UP_TABLES` entry to add to `kernels/cute_dense.py`.
+
+### Thor and architecture selection
+
+Several portable optimizations were adapted from the Thor work: paired CFG
+execution, fused normalization and rotary normalization, attention gating,
+KV updates, FP32 router inputs, shared-expert activation, VAE cache/cast
+reuse, lazy clips and action-expert normalization. They now use the shared
+input-compatibility guards. Their origin does not restrict them to SM110.
+Portable source comments describe the operation; Thor labels identify the
+retained device-specific implementations.
+
+The following table describes the current dispatch rules. It is not a
+performance or bitwise-parity result for every listed architecture.
+
+| Path | SM90 (H100) | SM100/SM103 | SM110 (Thor) | SM120 |
+|---|---|---|---|---|
+| Portable BF16 normalization, rotary and elementwise fusions | Automatic when supported | Automatic when supported | Automatic when supported | Automatic when supported |
+| `FUSED_MOE`, `FUSED_MOE_DEC` | Off | Off | Off | Off |
+| `FUSED_MOE_SOLO=None` | Off | Eligible unchunked calls | Eligible unchunked calls | Eligible unchunked calls |
+| Native NVFP4, when explicitly requested | Unsupported | FlashInfer SM100 backend | Quack SM110 backend | FlashInfer SM120 backend |
+| Paired NVFP4 dispatch | Unavailable | Ordinary per-pass dispatch | Paired when compatible | Ordinary per-pass dispatch |
+| Native packing `nvfp4.QUANT_WIDE=True` | Not used | Wider tiles | Separate SM110 packing path | Wider tiles |
+| Retained CuTe BF16 expert variants | Not selected | Not selected | Explicit opt-in; off by default | Not selected |
+| GPU resize experiments | Not selected | Not selected | Explicit opt-in; off by default | Not selected |
+| `CUTE_DENSE_FFN` (opt-in) | Not selected | Selectable; no table, ordinary ops | Measured table | Not selected |
+| `MOE_TAIL_NORM` (opt-in) | BF16 tail | BF16 tail | BF16 and NVFP4 tails | BF16 tail |
+| Requested Flash attention | Flash | Flash with compatible 256-row tiles | Flash with a compatible mask block size divisible by 256; otherwise Triton | Triton fallback |
+
+`praxis.hardware.is_thor` matches capability `(11, 0)` exactly.
+The SM110 NVFP4 backend retains its own scale layout and grouped GEMMs.
+`PAIR_NVFP4=True` therefore does not enable paired quantized dispatch on
+SM100/SM103 or SM120. All NVFP4 backends disable encoder context caching.
+
+The two packing switches have different scopes:
+
+- `praxis.kernels.nvfp4.QUANT_WIDE=True` selects the default native packing
+  tiles on the SM100/SM103 and SM120 paths.
+- `praxis.kernels.nvfp4_sm110.QUANT_WIDE=False` leaves the Thor tile experiment
+  off. `ZERO_PAD_ONLY` and `EPI_SWIGLU` in that module also remain off.
+
+For native NVFP4 on Thor, install both optional extras:
+
+```bash
+uv pip install -e '.[nvfp4,thor]'
+```
+
+The `thor` extra supplies Quack for the SM110 backend and optional CuTe BF16
+experiments. Ordinary BF16 inference on H100 and B200 does not load those
+optional kernels. No separate optimization profile is needed.
+`SHARED_QUACK_MIN_ROWS=2048` limits the optional shared-expert CuTe path to
+larger inputs. Smaller inputs retain the ordinary shared-expert path.
+
+New measurement tools include `scripts/benchmark_inference.py` and
+`python -m praxis.serve.latency`.
+`PRAXIS_NVTX=1` enables detailed ranges from `praxis/nvtx.py`; they are off by
+default. Stage timing synchronizes the GPU and can reduce overlap, so stage
+gains must not be added to predict ordinary policy latency.
+
+### Numerical agreement
+
+Bitwise checks compare action tensors, predicted video latents and decoded
+commands. They are separate from decoded RGB comparisons. Native NVFP4,
+attention-backend changes and optional experiments do not imply bitwise
+agreement with the BF16 reference. Use matching weights, inputs, seeds, packages,
+settings and GPU, with the precision mode held fixed.
+
+A flag being enabled does not establish a speedup on every architecture.
+
+### VAE decoder behavior
+
+The VAE uses a fused encoder and decoder by default. The decoder combines
+RMSNorm and SiLU, uses FP16 convolutions with implicit spatial padding, and
+writes decoded chunks directly into the RGB output buffer. Checkpoint weights
+and the network architecture are unchanged.
+
+The FP16 decoder also assembles causal convolution inputs and cache history
+in one Triton pass by default. Disable this with
+`pipe.vae.enable_fused_decoder(fuse_cache_input=False)`.
+This can change decoded RGB pixels. A comparison with fusion disabled used
+the same single-arm inputs and seeds at context depths zero through three.
+Actions, video latents and commands stayed byte-identical. RGB mean absolute
+error was 0.131 on the 0–255 scale, with a maximum difference of 4.
+
+Select the decoder when constructing the pipeline:
+
+```python
+from praxis.pipeline import PraxisPipeline
+
+pipe = PraxisPipeline(
+    checkpoint="checkpoints/praxis-1-droid",
+    vae_weights="weights/Wan2.2_VAE.pth",
+    text_encoder="weights/Qwen3.5-2B",
+    vae_decoder_impl="fused",  # default; alternative: "reference"
+)
+```
+
+`PRAXIS_VAE_DECODER_IMPL=fused|reference` selects the mode when no explicit
+argument is supplied. Standalone `Autoencoder` construction accepts the same
+modes through `decoder_impl`. Fused decoding changes numerical results;
+validate it on representative inputs when reference parity matters.
+
+The fused decoder uses FP16 convolutions and requires no native extension.
+Enable decoder-step compilation with
+`pipe.vae.enable_fused_decoder(compile_decoder=True)`.
+
+### CUDA Graph configuration
+
+Action-expert CUDA Graphs are enabled by default on the current CUDA
+`window_joint` pipeline. CPU execution and historical sampler layouts retain
+their existing paths. Disable action graphs with
+`PraxisPipeline(..., action_cuda_graphs=False)` or set
+`model.action_cuda_graphs: false` in an inference, server or sim config.
+For example, benchmark the default graph path with:
+
+```bash
+python scripts/benchmark_inference.py --config configs/serve_droid.yaml
+```
+
+This option captures `ActionExpert.forward_trunk_rope`. Tensor inputs are copied
+into stable buffers on every replay. The sampler still prepares its inputs and
+runs the DiT, text encoder and VAE directly. Guided sampling retains its expert
+side stream. Stream events protect graph buffers between policy calls. Each
+graph owns its memory pool, and replay returns independent output tensors.
+
+Capture is lazy for each context depth, prompt length, dtype and execution mode.
+The default cache holds at most eight shapes; further shapes run eagerly, with
+one warning and an `eager` count in the pool's `stats()`. Capture warms the
+expert three times and checks output bytes against eager execution. It raises
+on changed bits or an unsupported shape after freezing. To set the cache limit
+or freeze it after application warmup, construct the pipeline with
+`action_cuda_graphs=False`, then use
+`pipe.enable_action_cuda_graphs(max_graphs=16)` and call the returned pool's
+`freeze()`.
+Keep weights and model settings fixed after capture. Concurrent host calls are
+rejected. Graph capture adds startup time and GPU memory use.
+The first Flash attention call raises Dynamo's process-wide `recompile_limit`
+to at least 64 and `accumulated_recompile_limit` to at least 1024.
+This retains compiled variants for the policy's context depths and guidance modes.
+Set `praxis.attention.FLASH_RECOMPILE_LIMIT` before the first Flash call to
+change this minimum. Set it to `None` to retain the caller's limits.
+Higher existing limits are preserved. Other attention backends do not set them.
+
+The retained `pipe.enable_cuda_graphs()` helper supports only the historical
+bimanual chunk path. It rejects the current single-arm pipeline. It captures text and action-expert stages. DiT and VAE encoding
+and decoding execute directly, outside CUDA Graphs. Warm all intended shapes under
+`torch.inference_mode()`, then call the returned pool's `freeze()` to reject
+new shapes. Recreate graphs after changing captured model settings or weights.
+The pool validates replay against the same execution path and returns
+independent output tensors.
+
+## Optional routed NVFP4 inference
+
+The same codebase supports native BF16 on H100, B200 and B300. The `nvfp4` extra
+adds opt-in NVFP4 for SM100/SM103 GPUs, including B200 and B300, and SM120 GPUs such
+as RTX 5090. H100 uses BF16. An explicit NVFP4 request on H100 raises before
+packing or transferring weights.
+
+The SM110 NVFP4 backend is selected only on Thor. Its backend and the
+optional CuTe expert paths retain their hardware guards.
+
+Native BF16 on B200 uses the standard `configs/serve_droid.yaml` defaults.
+No separate optimization profile is required.
+
+NVFP4 packs only the routed MoE experts.
+Dense layers, shared experts, routers, modulation, the action
+expert, the VAE and the text encoder keep their checkpoint dtypes. Router
+scores and the routed output accumulation retain the source FP32 operations.
+
+Install `uv pip install -e '.[nvfp4]'` in the CUDA 13 environment described under Install.
+Set `model.routed_precision: nvfp4` in the config of `scripts/run_inference.py`
+or of the policy server (`--set model.routed_precision=nvfp4`), or pass
+`routed_precision="nvfp4"` to `PraxisPipeline`. The default remains BF16.
+Loading packs one expert bank at a time on the CPU and retains no BF16 expert
+masters on the GPU. `model.nvfp4_cache` (or `nvfp4_cache`) optionally stores
+checked packed weights.
+
+For example, download the NVFP4-QAT checkpoint and run the server with a
+reusable packed-weight cache:
+
+```bash
+hf download runwayml/praxis-1-droid-nvfp4 --local-dir checkpoints/praxis-1-droid-nvfp4
+python -m praxis.serve --config configs/serve_droid.yaml \
+    --set model.checkpoint=checkpoints/praxis-1-droid-nvfp4 \
+    --set model.routed_precision=nvfp4 \
+    --set model.nvfp4_cache=outputs/nvfp4-cache
+```
+
+SM100/SM103 uses FlashInfer's contiguous grouped GEMM with deterministic
+identity finalization. Praxis retains its own BF16 rescaling, SwiGLU and FP32
+routed reduction. SM120 uses FlashInfer's SM120 grouped GEMM backend.
+BF16 works without installing the `nvfp4` extra.
+
+Weights and activations are rounded with the recipe of the NVFP4 QAT training
+forward: one global scale per expert matrix (weights) and per expert's rows
+in each dispatch chunk (activations), both `amax / 2688`. The packed cache
+checks the source tensor bytes, packed shapes and packed checksums before reuse.
+
+Flash attention uses 256-row sparse mask tiles on SM100/SM103 and retains
+128-row tiles on H100. This selection is shared by serving, simulation, and
+recorded inference.
+FlashAttention-4 block sparsity cannot run on SM120, so attention uses the
+Triton backend of `praxis/layers.py` on that device. The text encoder pins the
+supported two-stage FLA recurrent kernel when the three-stage setting is
+unavailable.
+
+This option changes the action outputs. The native path's bitwise validation
+below does not apply to quantized inference.
 
 **Accuracy.** This option changes the actions, and has not been run in closed
 loop on an SM120 GPU yet. The released checkpoints are bf16 checkpoints, so
@@ -124,12 +422,6 @@ MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard \
 python scripts/compare_sim_eval.py outputs/eval/bf16 outputs/eval/nvfp4
 ```
 
-**Rounding.** Weights and activations are rounded with the recipe of an NVFP4
-quantization-aware training forward: FP4 E2M1 values in blocks of 16, E4M3
-block scales, and one global scale per expert matrix (weights) and per
-expert's rows in each dispatch chunk (activations), both `amax / 2688`. A
-checkpoint trained with that recipe sees the same rounding at inference.
-
 **Memory.** The routed experts shrink from 51.3 GB to 14.4 GB, and the policy
 from 54.4 GB to 17.5 GB. With the text encoder (4.6 GB) and the VAE (1.4 GB),
 the weights take about 23.5 GB before activations, so a 32 GB RTX 5090 should
@@ -138,25 +430,15 @@ the text encoder on the policy's GPU and there is no option yet to keep it
 elsewhere; since each encoded prompt is cached, such an option would cost
 little after the first call of each prompt.
 
-**Speed.** Not yet measured. Measure it with
-`python scripts/benchmark_inference.py --config configs/serve_droid.yaml --set model.routed_precision=nvfp4`;
-the summary records the routed precision and the attention backend in effect.
-
-**Install and first run.** Run `uv pip install -e '.[nvfp4]'` in the CUDA 13
-environment of "Install". It resolves torch again, so repeat the cuDNN pin
-afterwards (`uv pip install --no-deps nvidia-cudnn-cu13==9.24.0.43`). The first
-call JIT-compiles FlashInfer's SM120 grouped GEMM with `nvcc` (CUDA 12.8 or
-newer, a few minutes; the server warm-up absorbs it). The first load packs the
-4,352 expert matrices on the CPU, which takes minutes (about 18 with 22
-threads). Set `model.nvfp4_cache` to keep the packed banks (14.4 GB on disk).
-The cache is keyed on the checkpoint, the packing recipe and the TorchAO
-version; a cached load still reads and hashes the bf16 banks.
-
-**On SM120, also with bf16.** FlashAttention-4 block sparsity cannot run on
-SM120, so attention uses the Triton backend of `praxis/layers.py` on that
-device. The text encoder pins the two-stage FLA recurrent kernel on GPUs
-whose supported settings omit three stages. Both change the bits from the
-H100 validation (see "Determinism").
+**Install and first run.** `uv pip install -e '.[nvfp4]'` resolves torch again,
+so repeat the cuDNN pin afterwards
+(`uv pip install --no-deps nvidia-cudnn-cu13==9.24.0.43`). The first call
+JIT-compiles FlashInfer's grouped GEMM with `nvcc` (CUDA 12.8 or newer, a few
+minutes; the server warm-up absorbs it). The first load packs the 4,352
+expert matrices on the CPU, which takes minutes (about 18 with 22 threads).
+Set `model.nvfp4_cache` to keep the packed banks (14.4 GB on disk). The cache
+is keyed on the checkpoint, the packing recipe and the TorchAO version; a
+cached load still reads and hashes the bf16 banks.
 
 A non-finite value in a routed row makes the global scale of its expert
 non-finite for that dispatch chunk, so every row of that expert in the chunk
@@ -164,20 +446,101 @@ is affected, not only the token's own row.
 
 ## Custom kernels
 
-The native path uses four custom Triton kernels in `praxis/kernels/`. They are not
-PyTorch built-ins. They set the rounding and the summation order of the
-checkpoint, so that praxis gives the same output bits as the original
-implementation. No kernel is necessary for speed.
+The pipeline uses the attention backend of the checkpoint's `config.json`;
+the released checkpoints select Flash in both the DiT encoder and decoder.
+Both towers also support `triton` and `cudnn`. To select cuDNN for the decoder
+while keeping Flash in the encoder:
 
-| Kernel | File | Used by | Why |
-|---|---|---|---|
-| `swiglu_packed` | `layers_triton.py` | Routed experts of the MoE layers | Its sigmoid rounds differently from `F.silu`. |
-| `modulate_fused` | `layers_triton.py` | Decoder modulation | The compiler fuses the multiply and the add. |
-| `rmsnorm_silu` | `vae_encoder_triton.py` | Fused VAE encoder | The channel block size sets the summation order. |
-| `avg_down` | `vae_encoder_triton.py` | Fused VAE encoder | Channels-last 2x2 average pool. |
+```python
+pipe = PraxisPipeline(
+    checkpoint="checkpoints/praxis-1-droid",
+    vae_weights="weights/Wan2.2_VAE.pth",
+    text_encoder="weights/Qwen3.5-2B",
+    encoder_attention_backend="flash",
+    decoder_attention_backend="cudnn",
+)
+```
 
-The attention uses `torch.compile(flex_attention)` and the experts use
-`torch._grouped_mm`. Both are PyTorch built-ins.
+Install the optional backend with `uv pip install '.[cudnn]'` or
+`uv pip install '.[flash]'`. The cuDNN extra installs the v1.31.0 tag
+of [NVIDIA/cuDNN Frontend](https://github.com/NVIDIA/cudnn-frontend),
+including its CuTeDSL dependencies; building from source requires Git, a C++
+compiler and a CUDA-enabled environment. CUTLASS tracks public
+upstream source. FlashAttention and the text-encoder kernels use the versions
+specified in `pyproject.toml`; transitive dependencies follow each upstream
+package's own constraints.
+
+The server accepts `--encoder-attention-backend` and
+`--decoder-attention-backend`; inference and server YAML accept the same
+names with underscores under `model`. Environment defaults are
+`PRAXIS_ENCODER_ATTENTION_BACKEND` and `PRAXIS_DECODER_ATTENTION_BACKEND`.
+Explicit arguments take precedence over environment defaults. Without either,
+each tower keeps the backend in the checkpoint's `config.json`.
+
+For a server, add `--decoder-attention-backend cudnn`. For inference or a
+benchmark, override only the decoder in the config:
+
+```bash
+python scripts/benchmark_inference.py --set model.decoder_attention_backend=cudnn --timing total --out outputs/bench_cudnn_decoder
+```
+
+This selects the DiT decoder attention backend. The VAE decoder mode is a
+separate option.
+
+cuDNN supports batch-one inference with shared-head interval masks, including
+the disjoint visible regions of observed-context windows. The adapter preserves
+every visible key when converting a mask to interval endpoints. Other batch
+sizes or masks that vary by head raise an error. Plans are cached; warm each
+shape before CUDA Graph capture.
+
+Triton and cuDNN can change actions and video latents relative to Flash.
+Bitwise agreement between attention backends is not guaranteed. Flash remains
+the default for both towers.
+
+The DiT encoder and decoder execute without whole-module `torch.compile` to
+preserve their numerical behavior. FlexAttention is compiled separately;
+The historical CUDA Graph path captures the text encoder and action expert.
+
+Triton kernels live in `praxis/kernels/`:
+
+| File | Operations |
+|---|---|
+| `layers_triton.py` | Packed SwiGLU, stable MoE dispatch, top-8 weighted reduction, rounded scaling/shared-expert addition, and fused modulation. |
+| `norm_triton.py` | Fixed-reduction RMSNorm, residual and decoder-modulation fusion, attention gate merge and action-expert normalization tails. |
+| `rope_triton.py` | Rotary embedding and fused Q/K RMSNorm with eager rounding. |
+| `moe_gemm_triton.py` | Fixed-tile grouped expert GEMMs, optional gather/SwiGLU fusion and shared-expert activation. |
+| `nvfp4.py`, `nvfp4_moe.py`, `nvfp4_fused.py` | Native NVFP4 packing, scales, rescaling and routed output reduction. |
+| `nvfp4_sm110.py`, `nvfp4_pair.py`, `nvfp4_epi*.py` | Guarded Thor NVFP4 backend, paired dispatch and optional epilogues. |
+| `cute_experts.py`, `cute_act.py`, `shared_quack.py`, `routed_quack.py` | Optional Thor CuTe expert GEMMs and activations. |
+| `vae_encoder_triton.py` | Encoder RMSNorm/SiLU and channels-last average pooling. |
+| `vae_decoder_norm_triton.py` | Decoder RMSNorm/SiLU with FP32 arithmetic. |
+| `vae_decoder_triton.py` | Patch expansion and streamed RGB conversion. |
+| `vae_decoder_cache_triton.py` | Causal convolution input and history assembly. |
+
+Attention uses compiled FlexAttention or the selected cuDNN adapter.
+Ordinary expert projections use `torch._grouped_mm`; paired execution and
+explicit fused variants also use `moe_gemm_triton.py`.
+
+Top-8 non-chunked CUDA MoE inference fuses gate weighting, inverse permutation and expert
+summation while preserving BF16/FP16 product rounding and the eager FP32
+accumulation order. Routed scaling and the shared-expert addition keep their
+original rounding boundaries. Other layouts, autocast and
+gradient-tracked calls retain their existing operation sequences.
+
+Top-8 chunked CUDA MoE inference also fuses dispatch and combination by default.
+It keeps `dispatch_chunk_size` from the checkpoint. Gates are scaled in FP32.
+Expert outputs use four interleaved FP32 accumulators. The routed sum rounds
+to BF16 or FP16 before the shared-expert addition. The combiner writes each
+chunk directly to the final output. Training, autocast and unsupported
+layouts retain the existing path. The kernels use fixed 256-column combine
+tiles and disable multiply-add fusion.
+CPU tests are in `tests/test_moe_chunked.py`.
+
+Non-chunked CUDA MoE dispatch gathers expert inputs directly from the stable
+expert sort and prepares gate weights, inverse indices and expert offsets in
+two Triton launches. Routed scaling and the shared-expert addition use a fused
+epilogue that rounds the scaled value before adding the shared output. Router
+scores, top-k selection and the stable expert sort retain their PyTorch paths.
 
 The two kernels of `layers_triton.py` also have a backward pass for
 training. The forward kernels are the same for inference and training.
@@ -224,7 +587,8 @@ The extras of `pyproject.toml`:
 | `serve` | the web server, the image decoders and the cloud host client | the policy server (`praxis/serve/README.md`) |
 | `train` | huggingface_hub, av, pyarrow | the fine-tune (`praxis/train/README.md`) |
 | `eval` | huggingface_hub, av, openai | the autoregressive eval (`praxis/eval/autoregressive/README.md`) |
-| `nvfp4` | FlashInfer, TorchAO, ninja | optional SM120 routed-expert inference |
+| `nvfp4` | FlashInfer, TorchAO, ninja | optional SM100/SM103/SM120 routed-expert inference |
+| `thor` | Quack 0.6.5 with CUDA 13 support | SM110 NVFP4 backend and optional CuTe BF16 expert kernels |
 | `dev` | pytest, ruff | the tests |
 
 The policy server serves the chunked schedule by default (`schedule: chunked`
@@ -441,7 +805,31 @@ python scripts/benchmark_inference.py --set sampler.cfg_video_scale=1.0 --out ou
 python scripts/benchmark_inference.py --trace --out outputs/bench_trace
 # With the video decoder of the last Euler step:
 python scripts/benchmark_inference.py --set session.skip_video_decoder=off --out outputs/bench_decode
+# Measure total latency with the default optimizations:
+python scripts/benchmark_inference.py --timing total --out outputs/bench_optimized
+# Disable the default optimizations, the CUDA graphs included:
+python scripts/benchmark_inference.py --no-optimizations --timing total --out outputs/bench_unoptimized
 ```
+
+`--no-optimizations` disables only fused RoPE, device-table caching, encoder
+context caching, action-expert overlap and VAE encode deduplication. It leaves
+other fusions and action-expert CUDA Graphs as configured. It does not restore
+the unoptimized code. A before/after comparison needs separate source checkouts
+with the same weights, settings, inputs, seeds and packages.
+
+The five optimizations described in "Execution" are enabled by default.
+`--no-optimizations` disables them for every benchmark session.
+The flag applies only to the benchmark process. Library defaults and saved
+inference configurations stay enabled.
+`summary.json` records the five option values. The profiler
+times direct encoder and decoder calls when expert overlap is enabled.
+Stage synchronization can reduce overlap. These timings include profiling overhead.
+Use `--timing total` to measure latency with synchronization only at call
+boundaries. This mode preserves expert overlap and omits per-stage timings.
+`--save-outputs` writes actions, video latents and commands for every call to
+`outputs/` inside the run directory. Use these files for before/after bitwise
+comparisons. Copies and disk writes are outside the call timer, but can
+affect pacing.
 
 Each session sends a first call with one frame (context depth 0, 21 command
 rows) and then calls with a stack of 25 frames (24 rows). As on the policy
@@ -458,7 +846,7 @@ versions. The stages (`praxis/profiling.py`) are:
 | Stage | What it holds |
 |---|---|
 | `text_encode` | The text encoder. The pipeline caches each prompt, so this is 0 after the first call. |
-| `vae_encode` | The video encodes of the canvas: the current frame, and with context the executed frames and the window anchor. |
+| `vae_encode` | The current-frame canvas on cold calls, or the executed stream with its anchor on context calls. |
 | `backbone` | The video backbone calls: one per sampler pass, two passes per step with video guidance. With `skip_video_decoder` on and action guidance off, the last step runs the guided pass only, without its video decoder. |
 | `expert` | The action expert calls on the taps of the backbone. |
 | `total_staged` | The whole policy call of the same sessions, with the canvas, the pose conversions and the command decode. |
@@ -643,6 +1031,9 @@ The checkpoint config selects the rig: `"embodiment": "single_arm"` or
 `"embodiment": "bimanual"` in `config.json`. The loader refuses a config
 without one of them.
 
+The single-arm inference and server configs use
+`checkpoints/praxis-1-droid`.
+
 The data of the rig:
 
 - Canvas: the pipeline crops each view to the tile aspect (centre crop) and
@@ -677,6 +1068,9 @@ it into `checkpoints/praxis-1-yam` and serve it with
 `configs/serve_yam.yaml` (the
 Modal app: `PRAXIS_CONFIG=configs/serve_yam.yaml`). The rig code is
 `praxis/bimanual.py`.
+
+The local server config uses `checkpoints/praxis-1-yam`.
+Pass this path as `checkpoint` when constructing `PraxisPipeline` for YAM.
 
 The data of the rig:
 
@@ -839,6 +1233,9 @@ resize. The `praxis-1-droid-k` comparisons do not show `praxis-1-droid` parity. 
 gives the `praxis-1-droid` status: the CPU data path checks below ran on `praxis-1-droid`, the
 GPU checks are pending.
 
+These historical comparisons use `vae_decoder_impl="reference"`. The default
+fused decoder can produce different output bits.
+
 | Part | Result (`praxis-1-droid-k`) | `praxis-1-droid` |
 |---|---|---|
 | Action expert | 259 of 259 values equal per case, 6 cases (1 to 3 chunks, two timesteps). The values cover the inputs, the rotary tables, the masks, every block output and the velocity. | Pending (GPU). |
@@ -863,6 +1260,8 @@ loop start 1 or 2 processes with the gloo backend. `pytest tests/` runs with
 any set of extras. pytest skips a test whose extra is not installed: the DROID
 data module needs `train`, the policy server `serve`, the simulator `sim` (or
 `uv pip install -e packages/praxis-sim`).
+
+CUDA kernel tests run when a GPU is available.
 
 ## License
 

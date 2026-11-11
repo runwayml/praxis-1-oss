@@ -61,7 +61,7 @@ def _resolve_relative(path: Path, node: ast.ImportFrom) -> set[str]:
 
 
 def _python_files() -> list[Path]:
-    skip = {".git", ".venv", "__pycache__", "build", "dist"}
+    skip = {".git", ".venv", "__pycache__", "build", "dist", "outputs"}
     return [p for p in ROOT.rglob("*.py") if not skip & set(p.relative_to(ROOT).parts)]
 
 

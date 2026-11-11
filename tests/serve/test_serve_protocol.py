@@ -125,6 +125,9 @@ class FakePolicy:
         settings,
         trace=None,
         skip_last_video=None,
+        ctx_cache=False,
+        overlap_expert=False,
+        pair_cfg=False,
     ):
         self.calls.append({"depth": len(cleans), "settings": settings})
         generator = torch.Generator().manual_seed(int(seed))
@@ -1124,6 +1127,9 @@ class OutOfRangePolicy(FakePolicy):
         settings,
         trace=None,
         skip_last_video=None,
+        ctx_cache=False,
+        overlap_expert=False,
+        pair_cfg=False,
     ):
         self.calls.append({"depth": len(cleans), "settings": settings})
         rows = np.zeros((24, 10), np.float32)

@@ -224,6 +224,90 @@ def test_short_exec_horizon_serves_cold_starts() -> None:
         assert inputs.chunk_index == k
 
 
+@pytest.mark.parametrize("dedup", [False, True])
+def test_lazy_current_clip_preserves_inputs_and_skips_unused_builds(monkeypatch, dedup):
+    rng = np.random.default_rng(31)
+    frames = {
+        view: rng.integers(0, 256, (118, 32, 48, 3), dtype=np.uint8)
+        for view in ("exterior", "wrist")
+    }
+    poses = _pose8(rng, 118)
+    default = sa.LAZY_CURRENT_CLIP
+    original = sa.current_clip
+    built = []
+
+    def current(*args, **kwargs):
+        built.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sa, "current_clip", current)
+    runs, counts = [], []
+    for lazy in (False, default):
+        monkeypatch.setattr(sa, "LAZY_CURRENT_CLIP", lazy)
+        sess = _session(exec_horizon=24)
+        sess.dedup_encodes = dedup
+        built.clear()
+        outputs = []
+        for k, frame in enumerate((0, 21, 45, 69, 93, 117)):
+            lo = frame if k == 0 else max(0, frame - 24)
+            inputs = sess.prepare(_obs(frames, poses, lo, frame + 1))
+            commands = sess.finish(inputs, torch.zeros(1, 6, 40))
+            outputs.append((inputs, sa.wire_to_arrays(commands)))
+        counts.append(len(built))
+        runs.append(outputs)
+    assert counts == [6, 1 if dedup else 6]
+    for (actual, wire), (expected, reference_wire) in zip(*runs, strict=True):
+        for field in ("anchor", "proprio", "proprio_all"):
+            a, b = getattr(actual, field), getattr(expected, field)
+            assert torch.equal(
+                a.contiguous().view(torch.uint8), b.contiguous().view(torch.uint8)
+            )
+        for a, b in zip(actual.cleans, expected.cleans, strict=True):
+            assert torch.equal(
+                a.contiguous().view(torch.uint8), b.contiguous().view(torch.uint8)
+            )
+        for field in ("pose8_now", "boundary_poses"):
+            assert (
+                getattr(actual, field).tobytes() == getattr(expected, field).tobytes()
+            )
+        for field in ("depth", "chunk_index", "prompt"):
+            assert getattr(actual, field) == getattr(expected, field)
+        assert all(
+            a.tobytes() == b.tobytes()
+            for a, b in zip(wire, reference_wire, strict=True)
+        )
+
+
+@pytest.mark.parametrize("fallback", ["reset", "short_stack", "stateless", "dedup_off"])
+def test_lazy_current_clip_builds_frames_when_encoding_is_required(
+    monkeypatch, fallback
+):
+    rng = np.random.default_rng(32)
+    frames = {
+        view: rng.integers(0, 256, (22, 32, 48, 3), dtype=np.uint8)
+        for view in ("exterior", "wrist")
+    }
+    poses = _pose8(rng, 22)
+    original = sa.current_clip
+    built = []
+
+    def current(*args, **kwargs):
+        built.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sa, "current_clip", current)
+    sess = _session(exec_horizon=10 if fallback == "stateless" else 24)
+    sess.dedup_encodes = fallback != "dedup_off"
+    sess.finish(sess.prepare(_obs(frames, poses, 0, 1)), torch.zeros(1, 6, 40))
+    obs = _obs(frames, poses, 18 if fallback == "short_stack" else 0, 22)
+    if fallback == "reset":
+        obs["reset_context"] = True
+    inputs = sess.prepare(obs)
+    assert len(built) == 2
+    if fallback != "dedup_off":
+        assert inputs.depth == 0
+
+
 # ---------------------------------------------------------------------------
 # Clamp of the decoded actions
 # ---------------------------------------------------------------------------
@@ -373,6 +457,23 @@ def test_tile_clip_antialias_on_is_the_fit_rule() -> None:
     )
     want = fit[..., 5:229, :]
     assert torch.equal(on[0, :, :, :, 416:].permute(1, 0, 2, 3), want)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("antialias", [False, True])
+@pytest.mark.parametrize("size", [(288, 512), (234, 416)])
+def test_tile_u8_pinned_is_the_stock_clip(monkeypatch, antialias, size) -> None:
+    """The pinned uint8 canvas gives the stock clip (values, dtype, strides), also on reuse."""
+    rng = np.random.default_rng(4)
+    ext = rng.integers(0, 256, (3, *size, 3), dtype=np.uint8)
+    wrist = rng.integers(0, 256, (3, *size, 3), dtype=np.uint8)
+    monkeypatch.setattr(sa, "TILE_U8_PINNED", False)
+    want = sa.tile_clip(ext, wrist, 224, 416, 0.03, "cuda", antialias)
+    monkeypatch.setattr(sa, "TILE_U8_PINNED", True)
+    for _ in range(2):
+        got = sa.tile_clip(ext, wrist, 224, 416, 0.03, "cuda", antialias)
+        assert got.dtype == want.dtype and got.stride() == want.stride()
+        assert torch.equal(got, want)
 
 
 def test_tile_clip_antialias_on_does_not_resize_a_fit_size_input() -> None:

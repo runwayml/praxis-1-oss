@@ -274,6 +274,7 @@ class _Policy:
         settings,
         trace=None,
         skip_last_video=None,
+        **kwargs,
     ):
         generator = torch.Generator().manual_seed(int(seed))
         dim = 4 * int(self.config["action_space"]["dim"])

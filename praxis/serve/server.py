@@ -325,11 +325,15 @@ def build_factory(cfg: dict) -> PolicyFactory:
         vae_weights=m["vae_weights"],
         text_encoder=m["text_encoder"],
         device=m.get("device", "cuda"),
+        decoder_attention_backend=m.get("decoder_attention_backend"),
+        encoder_attention_backend=m.get("encoder_attention_backend"),
         vae_norm_block_c={int(k): int(v) for k, v in block_c.items()}
         if block_c
         else None,
         routed_precision=str(m.get("routed_precision", "bf16")),
         nvfp4_cache=m.get("nvfp4_cache"),
+        action_cuda_graphs=bool(m.get("action_cuda_graphs", True)),
+        nvfp4_moe_cuda_graphs=bool(m.get("nvfp4_moe_cuda_graphs", True)),
         sampler=SamplerSettings.from_config(s),
     )
     if m.get("embodiment") != pipe.embodiment:

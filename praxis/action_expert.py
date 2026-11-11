@@ -56,11 +56,11 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, FlexKernelOptions
 
+from praxis import nvtx as NV
 from praxis.layers import (
     RotaryEmbedding,
     _compiled_flex_attention_dynamic,
     apply_rope,
-    to_device_async,
 )
 
 __all__ = [
@@ -104,6 +104,20 @@ _FLEX_TAG_PAD = 128
 # ---------------------------------------------------------------------------
 
 
+# True: rms_norm and AdaLN run their tail after the float32 mean
+# of squares (eps add, rsqrt, product, cast; the AdaLN product and cast) as one
+# Triton kernel with the eager roundings (praxis.kernels.norm_triton.rms_post;
+# same bits). The square and the mean stay the eager kernels. Default on.
+FUSED_AE_NORM = True
+
+# Portable Triton: the KV source of each cross-attention block, ``(rms_norm(tap) *
+# tap_norm_scale).to(tap.dtype)``, runs its float32 widen, rstd product, cast back, weight product and final
+# cast as ONE kernel (praxis.kernels.norm_triton.rms_scale, the eager roundings) after rms_norm's own square
+# and float32 mean (unchanged eager kernels). Same bits; faster on Thor.
+# Default on for CUDA; CPU inputs keep the ordinary path.
+FUSED_KV_SOURCE = True
+
+
 def rms_norm(x: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
     """RMS norm over the last dim, without a weight.
 
@@ -111,9 +125,34 @@ def rms_norm(x: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
     in float32. The result casts back to the input dtype.
     """
     mean_sq = torch.mean(x**2, dim=-1, keepdim=True, dtype=torch.float32)
+    if FUSED_AE_NORM:
+        from praxis.kernels import norm_triton as NT
+
+        if NT.rms_post_supported(x, mean_sq):
+            return NT.rms_post(x, mean_sq, eps)
     scale = torch.rsqrt(mean_sq + eps)
     output = x.to(torch.float32) * scale
     return output.to(x.dtype)
+
+
+def _tap_norm(feat: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """``(rms_norm(feat) * w).to(feat.dtype)``; one kernel after the mean of squares with FUSED_KV_SOURCE."""
+    if FUSED_KV_SOURCE and feat.is_cuda:
+        from praxis.kernels import norm_triton as NT
+
+        mean_sq = torch.mean(feat**2, dim=-1, keepdim=True, dtype=torch.float32)
+        if NT.rms_scale_supported(feat, mean_sq, w):
+            return NT.rms_scale(feat, mean_sq, 1e-4, w)
+        return (_rms_from_mean(feat, mean_sq) * w).to(feat.dtype)
+    return (rms_norm(feat) * w).to(feat.dtype)
+
+
+def _rms_from_mean(
+    x: torch.Tensor, mean_sq: torch.Tensor, eps: float = 1e-4
+) -> torch.Tensor:
+    """The tail of :func:`rms_norm` after its mean of squares (eager ops)."""
+    scale = torch.rsqrt(mean_sq + eps)
+    return (x.to(torch.float32) * scale).to(x.dtype)
 
 
 def geglu(x: torch.Tensor) -> torch.Tensor:
@@ -178,6 +217,18 @@ class AdaLN(nn.Module):
     def forward(self, tokens: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         """``tokens (B, S, D)``, ``cond (B, S, D)`` -> ``(B, S, D)``."""
         scale = self.proj(F.silu(cond))
+        if FUSED_AE_NORM:
+            from praxis.kernels import norm_triton as NT
+
+            mean_sq = torch.mean(tokens**2, dim=-1, keepdim=True, dtype=torch.float32)
+            if (
+                NT.rms_post_supported(tokens, mean_sq, scale)
+                and scale.stride() == tokens.stride()
+            ):
+                return NT.rms_post(tokens, mean_sq, 1e-4, ada=scale)
+            return ((1 + scale.float()) * _rms_from_mean(tokens, mean_sq)).to(
+                dtype=tokens.dtype
+            )
         return ((1 + scale.float()) * rms_norm(tokens)).to(dtype=tokens.dtype)
 
 
@@ -395,6 +446,9 @@ def _block_mask_from_mod(
     when all its entries are allowed and partial when some are. Full and
     partial tiles are kept apart, so the kernel skips the mask on full tiles.
     """
+    from praxis.attention import flash_mask_block_size
+
+    block = flash_mask_block_size(device, block)
     dense = mod(
         None,
         None,
@@ -575,12 +629,15 @@ class ActionExpertBlock(nn.Module):
         ``kernel_options``) or a dense ``(Q, KV)`` bool mask (SDPA).
         """
         b, q_len, _ = x.shape
-        h = self.adaln_attn(x, cond)
-        q = self.to_q(h)
+        with NV.op("add_norm", "adaln_attn"):
+            h = self.adaln_attn(x, cond)
+        with NV.op("attn", "q_proj"):
+            q = self.to_q(h)
         kv_in = kv_source if self.is_cross else h
         if kv_in is None:
             raise ValueError("a cross-attention block needs kv_source")
-        k, v = self.to_kv(kv_in).chunk(2, dim=-1)
+        with NV.op("attn", "kv_proj"):
+            k, v = self.to_kv(kv_in).chunk(2, dim=-1)
 
         def split(t: torch.Tensor) -> torch.Tensor:
             return t.view(b, t.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
@@ -589,9 +646,12 @@ class ActionExpertBlock(nn.Module):
         # One table per side: the cross-attention keys carry other ids than
         # the queries. ``apply_rope`` rotates two tensors with one table, so
         # each side passes itself twice and keeps one output.
-        q = apply_rope(q, q, q_table)[0]
-        k = apply_rope(k, k, k_table)[1]
-        qh, kh, vh = rms_norm(q), rms_norm(k), split(v)
+        with NV.op("attn", "qk_rope_norm"):
+            q = apply_rope(q, q, q_table)[0]
+            k = apply_rope(k, k, k_table)[1]
+            qh, kh, vh = rms_norm(q), rms_norm(k), split(v)
+        _core = NV.op("attn", "attn_core")
+        _core.__enter__()
         if isinstance(mask, BlockMask):
             attn = _compiled_flex_attention_dynamic(
                 qh,
@@ -611,9 +671,17 @@ class ActionExpertBlock(nn.Module):
             attn = F.scaled_dot_product_attention(
                 qh, kh, vh, attn_mask=mask[None, None]
             )
-        x = x + self.to_out(attn.transpose(1, 2).reshape(b, q_len, -1))
-        m = self.adaln_mlp(x, cond)
-        return x + self.mlp_out(geglu(self.mlp_in(m)))
+        _core.__exit__(None, None, None)
+        with NV.op("attn", "out_proj"):
+            x = x + self.to_out(attn.transpose(1, 2).reshape(b, q_len, -1))
+        with NV.op("add_norm", "adaln_mlp"):
+            m = self.adaln_mlp(x, cond)
+        with NV.op("ffn", "gate_up"):
+            u = self.mlp_in(m)
+        with NV.op("ffn", "activation"):
+            u = geglu(u)
+        with NV.op("ffn", "down"):
+            return x + self.mlp_out(u)
 
 
 RopeConfig = Mapping[str, int | float | str]
@@ -805,6 +873,9 @@ class ActionExpert(nn.Module):
         b, t_lat, _ = noised_action_latents.shape
         if b != 1:
             raise ValueError(f"the trunk-rope layout runs one sample, got {b}")
+        NV.set_block("pre")
+        _pre = NV.op("embed", "queries_masks_rope")
+        _pre.__enter__()
         device = noised_action_latents.device
         num_chunks = max(1, t_lat // chunk_size)
         if action_timesteps.ndim == 1:
@@ -872,22 +943,26 @@ class ActionExpert(nn.Module):
         )
         q_table = rope(q_ids)
         k_table = rope(kv_ids)
+        _pre.__exit__(None, None, None)
 
-        text_kv = None if global_tokens is None else self.text_proj(global_tokens)
+        with NV.op("embed", "text_proj"):
+            text_kv = None if global_tokens is None else self.text_proj(global_tokens)
         options = self.flex_kernel_options
         cross_idx = 0
-        for block in self.blocks:
+        for bi, block in enumerate(self.blocks):
             assert isinstance(block, ActionExpertBlock)
+            NV.set_block(bi)
             if block.is_cross:
-                feat = trunk_features[cross_idx]
-                if self.tap_norm_scale is not None:
-                    feat = (rms_norm(feat) * self.tap_norm_scale).to(feat.dtype)
-                feat = self.tap_proj(feat)
-                kv = (
-                    feat
-                    if text_kv is None
-                    else torch.cat([text_kv.to(feat.dtype), feat], dim=1)
-                )
+                with NV.op("attn", "kv_source"):
+                    feat = trunk_features[cross_idx]
+                    if self.tap_norm_scale is not None:
+                        feat = _tap_norm(feat, self.tap_norm_scale)
+                    feat = self.tap_proj(feat)
+                    kv = (
+                        feat
+                        if text_kv is None
+                        else torch.cat([text_kv.to(feat.dtype), feat], dim=1)
+                    )
                 x = block(
                     x,
                     cond,
@@ -909,10 +984,12 @@ class ActionExpert(nn.Module):
                     kernel_options=options,
                 )
 
-        out = self.head(self.norm_out(x[:, -t_lat:]))
-        if self.head_plus_zero:
-            out = out + 0.0
-        return out.view(b, t_lat, self.action_patch_dim)
+        NV.set_block("post")
+        with NV.op("head", "norm_head"):
+            out = self.head(self.norm_out(x[:, -t_lat:]))
+            if self.head_plus_zero:
+                out = out + 0.0
+            return out.view(b, t_lat, self.action_patch_dim)
 
 
 # ---------------------------------------------------------------------------
@@ -990,9 +1067,25 @@ def run_expert_on_taps_k(
         return list(range(start, start + length))
 
     g_pos = [p for kind in expert.global_order for p in positions(global_spans[kind])]
-    s_pos = positions(clean_span) + positions(noised_span)
-    g_idx = to_device_async(torch.tensor(g_pos, dtype=torch.long), device)
-    s_idx = to_device_async(torch.tensor(s_pos, dtype=torch.long), device)
+    positions(clean_span)
+    positions(noised_span)
+
+    def device_index(spans: list[tuple[int, int] | None]) -> torch.Tensor:
+        # The spans are contiguous ranges: build the same indices on the
+        # device (no pageable host copy, no host sync).
+        parts = [
+            torch.arange(sp[0], sp[0] + sp[1], dtype=torch.long, device=device)
+            for sp in spans
+            if sp is not None and sp[1] > 0
+        ]
+        if not parts:
+            return torch.empty(0, dtype=torch.long, device=device)
+        return parts[0] if len(parts) == 1 else torch.cat(parts)
+
+    _g = NV.op("embed", "tap_gather", block="pre")
+    _g.__enter__()
+    g_idx = device_index([global_spans[kind] for kind in expert.global_order])
+    s_idx = device_index([clean_span, noised_span])
     ids = rope_ids.to(device)
     kv_rope_ids = torch.cat([ids.index_select(1, g_idx), ids.index_select(1, s_idx)], 1)
     dtype = embeddings.dtype
@@ -1002,6 +1095,7 @@ def run_expert_on_taps_k(
     a_t = action_t_per_chunk.to(device).repeat_interleave(frames_per_chunk, dim=1)
     proprio = proprio_per_chunk.to(device).to(dtype)
     proprio = proprio.repeat_interleave(frames_per_chunk, dim=1)
+    _g.__exit__(None, None, None)
     return expert.forward_trunk_rope(
         noised_action_latents=noised,
         action_timesteps=a_t,

@@ -109,7 +109,7 @@ class _Policy:
 
     def sample_window_joint(
         self, text, text_uncond, anchor, cleans, proprio_all, seed, settings,
-        trace=None, skip_last_video=None,
+        trace=None, skip_last_video=None, **kwargs,
     ):  # fmt: skip
         generator = torch.Generator().manual_seed(int(seed))
         dim = 4 * int(self.config["action_space"]["dim"])
