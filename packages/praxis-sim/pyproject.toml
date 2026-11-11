@@ -3,6 +3,9 @@ name = "praxis-sim"
 version = "0.1.0"
 description = "The MuJoCo single-arm and bimanual YAM rigs of Praxis-1 and their evaluation suites, as Gymnasium environments"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Runway" }]
 # 3.10 and up, so the simulator installs next to other sim stacks and in LeRobot
 # environments; the praxis package itself needs 3.12.
 requires-python = ">=3.10"
@@ -18,8 +21,13 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
 
+[project.urls]
+Repository = "https://github.com/runwayml/praxis-1-oss"
+Documentation = "https://github.com/runwayml/praxis-1-oss/tree/main/packages/praxis-sim"
+
+# setuptools 77 is the first to read the SPDX `license` string and `license-files` (PEP 639).
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

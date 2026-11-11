@@ -34,7 +34,7 @@ Install the `train` extra (`huggingface_hub`, `av` and `pyarrow`) and get the
 weights ("Get the weights" in the main README):
 
 ```bash
-pip install -e ".[train]"
+uv pip install -e ".[train]"
 ```
 
 To change one value without an edit of the file, use `--set`, for example

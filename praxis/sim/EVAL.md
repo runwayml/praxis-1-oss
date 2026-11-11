@@ -80,7 +80,7 @@ loads the model once and runs its episodes in turn. The harder suite takes
 about 45 minutes on two H100 GPUs (one sampler seed on each).
 
 ```bash
-pip install -e ".[sim]"   # pulls in the praxis-sim package (see praxis/sim/README.md)
+uv pip install -e ".[sim]"   # pulls in the praxis-sim package (see praxis/sim/README.md)
 
 # One GPU, both sampler seeds.
 MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard \

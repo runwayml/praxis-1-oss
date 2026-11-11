@@ -14,7 +14,7 @@ The server is a separate module. Only its own files and its tests in
 `[serve]` extra installs them:
 
 ```bash
-pip install -e ".[serve,kernels]"
+uv pip install -e ".[serve,kernels]"
 ```
 
 Install PyTorch and torchvision for your CUDA version first, as the install
