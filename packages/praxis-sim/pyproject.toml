@@ -1,6 +1,6 @@
 [project]
 name = "praxis-sim"
-version = "0.1.0"
+version = "0.1.1"
 description = "The MuJoCo single-arm rig of Praxis-1 and its evaluation suites, as Gymnasium environments"
 readme = "README.md"
 license = "Apache-2.0"
