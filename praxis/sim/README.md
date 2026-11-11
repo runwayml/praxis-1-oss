@@ -35,14 +35,12 @@ evaluation with a run of `scripts/run_sim_eval.py`.
 ## Install
 
 ```bash
-pip install -e ".[sim]"   # the praxis-sim package (mujoco 3.16, gymnasium) + imageio, imageio-ffmpeg
+uv pip install -e ".[sim]"   # the praxis-sim package (mujoco 3.16, gymnasium) + imageio, imageio-ffmpeg
 ```
 
 Use the `sim` extra in addition to the install steps of the top README. The
-extra installs the simulator package from this repository's git URL; to work on
-the simulator itself, install the checkout's copy editable on top, as a separate
-command after the extra: `pip install -e packages/praxis-sim` (re-running the `sim`
-extra replaces it with the copy from `main`). The
+extra installs the simulator package from PyPI. To work on the simulator itself,
+install the checkout's copy editable: `uv pip install -e packages/praxis-sim`. The
 scripted policy needs no GPU and no model weights. The model policy needs the
 weights of the top README and one GPU with 80 GB of memory.
 
@@ -344,9 +342,9 @@ MUJOCO_GL=egl python scripts/run_sim_yam.py --config configs/sim_yam.yaml \
   first. The tasks place their objects at the table height of
   the profile, in the region of the generic cell (x 0.42-0.82 m, |y| up to
   0.31 m from the rig centre), so the table of the profile must cover it.
-- **Install.** The YAM modules ship with `praxis-sim` from this checkout:
-  `pip install -e packages/praxis-sim` (the `sim` extra installs the package
-  from the main branch).
+- **Install.** The YAM modules ship with `praxis-sim` 0.1.0, so the `sim`
+  extra installs them. To change them, install the checkout's copy editable:
+  `uv pip install -e packages/praxis-sim`.
 - **Speed.** On the CPU (EGL on Mesa llvmpipe), one tick with the three
   views takes about 0.2 s. On a GPU it takes about 10 ms. The oracle without
   rendering runs every task in seconds.

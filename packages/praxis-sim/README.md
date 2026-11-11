@@ -8,9 +8,9 @@ own: MuJoCo, Gymnasium and numpy, no torch. The model loop (`praxis.sim.loop`), 
 `praxis` package, which runs the simulation through this one.
 
 ```bash
-pip install "praxis-sim @ git+https://github.com/runwayml/praxis-1-oss.git#subdirectory=packages/praxis-sim"
+uv pip install praxis-sim
 # or, from a checkout of this repository (the `sim` extra of praxis pulls the package in too):
-pip install -e packages/praxis-sim
+uv pip install -e packages/praxis-sim
 ```
 
 Python 3.10 or newer (the praxis package itself needs 3.12). The package has no torch and
@@ -18,8 +18,8 @@ imports no core praxis module; `tests/test_isolation.py` checks that, and the te
 environment that holds only the package:
 
 ```bash
-python -m venv /tmp/praxis-sim-venv && /tmp/praxis-sim-venv/bin/pip install "./packages/praxis-sim[dev]"
-MUJOCO_GL=egl /tmp/praxis-sim-venv/bin/pytest packages/praxis-sim/tests
+uv venv --python 3.12 .venv-sim && VIRTUAL_ENV=.venv-sim uv pip install "./packages/praxis-sim[dev]"
+MUJOCO_GL=egl .venv-sim/bin/pytest packages/praxis-sim/tests
 ```
 
 The robot models (MuJoCo Menagerie, pinned commit) download on first use into a cache

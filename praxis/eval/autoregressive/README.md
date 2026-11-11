@@ -65,7 +65,7 @@ The Praxis-1 rollout of this repository is `rollout.py`, run by
 
 The rollout needs the install of the main `README.md`, with the
 `flash-attn-4` step of "Get the weights" (or the `triton` backend of the
-same section). `pip install -e ".[eval]"` alone covers the judge and the
+same section). `uv pip install -e ".[eval]"` alone covers the judge and the
 scorer only.
 
 ```bash
@@ -164,11 +164,11 @@ The scope of this check:
 
 ## Usage
 
-`pip install -e ".[eval]"` is enough for `judge` and `score`. The rollout
+`uv pip install -e ".[eval]"` is enough for `judge` and `score`. The rollout
 needs the full install (see "The video of a model").
 
 ```bash
-pip install -e ".[eval]"
+uv pip install -e ".[eval]"
 # the videos of a model: outputs/ar/<model>/<id>.mp4
 ASTRA_BASE_URL=https://api.openai.com/v1 ASTRA_API_KEY=... \
   python scripts/score_autoregressive_eval.py judge --set droid --run outputs/ar/mine --tts
@@ -178,7 +178,7 @@ python scripts/score_autoregressive_eval.py score --set droid --cutoff 11.894 \
   outputs/ar/praxis-1-droid outputs/ar/mine            # within 11.9 s
 ```
 
-The tests run on the CPU and need no weights (`pip install -e ".[eval,dev]"`):
+The tests run on the CPU and need no weights (`uv pip install -e ".[eval,dev]"`):
 
 ```bash
 pytest tests/test_eval_autoregressive.py

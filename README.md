@@ -24,19 +24,20 @@ Clone the repository, install it, download the weights from Hugging Face
 and run the single-arm checkpoint in the simulation. It needs Python 3.12,
 one CUDA GPU with at least 80 GB of memory and the CUDA 13.0 driver. Log in
 to Hugging Face once first (`hf auth login`); the `hf` command comes with
-`transformers`, so log in after the install if you don't have it yet.
+`transformers`, so log in after the install if you don't have it yet. The
+install uses [uv](https://docs.astral.sh/uv/): `pip install uv`, or
+`curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
 ```bash
 git clone https://github.com/runwayml/praxis-1-oss.git praxis-1 && cd praxis-1
-python3.12 -m venv .venv && . .venv/bin/activate
-pip install -U pip
-pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu130
-pip install packaging ninja wheel
+uv venv --python 3.12 .venv && . .venv/bin/activate
+uv pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu130
+uv pip install packaging ninja wheel
 CAUSAL_CONV1D_FORCE_BUILD=TRUE MAX_JOBS=16 \
-  pip install --no-cache-dir --no-build-isolation causal-conv1d==1.6.1
-pip install -e packages/praxis-sim -e ".[kernels]" "imageio>=2.30" "imageio-ffmpeg>=0.4"   # praxis and praxis-sim from this checkout
-pip install "flash-attn-4[cu13]==4.0.0b36"
-pip install --no-deps nvidia-cudnn-cu13==9.24.0.43   # after every install that resolves torch
+  uv pip install --no-build-isolation --no-cache causal-conv1d==1.6.1
+uv pip install -e packages/praxis-sim -e ".[kernels]" "imageio>=2.30" "imageio-ffmpeg>=0.4"   # praxis and praxis-sim from this checkout
+uv pip install "flash-attn-4[cu13]==4.0.0b36"
+uv pip install --no-deps nvidia-cudnn-cu13==9.24.0.43   # after every install that resolves torch
 
 hf download Wan-AI/Wan2.2-TI2V-5B Wan2.2_VAE.pth --local-dir weights
 hf download Qwen/Qwen3.5-2B --local-dir weights/Qwen3.5-2B
@@ -141,9 +142,9 @@ little after the first call of each prompt.
 `python scripts/benchmark_inference.py --config configs/serve_droid.yaml --set model.routed_precision=nvfp4`;
 the summary records the routed precision and the attention backend in effect.
 
-**Install and first run.** Run `pip install -e '.[nvfp4]'` in the CUDA 13
+**Install and first run.** Run `uv pip install -e '.[nvfp4]'` in the CUDA 13
 environment of "Install". It resolves torch again, so repeat the cuDNN pin
-afterwards (`pip install --no-deps nvidia-cudnn-cu13==9.24.0.43`). The first
+afterwards (`uv pip install --no-deps nvidia-cudnn-cu13==9.24.0.43`). The first
 call JIT-compiles FlashInfer's SM120 grouped GEMM with `nvcc` (CUDA 12.8 or
 newer, a few minutes; the server warm-up absorbs it). The first load packs the
 4,352 expert matrices on the CPU, which takes minutes (about 18 with 22
@@ -191,22 +192,21 @@ The original implementation uses another kernel of the VAE encoder (see
 Use Python 3.12 and a CUDA GPU with at least 80 GB of memory (one H100 is
 sufficient). This is for the bf16 default; for SM120 GPUs with less memory, see
 "Optional routed NVFP4 inference". Run all the steps in the root directory of the repository. The
-example is for CUDA 13.0:
+example is for CUDA 13.0 and uses [uv](https://docs.astral.sh/uv/) (`pip install uv`):
 
 ```bash
-python3.12 -m venv .venv && . .venv/bin/activate
-pip install -U pip
-pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu130
-pip install packaging ninja wheel
+uv venv --python 3.12 .venv && . .venv/bin/activate
+uv pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu130
+uv pip install packaging ninja wheel
 CAUSAL_CONV1D_FORCE_BUILD=TRUE MAX_JOBS=16 \
-  pip install --no-cache-dir --no-build-isolation causal-conv1d==1.6.1
-pip install -e ".[kernels,sim]"   # the sim extra pulls in the praxis-sim package, see "Simulation"
-pip install --no-deps nvidia-cudnn-cu13==9.24.0.43
+  uv pip install --no-build-isolation --no-cache causal-conv1d==1.6.1
+uv pip install -e ".[kernels,sim]"   # the sim extra pulls in the praxis-sim package, see "Simulation"
+uv pip install --no-deps nvidia-cudnn-cu13==9.24.0.43
 python -c "import torch, causal_conv1d_cuda; print('causal-conv1d OK')"
 ```
 
 - `transformers` needs torchvision to load the processor of Qwen3.5.
-- There is no `causal-conv1d` wheel for PyTorch 2.13. Thus pip compiles it
+- There is no `causal-conv1d` wheel for PyTorch 2.13. Thus uv builds it
   from source with `nvcc`. `MAX_JOBS` sets the number of parallel compile
   jobs (about 1 GB of memory each).
 - We made the validation results with cuDNN 9.24. PyTorch 2.13 asks for
@@ -219,7 +219,7 @@ The extras of `pyproject.toml`:
 |---|---|---|
 | (none) | torch, torchvision, triton, transformers, safetensors, numpy, pillow, pyyaml | the model |
 | `kernels` | flash-linear-attention, causal-conv1d | the text encoder kernels of the validation results (see below) |
-| `sim` | praxis-sim (mujoco, gymnasium; `packages/praxis-sim` of this repository), imageio, imageio-ffmpeg | the MuJoCo simulation |
+| `sim` | praxis-sim (mujoco, gymnasium; `packages/praxis-sim` of this repository, from PyPI), imageio, imageio-ffmpeg | the MuJoCo simulation |
 | `video` | imageio, imageio-ffmpeg | mp4 export of `scripts/run_inference.py` |
 | `serve` | the web server, the image decoders and the cloud host client | the policy server (`praxis/serve/README.md`) |
 | `train` | huggingface_hub, av, pyarrow | the fine-tune (`praxis/train/README.md`) |
@@ -304,8 +304,8 @@ The checkpoint asks for the `flash` attention backend of the trunk
 results with this backend. It needs the `flash-attn-4` package:
 
 ```bash
-pip install "flash-attn-4[cu13]==4.0.0b36"
-pip install --no-deps nvidia-cudnn-cu13==9.24.0.43   # the install above resolves torch again
+uv pip install "flash-attn-4[cu13]==4.0.0b36"
+uv pip install --no-deps nvidia-cudnn-cu13==9.24.0.43   # the install above resolves torch again
 ```
 
 Without this package, set the backend to `triton`. Then the trunk uses the
@@ -338,7 +338,7 @@ for C in praxis-1-droid praxis-1-yam praxis-1-base; do
   (cd checkpoints/$C && sha256sum -c --quiet SHA256SUMS && echo "$C OK")
 done
 
-# Inference: one closed-loop episode per checkpoint in the simulation (pip install -e ".[sim]").
+# Inference: one closed-loop episode per checkpoint in the simulation (uv pip install -e ".[sim]").
 MUJOCO_GL=egl python scripts/run_sim.py --config configs/sim_droid.yaml \
     --set task.name=block_in_bowl --set task.prompt=null --set viewer.enabled=false
 MUJOCO_GL=egl python scripts/run_sim_yam.py --config configs/sim_yam.yaml \
@@ -350,7 +350,7 @@ MUJOCO_GL=egl python scripts/run_sim_eval.py --suite droid_guard \
 MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard \
     --checkpoint checkpoints/praxis-1-droid --out outputs/eval/hard
 
-# Training (pip install -e ".[train]", praxis/train/README.md).
+# Training (uv pip install -e ".[train]", praxis/train/README.md).
 # A new rig: the full fine-tune of the base on 8 GPUs. The statistics and the heads come first.
 python scripts/compute_norm_stats.py --config configs/finetune_base.yaml
 python scripts/init_heads.py --config configs/finetune_base.yaml
@@ -492,6 +492,10 @@ in ms as p50 / p90 / max:
 | | later (n=9; staged n=27) | 701 / 729 / 742 | 730 / 733 / 734 | 589 / 590 / 591 | 53 / 54 / 55 | 58 / 58 / 58 | 0 |
 | `cfg_video_scale` 1.0: 1 pass per step | first of a session (n=1; staged n=2) | 189 / 189 / 189 | 218 / 218 / 218 | 157 / 157 / 157 | 52 / 52 / 52 | 5 / 5 / 5 | 0 |
 | | later (n=9; staged n=18) | 406 / 407 / 407 | 437 / 441 / 441 | 295 / 296 / 296 | 53 / 55 / 55 | 58 / 59 / 59 | 0 |
+
+These times include the video decode of the last Euler step. The policy
+server skips that decode by default (`skip_video_decoder`, see
+`praxis/serve/README.md`), so a served call is shorter by one decoder pass.
 
 A run from a fresh clone of this repository, with the steps of "Install"
 and "Get the weights" on another H100, took 17 minutes from the clone to
@@ -718,7 +722,7 @@ variant of the model:
   - The normalization statistics come from the checkpoint.
 
 The trunk uses the `flash` attention backend (`backbone.attention.backend`),
-which needs the `flash-attn-4` package (`pip install "flash-attn-4[cu13]==4.0.0b36"`;
+which needs the `flash-attn-4` package (`uv pip install "flash-attn-4[cu13]==4.0.0b36"`;
 `docker/Dockerfile` installs it). Set the backend to `triton` to use the
 Triton kernel of flex attention instead (see "Get the weights"). The two
 backends differ in the last bits.
@@ -751,7 +755,7 @@ environment, or next to a sim stack on another Python). The `sim` extra of
 
 | Sim | Package | Python | Install | Reaches the model |
 | --- | --- | --- | --- | --- |
-| MuJoCo rig (this repository) | `praxis-sim` | >= 3.10 | `pip install -e ".[sim]"`, or on its own `pip install "praxis-sim @ git+https://github.com/runwayml/praxis-1-oss.git#subdirectory=packages/praxis-sim"` | in process (`praxis.sim.loop`), or as Gymnasium environments (`praxis_sim.gym_env`) |
+| MuJoCo rig (this repository) | `praxis-sim` | >= 3.10 | `uv pip install -e ".[sim]"`, or on its own `uv pip install praxis-sim` | in process (`praxis.sim.loop`), or as Gymnasium environments (`praxis_sim.gym_env`) |
 
 A simulator that cannot share praxis's Python or numpy reaches the model through
 the policy server of the `serve` extra (two processes: the server in the praxis
@@ -788,7 +792,7 @@ the scorer take the mp4s of any model. See
 `praxis/eval/autoregressive/README.md`.
 
 ```bash
-pip install -e ".[eval]"
+uv pip install -e ".[eval]"
 python scripts/score_autoregressive_eval.py judge --set droid --run outputs/ar/mine
 python scripts/score_autoregressive_eval.py score --set droid outputs/ar/praxis-1-droid outputs/ar/mine
 ```
@@ -845,7 +849,7 @@ The unit tests run on the CPU and need no weights. The tests of the training
 loop start 1 or 2 processes with the gloo backend. `pytest tests/` runs with
 any set of extras. pytest skips a test whose extra is not installed: the DROID
 data module needs `train`, the policy server `serve`, the simulator `sim` (or
-`pip install -e packages/praxis-sim`).
+`uv pip install -e packages/praxis-sim`).
 
 ## License
 
