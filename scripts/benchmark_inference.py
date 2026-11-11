@@ -14,6 +14,11 @@ fit size of the antialiased checkpoint) or 512x288. Each session runs
 ``--calls`` calls, so the context depth goes 0, 1, ..., up to
 ``max_context_chunks``.
 
+As on the policy server, each call skips the video decoder of the last Euler
+step (``skip_video_decoder``, default on): the commands keep their bits and
+the call returns no predicted video. ``--set session.skip_video_decoder=off``
+times the full last step.
+
 The ``--sessions`` staged sessions time each stage (:mod:`praxis.profiling`)
 with a device synchronize around it. The sync stops the CPU from queuing the
 next stage while the GPU runs this one, so one more plain session times each
@@ -111,10 +116,33 @@ def environment(pipe: PraxisPipeline) -> dict:
     }
 
 
+def skip_video_decoder(session: dict) -> bool:
+    """Return the ``skip_video_decoder`` of the session settings, as the server.
+
+    Absent or ``auto`` skips the video decoder of the last Euler step. The
+    script reads the value itself: it must not import the server package.
+    """
+    value = session.get("skip_video_decoder")
+    if value is None:
+        return True
+    if isinstance(value, bool | int | float):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("auto", "default", "on", "true", "1", "yes"):
+        return True
+    if text in ("off", "false", "0", "no", "none", ""):
+        return False
+    raise SystemExit(f"skip_video_decoder: expected on|off|auto, got {value!r}")
+
+
 def settings(pipe: PraxisPipeline, session: dict) -> dict:
     """Return the sampler and session settings of the run."""
     s = pipe.sampler
     guided = s.guided
+    skip = skip_video_decoder(session)
+    # Without its video the last step needs the unguided pass only for the
+    # action guidance.
+    last = 2 if guided and not (skip and float(s.cfg_scale) == 1.0) else 1
     return {
         "num_steps": s.num_steps,
         "t_shift": s.t_shift,
@@ -123,8 +151,10 @@ def settings(pipe: PraxisPipeline, session: dict) -> dict:
         # window_joint runs the guided and the unguided pass one after the other.
         "cfg_mode": "sequential" if guided else "off",
         "passes_per_step": 2 if guided else 1,
+        "last_step_passes": last,
         "context_mode": session.get("context_mode", "observed"),
         "max_context_chunks": int(session["max_context_chunks"]),
+        "skip_video_decoder": skip,
         "prompt": PROMPT,
         "exec_horizon": session.get("exec_horizon"),
         "control_mode": session.get("control_mode"),
@@ -148,6 +178,7 @@ def run(
     # A stateless session starts each call cold, with one frame (as the server).
     stateless = session.get("context_mode", "observed") == "stateless"
     depth = 0 if stateless else int(session["max_context_chunks"])
+    skip = skip_video_decoder(session)
     records: list[dict] = []
     # After the staged sessions come one plain session (one sync around each
     # call, no sync between the stages: the call time a server sees) and the
@@ -163,6 +194,7 @@ def run(
                 max_context_chunks=depth,
                 control_mode=str(session.get("control_mode", "droid_impedance")),
                 exec_horizon=session.get("exec_horizon"),
+                skip_last_video=skip,
             )
             plain = s == plain_session
             prof = None
