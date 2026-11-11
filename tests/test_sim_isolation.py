@@ -3,9 +3,8 @@
 Rules:
 
 * Only ``praxis/sim``, ``tests/test_sim_*.py``, ``scripts/run_sim.py``,
-  ``scripts/run_sim_eval.py``, ``scripts/compare_sim_eval.py``,
-  ``scripts/record_sim_demos.py`` and ``scripts/run_sim_yam.py`` import
-  ``praxis.sim``.
+  ``scripts/run_sim_eval.py``, ``scripts/compare_sim_eval.py`` and
+  ``scripts/record_sim_demos.py`` import ``praxis.sim``.
 * ``praxis.sim`` imports only the standard library, numpy, Pillow, PyYAML,
   MuJoCo (with PyOpenGL, a MuJoCo dependency), imageio-ffmpeg, torch, the
   simulator package ``praxis_sim`` and the core ``praxis`` modules (not
@@ -75,7 +74,6 @@ def _may_import_sim(path: Path) -> bool:
         Path("scripts/run_sim_eval.py"),
         Path("scripts/compare_sim_eval.py"),
         Path("scripts/record_sim_demos.py"),
-        Path("scripts/run_sim_yam.py"),
     )
 
 

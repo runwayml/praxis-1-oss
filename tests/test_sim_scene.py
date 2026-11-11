@@ -82,7 +82,7 @@ def model() -> mujoco.MjModel:
 
 def test_pinned_file_table() -> None:
     paths = [p for p, _, _ in assets.FILES]
-    assert len(paths) == len(set(paths)) == 88
+    assert len(paths) == len(set(paths)) == 71
     for model_source in assets.MODELS.values():
         assert model_source.xml in paths
         assert f"{model_source.directory}/LICENSE" in paths

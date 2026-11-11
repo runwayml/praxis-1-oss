@@ -18,7 +18,7 @@ import pytest
 pytest.importorskip("praxis_sim")  # the `sim` extra
 
 # praxis_sim sets the OpenGL backend of MuJoCo. It must load before mujoco, or a
-# later rendering test (tests/test_sim_yam.py) aborts in the same process.
+# later rendering test aborts in the same process.
 import praxis_sim  # noqa: F401
 
 pytest.importorskip("mujoco")

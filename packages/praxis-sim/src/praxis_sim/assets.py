@@ -9,10 +9,6 @@ The robot models come from MuJoCo Menagerie
 * ``robotiq_2f85/2f85.xml``: the Robotiq 2F-85 gripper. License:
   BSD-2-Clause, "Copyright (c) 2013, ROS-Industrial". Menagerie made it from
   the public ROS-Industrial ``robotiq`` package.
-* ``i2rt_yam/yam_linear_4310.xml``: the I2RT YAM arm with the ``linear_4310``
-  parallel gripper (the arm of the bimanual rig). License: MIT, "Copyright
-  (c) 2025 i2rt robotics". Menagerie made it from the public I2RT URDF and
-  SDK files.
 
 This repository does not contain the model files. :func:`ensure_assets`
 downloads each file from the pinned commit into a cache directory and checks
@@ -75,103 +71,10 @@ MODELS: dict[str, ModelSource] = {
         copyright="Copyright (c) 2013, ROS-Industrial",
         upstream="https://github.com/ros-industrial/robotiq",
     ),
-    "yam": ModelSource(
-        name="I2RT YAM with the linear_4310 gripper",
-        directory="i2rt_yam",
-        xml="i2rt_yam/yam_linear_4310.xml",
-        license="MIT",
-        copyright="Copyright (c) 2025 i2rt robotics",
-        upstream="https://github.com/i2rt-robotics/i2rt",
-    ),
 }
 
 # (path in the Menagerie repository, sha256, size in bytes) at MENAGERIE_COMMIT.
 FILES: tuple[tuple[str, str, int], ...] = (
-    (
-        "i2rt_yam/LICENSE",
-        "dc46c3a7dc48221aa783e634d15db0f816ba83ba5cdb77bbaa91525c61c7552f",
-        1070,
-    ),
-    (
-        "i2rt_yam/assets/linear_4310/d405_wrist_linear_4310.stl",
-        "f01bcd92b447c3a44c1ad9345367628d4157fe4c07b545ccbf9bc4ae81115112",
-        469584,
-    ),
-    (
-        "i2rt_yam/assets/linear_4310/gripper.stl",
-        "d949c401186197d842ca8f9b23bfcbf24bed8461b421df06093c65e4ead21f5d",
-        400084,
-    ),
-    (
-        "i2rt_yam/assets/linear_4310/tip_left.stl",
-        "03d94f53d7b5e9e1871ea6f3925c68d7a2f894b08e0c575fa0b9ed4024684ff7",
-        400084,
-    ),
-    (
-        "i2rt_yam/assets/linear_4310/tip_right.stl",
-        "8f620aae9c15e00e2ea4e5bf5e9a49e7edb2d23128b8955cfacc0da8da45c72f",
-        400084,
-    ),
-    (
-        "i2rt_yam/assets/model2.stl",
-        "5ac61c0313ed00c38655e41681af1b8b307cf8d5ef57209a75f215cea02df754",
-        524284,
-    ),
-    (
-        "i2rt_yam/assets/model2__10.stl",
-        "b879cc07f547b7a2ac52e428dd206e80a0d4b0e805cb56b9a8230df04a690923",
-        524284,
-    ),
-    (
-        "i2rt_yam/assets/model2__11.stl",
-        "af220d2a51e8444392aef36e2fe4a6f69aed22bc292a7f38e54da3b4f5253434",
-        248584,
-    ),
-    (
-        "i2rt_yam/assets/model2__2.stl",
-        "30dab41f14bae95d737abca3c934eb5d570ab107dff0b40952fbdfb9d07eab79",
-        524284,
-    ),
-    (
-        "i2rt_yam/assets/model2__3.stl",
-        "9fd96f5ad387fe7dd96eaa65e386637800e2f5637b6167fbad4ecb37d8598f47",
-        80684,
-    ),
-    (
-        "i2rt_yam/assets/model2__4.stl",
-        "33c0e7ef538e2c4473efa9c4ef2a8441b6094b65090b4dec71abe82001d974df",
-        80684,
-    ),
-    (
-        "i2rt_yam/assets/model2__5.stl",
-        "09f08e7dead2d6363618471adadb1b94af39e8056676670f3fd21ec06c197b20",
-        524284,
-    ),
-    (
-        "i2rt_yam/assets/model2__6.stl",
-        "888b5919d10dbfb59b964c3cafc2ddbdac3b5426e20dd13bcaf4baedd5ee15c9",
-        86284,
-    ),
-    (
-        "i2rt_yam/assets/model2__7.stl",
-        "2d64b18f1e70b0460eb53335d340b7c879976a3093ec67b07bcb7245e371a91d",
-        52084,
-    ),
-    (
-        "i2rt_yam/assets/model2__8.stl",
-        "db3708da6b14daf3fc9a1909a8325b68f65ff69146cdd20b69a9ddc4ce51f50d",
-        524284,
-    ),
-    (
-        "i2rt_yam/assets/model2__9.stl",
-        "74969d09b8b7f75cc984c5c7e5526d2941c6724f48b3efa1fa8730cc7820f4f5",
-        52084,
-    ),
-    (
-        "i2rt_yam/yam_linear_4310.xml",
-        "beb1ccea8eefc3e181a562459fb55626e4beb7ef63eb0ceac55bdf8f24c63434",
-        16991,
-    ),
     (
         "franka_emika_panda/LICENSE",
         "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",

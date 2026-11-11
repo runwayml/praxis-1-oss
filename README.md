@@ -338,11 +338,9 @@ for C in praxis-1-droid praxis-1-yam praxis-1-base; do
   (cd checkpoints/$C && sha256sum -c --quiet SHA256SUMS && echo "$C OK")
 done
 
-# Inference: one closed-loop episode per checkpoint in the simulation (uv pip install -e ".[sim]").
+# Inference: one closed-loop episode of the single-arm checkpoint in the simulation (uv pip install -e ".[sim]").
 MUJOCO_GL=egl python scripts/run_sim.py --config configs/sim_droid.yaml \
     --set task.name=block_in_bowl --set task.prompt=null --set viewer.enabled=false
-MUJOCO_GL=egl python scripts/run_sim_yam.py --config configs/sim_yam.yaml \
-    --checkpoint checkpoints/praxis-1-yam --tasks block_tower --seeds 1 --out outputs/sim_yam
 
 # Evaluation: the fixed suites of the single-arm checkpoint (praxis/sim/EVAL.md).
 MUJOCO_GL=egl python scripts/run_sim_eval.py --suite droid_guard \

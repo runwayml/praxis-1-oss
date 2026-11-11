@@ -1,12 +1,10 @@
-"""MuJoCo simulation of the single-arm and the bimanual rig: the model loops, the video writer and the live viewer.
+"""MuJoCo simulation of the single-arm rig: the model loop, the video writer and the live viewer.
 
 The simulator itself (scene, robot, tasks, environment, the evaluation suites, the
 scripted policy, the run settings) is the ``praxis-sim`` package of
 ``packages/praxis-sim``, installable without torch (the ``sim`` extra of ``praxis``
 pulls it in). This package keeps the parts that need the model:
 :mod:`praxis.sim.loop` (the closed-loop sampling loop and the policies),
-:mod:`praxis.sim.yam_loop` and :mod:`praxis.sim.yam_config` (the same for the
-bimanual YAM rig),
 :mod:`praxis.sim.video` (the MP4 writer) and :mod:`praxis.sim.viewer` (the live
 view in a web browser).
 
@@ -56,10 +54,6 @@ _MOVED = frozenset(
         "suite_multi",
         "suite_place",
         "tasks",
-        "yam_env",
-        "yam_scene",
-        "yam_scripted",
-        "yam_tasks",
     }
 )
 
