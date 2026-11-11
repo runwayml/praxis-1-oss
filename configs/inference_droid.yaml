@@ -37,6 +37,8 @@ session:
   seed: 0                         # chunk k samples with seed + k
 
 input:
+  # The repository ships no episodes: set episodes_dir to a directory of your own
+  # (or --set input.episodes_dir=<path>).
   episodes_dir: examples/droid_episodes   # one sub-directory per episode
   episodes: all                           # "all" or a list of names
   chunk_starts: [0, 21, 45, 69]           # frame index of each policy call

@@ -493,6 +493,10 @@ in ms as p50 / p90 / max:
 | `cfg_video_scale` 1.0: 1 pass per step | first of a session (n=1; staged n=2) | 189 / 189 / 189 | 218 / 218 / 218 | 157 / 157 / 157 | 52 / 52 / 52 | 5 / 5 / 5 | 0 |
 | | later (n=9; staged n=18) | 406 / 407 / 407 | 437 / 441 / 441 | 295 / 296 / 296 | 53 / 55 / 55 | 58 / 59 / 59 | 0 |
 
+These times include the video decode of the last Euler step. The policy
+server skips that decode by default (`skip_video_decoder`, see
+`praxis/serve/README.md`), so a served call is shorter by one decoder pass.
+
 A run from a fresh clone of this repository, with the steps of "Install"
 and "Get the weights" on another H100, took 17 minutes from the clone to
 the numbers: 13 to install (most of it the `causal-conv1d` compile), 3 to
@@ -751,7 +755,7 @@ environment, or next to a sim stack on another Python). The `sim` extra of
 
 | Sim | Package | Python | Install | Reaches the model |
 | --- | --- | --- | --- | --- |
-| MuJoCo rig (this repository) | `praxis-sim` | >= 3.10 | `pip install -e ".[sim]"`, or on its own `pip install "praxis-sim @ git+https://github.com/runwayml/praxis-1-oss.git#subdirectory=packages/praxis-sim"` | in process (`praxis.sim.loop`), or as Gymnasium environments (`praxis_sim.gym_env`) |
+| MuJoCo rig (this repository) | `praxis-sim` | >= 3.10 | `pip install -e ".[sim]"`, or on its own `pip install praxis-sim` | in process (`praxis.sim.loop`), or as Gymnasium environments (`praxis_sim.gym_env`) |
 
 A simulator that cannot share praxis's Python or numpy reaches the model through
 the policy server of the `serve` extra (two processes: the server in the praxis
