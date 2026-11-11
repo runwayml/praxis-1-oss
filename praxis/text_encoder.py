@@ -155,6 +155,15 @@ class TextEncoder:
         """Tokenize one batch. Returns ``input_ids`` and ``attention_mask``."""
         return self.processor(text=list(prompts), **self.call_kwargs).to(self.device)
 
+    def _encode_tokens(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
+        """GPU forward boundary; tokenization and length extraction stay outside."""
+        return self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            use_cache=False,
+        ).hidden_states[self.hidden_layer]
+
     @torch.no_grad()
     def encode(self, prompts: Sequence[str]) -> list[Tensor]:
         """Return one ``(1, S_i, 2048)`` bfloat16 tensor per prompt.
@@ -166,8 +175,11 @@ class TextEncoder:
         out: list[Tensor] = []
         for start in range(0, len(texts), self.max_batch_size):
             batch = self.tokenize(texts[start : start + self.max_batch_size])
-            hidden = self.model(**batch, output_hidden_states=True).hidden_states
-            states = hidden[self.hidden_layer]
+            # Newer Qwen processors also return multimodal metadata for text.
+            # The frozen language encoder only consumes these two tensors.
+            states = self._encode_tokens(
+                input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
+            )
             lengths = batch["attention_mask"].sum(dim=-1).cpu().tolist()
             for j in range(states.shape[0]):
                 out.append(states[j : j + 1, : lengths[j]])

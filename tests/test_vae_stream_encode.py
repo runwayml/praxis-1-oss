@@ -19,10 +19,32 @@ from praxis.kernels import vae_encoder_triton as kernels
 
 
 def _rmsnorm_silu(
-    x: Tensor, out: Tensor, gamma: Tensor, sqrt_c: float, block_c: int
+    x: Tensor,
+    out: Tensor,
+    gamma: Tensor,
+    sqrt_c: float,
+    block_c: int,
+    *,
+    output_t_offset: int = 0,
 ) -> None:
     y = F.normalize(x.float(), dim=1) * sqrt_c * gamma.view(1, -1, 1, 1, 1)
-    out.copy_(F.silu(y).to(out.dtype))
+    t = x.shape[2]
+    out[:, :, output_t_offset : output_t_offset + t].copy_(F.silu(y).to(out.dtype))
+
+
+def _add_rmsnorm_silu(
+    a: Tensor,
+    b: Tensor,
+    s: Tensor,
+    out: Tensor,
+    gamma: Tensor,
+    sqrt_c: float,
+    block_c: int,
+    *,
+    output_t_offset: int = 0,
+) -> None:
+    s.copy_(a + b)
+    _rmsnorm_silu(s, out, gamma, sqrt_c, block_c, output_t_offset=output_t_offset)
 
 
 def _avg_down(x: Tensor, factor_t: int) -> Tensor:
@@ -36,6 +58,10 @@ def _avg_down(x: Tensor, factor_t: int) -> Tensor:
 @pytest.fixture
 def fused(monkeypatch: pytest.MonkeyPatch) -> vae.FusedEncoder:
     monkeypatch.setattr(kernels, "rmsnorm_silu", _rmsnorm_silu)
+    monkeypatch.setattr(kernels, "add_rmsnorm_silu", _add_rmsnorm_silu)
+    # The float16 weight hoist follows CUDA autocast; on the CPU both sides of
+    # the comparison run the float path.
+    monkeypatch.setattr(vae, "VAE_HOIST_CASTS", False)
     monkeypatch.setattr(kernels, "avg_down", _avg_down)
     torch.manual_seed(0)
     enc = vae.Encoder(dim=8).eval().requires_grad_(False)

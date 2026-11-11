@@ -56,6 +56,8 @@ class ModelConfig:
     vae_norm_block_c: dict[int, int] | None = None  # None = the default table
     routed_precision: str = "bf16"
     nvfp4_cache: str | None = None
+    action_cuda_graphs: bool = True
+    nvfp4_moe_cuda_graphs: bool = True
 
 
 @dataclass

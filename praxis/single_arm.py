@@ -55,6 +55,8 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from praxis import nvtx as NV
+from praxis.hardware import is_thor
 from praxis.robot_io import (
     ACTION_CHUNK,
     ASPECT_TOL,
@@ -64,6 +66,7 @@ from praxis.robot_io import (
     NormStats,
     action_rows,
     aspect_crop,
+    aspect_crop_box,
     clip_grip,
     denormalize_rows,
     latent_frames,
@@ -94,6 +97,31 @@ TILE_SIZE: tuple[int, int] = (256, 416)
 NATIVE_VIEW: tuple[int, int] = (720, 1280)
 # Frames per resize call of the tile canvas (bounds the float32 memory).
 TILE_CHUNK_FRAMES = 32
+
+# True: with dedup_encodes, SingleArmServeSession.prepare builds
+# the current-frame clip only when it encodes it; a call at depth >= 1 skips
+# that encode, so its tile conversion and host-to-device copy are skipped too
+# (the model inputs are unchanged). A missing current wrist frame then raises
+# only when the clip is built. Default on; set False for eager preparation.
+LAZY_CURRENT_CLIP = True
+
+# Copy/crop on CUDA when both views need no resize. Other shapes retain CPU
+# resizing, which can differ from CUDA by one pixel level.
+TILE_ON_DEVICE = True
+# Explicit Thor-only resize experiments. They remain off by default.
+THOR_TILE_RESIZE = False
+TILE_ON_DEVICE_ANTIALIAS = False
+# True: when tile_clip tiles on the CPU for a CUDA device (the
+# ordinary path), the CPU crop, resize, round and clamp are unchanged, but the
+# uint8 tiles are written straight into a persistent pinned uint8 canvas (no
+# uint8 tile copies, no torch.cat, no host float32 canvas), the canvas goes to
+# the device with one non-blocking copy (4x fewer bytes than the float32 copy,
+# and the host does not wait for the queued GPU work) and the float32
+# conversion runs there. uint8 -> float32 is exact, so the clip has the stock
+# values, dtype and strides. executed_clip skips its host-side copies of a
+# writable uint8 frame stack. Ignored when TILE_ON_DEVICE tiles on the device.
+# Portable (no device-specific code). Default on for all CUDA architectures.
+TILE_U8_PINNED = True
 
 _C, _S = np.cos(-np.pi / 4), np.sin(-np.pi / 4)
 # Rz(-45 deg): the turn of the rig frame about the flange z axis.
@@ -321,7 +349,12 @@ def fit_resize_size(tile_w: int) -> tuple[int, int]:
 
 
 def _tile_view(
-    frames: np.ndarray, tile_h: int, tile_w: int, tol: float, antialias: bool = False
+    frames: np.ndarray,
+    tile_h: int,
+    tile_w: int,
+    tol: float,
+    antialias: bool = False,
+    device: torch.device | None = None,
 ) -> torch.Tensor:
     """Return the ``(T, 3, tile_h, tile_w)`` uint8 tile of one view.
 
@@ -336,13 +369,19 @@ def _tile_view(
       antialiased resize to :func:`fit_resize_size` and a centre trim to the
       tile (234x416 -> 224x416 for praxis-1-droid). An input already at the fit size
       is not resized.
+
+    ``device`` (, :data:`TILE_ON_DEVICE`): the uint8 frames go to
+    that device first and the tile is made there.
     """
     a = np.asarray(frames, np.uint8)
     if a.ndim == 3:
         a = a[None]
     if a.ndim != 4 or a.shape[-1] != 3:
         raise ValueError(f"frames must be (T,H,W,3), got {a.shape}")
-    fr = torch.from_numpy(np.ascontiguousarray(a)).permute(0, 3, 1, 2)
+    if device is None:
+        fr = torch.from_numpy(np.ascontiguousarray(a)).permute(0, 3, 1, 2)
+    else:
+        fr = torch.from_numpy(np.ascontiguousarray(a)).to(device).permute(0, 3, 1, 2)
     if antialias:
         return _fit_view(fr, tile_h, tile_w, tol)
     cropped = aspect_crop(fr, tile_h, tile_w, tol)
@@ -387,6 +426,29 @@ def _fit_view(fr: torch.Tensor, tile_h: int, tile_w: int, tol: float) -> torch.T
     return cropped[..., y0 : y0 + tile_h, x0 : x0 + tile_w].contiguous()
 
 
+def _tile_on_device(exterior, wrist, tile_h, tile_w, tol, device, antialias) -> bool:
+    if not TILE_ON_DEVICE or torch.device(device).type != "cuda":
+        return False
+    target = fit_resize_size(tile_w) if antialias else (tile_h, tile_w)
+    fits = True
+    for view in (exterior, wrist):
+        shape = np.shape(view)
+        if len(shape) not in (3, 4) or shape[-1] != 3:
+            return False
+        h, w = shape[-3:-1]
+        if h <= 0 or w <= 0:
+            return False
+        y0, y1, x0, x1 = aspect_crop_box(h, w, *target, tol)
+        fits &= (y1 - y0, x1 - x0) == target
+    if fits:
+        return True
+    return (
+        THOR_TILE_RESIZE
+        and is_thor(device)
+        and (not antialias or TILE_ON_DEVICE_ANTIALIAS)
+    )
+
+
 def tile_clip(
     exterior: np.ndarray,
     wrist: np.ndarray | None,
@@ -406,13 +468,137 @@ def tile_clip(
     """
     if wrist is None:
         raise ValueError("The tile canvas needs the exterior and the wrist view.")
-    tiles = [_tile_view(v, tile_h, tile_w, tol, antialias) for v in (exterior, wrist)]
+    on_dev = _tile_on_device(exterior, wrist, tile_h, tile_w, tol, device, antialias)
+    tile_dev = torch.device(device) if on_dev else None
+    if TILE_U8_PINNED and not on_dev and torch.device(device).type == "cuda":
+        return _tile_clip_u8_pinned(
+            (exterior, wrist), tile_h, tile_w, tol, antialias, torch.device(device)
+        )
+    tiles = [
+        _tile_view(v, tile_h, tile_w, tol, antialias, tile_dev)
+        for v in (exterior, wrist)
+    ]
     if tiles[0].shape[0] != tiles[1].shape[0]:
         raise ValueError(
             f"exterior has {tiles[0].shape[0]} frames, wrist has {tiles[1].shape[0]}"
         )
     canvas = torch.cat(tiles, dim=-1).float()
     return canvas.permute(1, 0, 2, 3).unsqueeze(0).to(device)
+
+
+# TILE_U8_PINNED: persistent pinned uint8 canvases, by (shape, memory format), each with
+# the CUDA event of its last host-to-device copy (waited on before a rewrite).
+_PINNED_CANVAS: dict[tuple, list] = {}
+
+
+def _pinned_canvas(shape: tuple[int, ...], fmt: torch.memory_format) -> torch.Tensor:
+    key = (shape, fmt)
+    slot = _PINNED_CANVAS.get(key)
+    if slot is None:
+        # A normal tensor (not an inference tensor), so that it can be
+        # rewritten in and outside inference mode.
+        with torch.inference_mode(False):
+            if fmt == torch.channels_last:
+                t, c, h, w = shape
+                buf = torch.empty(
+                    (t, h, w, c), dtype=torch.uint8, pin_memory=True
+                ).permute(0, 3, 1, 2)
+            else:
+                buf = torch.empty(shape, dtype=torch.uint8, pin_memory=True)
+        slot = _PINNED_CANVAS[key] = [buf, None]
+    if slot[1] is not None:
+        slot[1].synchronize()
+        slot[1] = None
+    return slot[0]
+
+
+def _u8_frames(frames: np.ndarray) -> torch.Tensor:
+    """The ``(T, 3, H, W)`` uint8 view of ``frames`` as :func:`_tile_view` makes it."""
+    a = np.asarray(frames, np.uint8)
+    if a.ndim == 3:
+        a = a[None]
+    if a.ndim != 4 or a.shape[-1] != 3:
+        raise ValueError(f"frames must be (T,H,W,3), got {a.shape}")
+    return torch.from_numpy(np.ascontiguousarray(a)).permute(0, 3, 1, 2)
+
+
+def _fit_view_into(
+    fr: torch.Tensor, tile_h: int, tile_w: int, tol: float, out: torch.Tensor
+) -> None:
+    """:func:`_fit_view` of ``fr`` written into the uint8 view ``out`` (same ops, same values)."""
+    rh, rw = fit_resize_size(tile_w)
+    if rh < tile_h or rw < tile_w:
+        raise ValueError(f"the fit size {rh}x{rw} is below the tile {tile_h}x{tile_w}")
+    cropped = aspect_crop(fr, *NATIVE_VIEW, tol)
+    y0, x0 = (rh - tile_h) // 2, (rw - tile_w) // 2
+    if tuple(cropped.shape[-2:]) == (rh, rw):
+        out.copy_(cropped[..., y0 : y0 + tile_h, x0 : x0 + tile_w])
+        return
+    i = 0
+    for chunk in cropped.split(TILE_CHUNK_FRAMES, dim=0):
+        n = chunk.shape[0]
+        res = torch.nn.functional.interpolate(
+            chunk.float(),
+            size=(rh, rw),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )
+        res = res[..., y0 : y0 + tile_h, x0 : x0 + tile_w].round_().clamp_(0, 255)
+        out[i : i + n].copy_(res)
+        i += n
+
+
+def _tile_clip_u8_pinned(
+    views: tuple[np.ndarray, np.ndarray],
+    tile_h: int,
+    tile_w: int,
+    tol: float,
+    antialias: bool,
+    device: torch.device,
+) -> torch.Tensor:
+    """:func:`tile_clip` with CPU tiling into a pinned uint8 canvas (:data:`TILE_U8_PINNED`)."""
+    if antialias:
+        frs = [_u8_frames(v) for v in views]
+        if frs[0].shape[0] != frs[1].shape[0]:
+            raise ValueError(
+                f"exterior has {frs[0].shape[0]} frames, wrist has {frs[1].shape[0]}"
+            )
+        t = frs[0].shape[0]
+        # The fit rule's tiles are contiguous, so is the stock canvas.
+        fmt = torch.contiguous_format
+        with NV.rng("tile:cpu"):
+            buf = _pinned_canvas((t, 3, tile_h, 2 * tile_w), fmt)
+            for k, fr in enumerate(frs):
+                _fit_view_into(
+                    fr, tile_h, tile_w, tol, buf[..., k * tile_w : (k + 1) * tile_w]
+                )
+    else:
+        with NV.rng("tile:cpu"):
+            tiles = [_tile_view(v, tile_h, tile_w, tol, False, None) for v in views]
+            if tiles[0].shape[0] != tiles[1].shape[0]:
+                raise ValueError(
+                    f"exterior has {tiles[0].shape[0]} frames, wrist has {tiles[1].shape[0]}"
+                )
+            # The memory format torch.cat gives the stock canvas.
+            cl = [
+                not x.is_contiguous()
+                and x.is_contiguous(memory_format=torch.channels_last)
+                for x in tiles
+            ]
+            fmt = torch.channels_last if all(cl) else torch.contiguous_format
+            t = tiles[0].shape[0]
+            buf = _pinned_canvas((t, 3, tile_h, 2 * tile_w), fmt)
+            buf[..., :tile_w].copy_(tiles[0])
+            buf[..., tile_w:].copy_(tiles[1])
+    with NV.rng("tile:h2d"):
+        dev_u8 = buf.to(device, non_blocking=True)
+        ev = torch.cuda.Event()
+        # The copy's stream on the copy's device, not the current device's.
+        ev.record(torch.cuda.current_stream(device))
+        _PINNED_CANVAS[(tuple(buf.shape), fmt)][1] = ev
+        canvas = dev_u8.float()
+    return canvas.permute(1, 0, 2, 3).unsqueeze(0)
 
 
 def _tile_args(
@@ -450,6 +636,14 @@ def current_clip(
     )
 
 
+def _u8_chunk(x: np.ndarray) -> np.ndarray:
+    # TILE_U8_PINNED: a writable uint8 stack is not copied (tile_clip
+    # only reads it).
+    if TILE_U8_PINNED and x.dtype == np.uint8 and x.flags.writeable:
+        return x
+    return x.astype(np.uint8)
+
+
 def executed_clip(
     obs: dict,
     need: int,
@@ -468,12 +662,12 @@ def executed_clip(
     ext = np.asarray(_pick(obs, VIEW_KEY_CANDIDATES["exterior"]))
     if ext.ndim != 4 or ext.shape[0] < need + 1:
         return None
-    ext_chunk = ext[-(need + 1) : -1].astype(np.uint8)
+    ext_chunk = _u8_chunk(ext[-(need + 1) : -1])
     wrist_chunk = None
     try:
         wrist = np.asarray(_pick(obs, VIEW_KEY_CANDIDATES["wrist"]))
         if wrist.ndim == 4 and wrist.shape[0] >= need + 1:
-            wrist_chunk = wrist[-(need + 1) : -1].astype(np.uint8)
+            wrist_chunk = _u8_chunk(wrist[-(need + 1) : -1])
     except KeyError:
         wrist_chunk = None
     if wrist_chunk is None:
@@ -838,8 +1032,9 @@ class SingleArmServeSession:
     ``encode`` maps a prepared clip ``(1, 3, T, H, W)`` in [0, 255] to video
     latents ``(1, C, T', H', W')``. The clips are tile clips
     (:func:`tile_clip`, ``tile_size`` and ``aspect_tol`` default to 256x416
-    and 0.03, ``antialias`` to off). A missing current wrist frame raises ``ValueError``. An
-    exterior or wrist stack that is missing or too short for the executed
+    and 0.03, ``antialias`` to off). Current frames are built only when they
+    must be encoded. A missing current wrist frame then raises ``ValueError``.
+    An exterior or wrist stack that is missing or too short for the executed
     chunk restarts the session (a cold start at depth 0).
 
     ``exec_horizon`` cuts the commands of a chunk to that many rows. A value
@@ -901,6 +1096,11 @@ class SingleArmServeSession:
         self._boundary_poses: list[np.ndarray] = []
         self._cap = self.max_context_chunks + 1
         self.frame = TURNED_FLANGE
+        # True: at depth >= 1 skip the encode of the current frame (only a
+        # cold start reads it) and take the anchor latent from the clean
+        # encode, whose first chunk encodes the anchor frame alone with the
+        # same kernels. Exact bits.
+        self.dedup_encodes = True
 
     def reset(self) -> None:
         """Start a new episode (chunk counter back to 0, context dropped)."""
@@ -946,18 +1146,30 @@ class SingleArmServeSession:
         frame = rig_frame(obs)
         pose8 = pose8_to_model(extract_pose8(obs), frame)
         check_flange(obs, pose8)
-        cur_clip = current_clip(
-            obs, self.device, self.tile_size, self.aspect_tol, self.antialias
-        )
+
+        def make_cur_clip() -> torch.Tensor:
+            with NV.rng("tile:cur"):
+                return current_clip(
+                    obs, self.device, self.tile_size, self.aspect_tol, self.antialias
+                )
+
+        lazy = LAZY_CURRENT_CLIP and self.dedup_encodes
+        cur_clip = None if lazy else make_cur_clip()
         if self.stateless:
             self.restart()
         elif executed_rows is not None:
             self._append_rows(obs, frame, int(executed_rows))
         elif self._boundary_latents:
             need = self.stream.expected_next_rows
-            got = executed_clip(
-                obs, need, self.device, self.tile_size, self.aspect_tol, self.antialias
-            )
+            with NV.rng("tile:exec"):
+                got = executed_clip(
+                    obs,
+                    need,
+                    self.device,
+                    self.tile_size,
+                    self.aspect_tol,
+                    self.antialias,
+                )
             if got is None:
                 self.restart()
             else:
@@ -965,14 +1177,25 @@ class SingleArmServeSession:
                 if rows is not None:
                     rows = pose8_to_model(rows, frame)
                 self.stream.append_executed(clip, rows)
-        cur = self.encode(cur_clip)
-        self._boundary_latents = [*self._boundary_latents, cur.detach()][-self._cap :]
+        dedup = (
+            self.dedup_encodes
+            and self.stream.depth >= 1
+            and self.stream.anchor_frame() is not None
+        )
+        if not dedup:
+            cur = self.encode(make_cur_clip() if cur_clip is None else cur_clip)
+            self._boundary_latents = [*self._boundary_latents, cur.detach()][
+                -self._cap :
+            ]
         pose = np.asarray(pose8, dtype=np.float32)
         self._boundary_poses = [*self._boundary_poses, pose][-self._cap :]
         cleans = self.stream.cleans(self.encode)
         d = len(cleans)
         af = self.stream.anchor_frame()
-        anchor = self._boundary_latents[-1] if af is None else self.encode(af)
+        if dedup:
+            anchor = cleans[0][:, :, :1].contiguous()
+        else:
+            anchor = self._boundary_latents[-1] if af is None else self.encode(af)
         bp = self.stream.boundary_poses() if d else None
         if d == 0:
             poses = pose8[None].astype(np.float32)

@@ -1,16 +1,33 @@
 """Custom Triton kernels for the backbone transformer layers.
 
-These are custom kernels, not PyTorch built-ins. The original implementation
-of the model runs these two kernels at inference. Their rounding differs from
-the equivalent PyTorch ops, so praxis runs the same kernels to give the same
-bits.
+These kernels implement activation, modulation and mixture-of-experts routing
+for inference. The wrappers retain dtype conversion and rounding boundaries
+where required by the equivalent reference operations. Routing wrappers fall
+back to eager PyTorch for unsupported layouts, dtypes, autocast or gradients.
 
-* ``swiglu_packed`` computes ``silu(gate) * up`` for the routed experts of
-  the mixture-of-experts layers. It computes the SiLU in float32 with the
-  Triton sigmoid, rounds it to the input dtype and multiplies by ``up``.
-* ``modulate_fused`` computes ``x * scale + shift`` in float32 for the
-  decoder modulation. The compiler can fuse the multiply and the add into one
-  FMA, so its rounding is not the rounding of the eager ops.
+* ``swiglu_packed`` computes ``silu(gate) * up`` from the two halves of a
+  packed CUDA tensor with shape (..., 2*H). It computes SiLU in float32,
+  rounds it to the input dtype and multiplies by up, returning (..., H).
+* ``modulate_fused`` computes ``x * scale + shift`` in float32 and casts to
+  the input dtype. Shift and scale either match (B, S, C) or broadcast from
+  (B, 1, C). The wrapper makes inputs contiguous. Multiply-add fusion is
+  permitted, so rounding can differ from separate eager operations.
+* ``moe_dispatch`` gathers contiguous token rows in the supplied expert sort
+  order. It also produces sorted gates, inverse indices and cumulative expert
+  offsets, preserving the supplied ordering and the input value dtype.
+* ``moe_combine`` weights sorted expert outputs, restores token order and
+  sums eight routes. Weighted values round to the expert dtype before four
+  interleaved float32 accumulators reproduce the eager reduction order.
+* ``moe_scale_add`` scales the routed result, rounds to its dtype and adds
+  the shared expert output, retaining the eager intermediate rounding.
+* ``moe_chunked_combine`` scales gates and accumulates routed outputs in
+  float32. It can round the routed sum and add the shared output in one pass.
+
+The kernels do not autotune. SwiGLU and modulation use 1024-element blocks;
+expert dispatch uses row tiles of up to 512 columns and 256-element metadata
+blocks. Combination uses 256-column blocks and scale/add uses 1024 elements.
+Combination and scale/add disable FP fusion to preserve rounding boundaries.
+Launch sizes depend on tensor dimensions rather than timing measurements.
 
 Each kernel has a fixed block size and no autotuning, so the output bits do
 not depend on the launch.
@@ -258,6 +275,384 @@ def _swiglu_forward(gate_up: Tensor) -> Tensor:
     return out.view(*gate_up.shape[:-1], n_cols)
 
 
+@triton.jit
+def _moe_combine_kernel(
+    expert_ptr,
+    gate_ptr,
+    inverse_ptr,
+    result_ptr,
+    C: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    token = tl.program_id(0).to(tl.int64)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    a0 = tl.full((BLOCK,), 0, tl.float32)
+    a1 = tl.full((BLOCK,), 0, tl.float32)
+    a2 = tl.full((BLOCK,), 0, tl.float32)
+    a3 = tl.full((BLOCK,), 0, tl.float32)
+    # Match PyTorch's four interleaved FP32 accumulators for sum(dim=1)
+    # of a contiguous (tokens, 8, channels) tensor. The multiplication must
+    # round to the expert dtype BEFORE accumulation, just as eager does.
+    for slot in tl.static_range(8):
+        row = tl.load(inverse_ptr + token * 8 + slot)
+        gate = tl.load(gate_ptr + row).to(tl.float32)
+        raw = tl.load(expert_ptr + row * C + col, col < C, other=0)
+        value = (raw.to(tl.float32) * gate).to(raw.dtype).to(tl.float32)
+        if slot % 4 == 0:
+            a0 = a0 + value
+        elif slot % 4 == 1:
+            a1 = a1 + value
+        elif slot % 4 == 2:
+            a2 = a2 + value
+        else:
+            a3 = a3 + value
+    total = ((a0 + a1) + a2) + a3
+    tl.store(result_ptr + token * C + col, total, col < C)
+
+
+def moe_combine(
+    expert_output: Tensor, sorted_gate: Tensor, inverse: Tensor, top_k: int
+) -> Tensor:
+    """Gate, undo expert sorting and sum, retaining eager rounding.
+
+    The inference kernel specializes the model's top-eight, non-chunked
+    reduction. Other layouts/dtypes, autocast and differentiable calls use
+    eager ops. Autocast can promote the eager sum to FP32.
+    Scaling and the shared-expert addition retain their original boundaries.
+    """
+    channels = expert_output.shape[1]
+    if (
+        expert_output.is_cuda
+        and sorted_gate.device == expert_output.device
+        and inverse.device == expert_output.device
+        and inverse.dtype == torch.int64
+        and expert_output.dtype in (torch.bfloat16, torch.float16)
+        and sorted_gate.dtype == expert_output.dtype
+        and top_k == 8
+        and channels >= 128
+        and expert_output.is_contiguous()
+        and sorted_gate.is_contiguous()
+        and inverse.is_contiguous()
+        and not torch.is_autocast_enabled()
+        and not (
+            torch.is_grad_enabled()
+            and (expert_output.requires_grad or sorted_gate.requires_grad)
+        )
+    ):
+        result = expert_output.new_empty(inverse.numel() // top_k, channels)
+        if result.numel():
+            _moe_combine_kernel[(result.shape[0], triton.cdiv(channels, 256))](
+                expert_output,
+                sorted_gate,
+                inverse,
+                result,
+                channels,
+                256,
+                enable_fp_fusion=False,
+            )
+        return result
+    weighted = expert_output * sorted_gate.unsqueeze(-1)
+    return weighted[inverse].reshape(-1, top_k, channels).sum(dim=1)
+
+
+@triton.jit
+def _moe_chunked_combine_kernel(
+    expert_ptr,
+    gate_ptr,
+    inverse_ptr,
+    shared_ptr,
+    result_ptr,
+    C: tl.constexpr,
+    SCALE: tl.constexpr,
+    ADD_SHARED: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    a0 = tl.full((BLOCK,), 0, tl.float32)
+    a1 = tl.full((BLOCK,), 0, tl.float32)
+    a2 = tl.full((BLOCK,), 0, tl.float32)
+    a3 = tl.full((BLOCK,), 0, tl.float32)
+    for slot in tl.static_range(8):
+        row = tl.load(inverse_ptr + token * 8 + slot)
+        gate = tl.load(gate_ptr + row).to(tl.float32)
+        scale = gate * tl.full((), SCALE, tl.float32)
+        raw = tl.load(expert_ptr + row * C + col, col < C, other=0).to(tl.float32)
+        value = raw * scale
+        if slot % 4 == 0:
+            a0 = a0 + value
+        elif slot % 4 == 1:
+            a1 = a1 + value
+        elif slot % 4 == 2:
+            a2 = a2 + value
+        else:
+            a3 = a3 + value
+    total = ((a0 + a1) + a2) + a3
+    if ADD_SHARED:
+        # The chunked path rounds the routed sum before adding the shared
+        # expert. Products above must not round to BF16/FP16 first.
+        rounded = total.to(shared_ptr.dtype.element_ty).to(tl.float32)
+        total = rounded + tl.load(shared_ptr + token * C + col, col < C, other=0).to(
+            tl.float32
+        )
+    tl.store(result_ptr + token * C + col, total, col < C)
+
+
+def moe_chunked_combine(
+    expert_output: Tensor,
+    sorted_gate: Tensor,
+    inverse: Tensor,
+    top_k: int,
+    scaling: float,
+    *,
+    shared: Tensor | None = None,
+    out: Tensor | None = None,
+) -> Tensor:
+    """Preserve the chunked FP32 scaling and four-accumulator reduction.
+
+    Without ``shared``, return FP32. With it, round the routed sum to the
+    shared dtype before addition. ``out`` can be a contiguous chunk slice.
+    Unsupported and differentiable inputs use the original eager sequence.
+    """
+    tokens, channels = inverse.numel() // top_k, expert_output.shape[1]
+    dtype = torch.float32 if shared is None else shared.dtype
+    fast = (
+        expert_output.is_cuda
+        and sorted_gate.device == expert_output.device
+        and inverse.device == expert_output.device
+        and inverse.dtype == torch.int64
+        and expert_output.dtype in (torch.bfloat16, torch.float16)
+        and sorted_gate.dtype == expert_output.dtype
+        and top_k == 8
+        and channels >= 128
+        and all(t.is_contiguous() for t in (expert_output, sorted_gate, inverse))
+        and not torch.is_autocast_enabled()
+        and not (
+            torch.is_grad_enabled()
+            and any(
+                t.requires_grad
+                for t in (expert_output, sorted_gate)
+                + (() if shared is None else (shared,))
+            )
+        )
+        and (
+            shared is None
+            or (
+                shared.shape == (tokens, channels)
+                and shared.dtype == expert_output.dtype
+                and shared.device == expert_output.device
+                and shared.is_contiguous()
+            )
+        )
+        and (
+            out is None
+            or (
+                out.shape == (tokens, channels)
+                and out.dtype == dtype
+                and out.device == expert_output.device
+                and out.is_contiguous()
+                and not out.requires_grad
+            )
+        )
+    )
+    if fast:
+        result = (
+            torch.empty((tokens, channels), device=expert_output.device, dtype=dtype)
+            if out is None
+            else out
+        )
+        if result.numel():
+            _moe_chunked_combine_kernel[(tokens, triton.cdiv(channels, 256))](
+                expert_output,
+                sorted_gate,
+                inverse,
+                expert_output if shared is None else shared,
+                result,
+                channels,
+                scaling,
+                shared is not None,
+                256,
+                enable_fp_fusion=False,
+            )
+        return result
+    indices = inverse.view(tokens, top_k)
+    scale = sorted_gate.to(torch.float32) * scaling
+    accumulators = [
+        torch.zeros(
+            (tokens, channels), device=expert_output.device, dtype=torch.float32
+        )
+        for _ in range(4)
+    ]
+    for slot in range(top_k):
+        row = indices[:, slot]
+        accumulators[slot % 4] = accumulators[slot % 4] + expert_output[
+            row
+        ].float() * scale[row].unsqueeze(-1)
+    result = ((accumulators[0] + accumulators[1]) + accumulators[2]) + accumulators[3]
+    if shared is not None:
+        result = result.to(shared.dtype) + shared
+    return result if out is None else out.copy_(result)
+
+
+@triton.jit
+def _moe_dispatch_rows_kernel(
+    x,
+    order,
+    rows,
+    N: tl.constexpr,
+    C: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    source = tl.load(order + row) // K
+    value = tl.load(x + source * C + col, col < C, other=0)
+    tl.store(rows + row * C + col, value, col < C)
+
+
+@triton.jit
+def _moe_dispatch_metadata_kernel(
+    experts,
+    gate,
+    order,
+    sorted_gate,
+    inverse,
+    offsets,
+    N: tl.constexpr,
+    E: tl.constexpr,
+    EXPERT_BLOCK: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    source = tl.load(order + i, i < N, other=0)
+    weight = tl.load(gate + source, i < N, other=0)
+    tl.store(sorted_gate + i, weight, i < N)
+    tl.store(inverse + source, i, i < N)
+    if tl.program_id(0) == 0:
+        expert = tl.arange(0, EXPERT_BLOCK)
+        lo = tl.full((EXPERT_BLOCK,), 0, tl.int32)
+        hi = tl.full((EXPERT_BLOCK,), N, tl.int32)
+        # Upper bounds in the original stable sort; absent experts get
+        # repeated offsets, exactly as torch.searchsorted does.
+        while tl.sum((lo < hi).to(tl.int32), 0) > 0:
+            mid = (lo + hi) // 2
+            active = (lo < hi) & (expert < E)
+            original = tl.load(order + mid, active, other=0)
+            value = tl.load(experts + original, active, other=0)
+            right = value <= expert
+            lo = tl.where(active & right, mid + 1, lo)
+            hi = tl.where(active & ~right, mid, hi)
+            hi = tl.where(expert < E, hi, lo)
+        tl.store(offsets + expert, lo, expert < E)
+
+
+def moe_dispatch(
+    x: Tensor,
+    top_idx: Tensor,
+    gate: Tensor,
+    order: Tensor,
+    num_experts: int,
+    output_dtype: torch.dtype,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Gather expert rows and prepare metadata, preserving stable sort order."""
+    k = top_idx.shape[1]
+    n, channels = order.numel(), x.shape[1]
+    fast = (
+        x.is_cuda
+        and x.dtype in (torch.bfloat16, torch.float16)
+        and x.dtype == output_dtype
+        and gate.dtype == x.dtype
+        and all(t.device == x.device for t in (top_idx, gate, order))
+        and all(t.is_contiguous() for t in (x, top_idx, gate, order))
+        and top_idx.dtype == torch.int64
+        and order.dtype == torch.int64
+        and n < 2**31
+        and not torch.is_autocast_enabled()
+        and not (torch.is_grad_enabled() and (x.requires_grad or gate.requires_grad))
+    )
+    if not fast:
+        sorted_tokens = torch.arange(x.shape[0], device=x.device).repeat_interleave(k)[
+            order
+        ]
+        rows = x[sorted_tokens].to(output_dtype)
+        sorted_gate = gate.reshape(-1)[order]
+        offsets = torch.searchsorted(
+            top_idx.reshape(-1)[order],
+            torch.arange(1, num_experts + 1, device=x.device),
+            out_int32=True,
+        )
+        inverse = torch.empty_like(order)
+        inverse[order] = torch.arange(n, device=x.device)
+        return rows, sorted_gate, inverse, offsets
+    rows = x.new_empty(n, channels)
+    sorted_gate = gate.new_empty(n)
+    inverse = torch.empty_like(order)
+    offsets = torch.empty(num_experts, dtype=torch.int32, device=x.device)
+    if n * channels:
+        # H100 replay sweeps favor 512-column tiles over full-row tiles:
+        # more independent row reads hide the indirect gather latency.
+        block = triton.next_power_of_2(min(channels, 512))
+        _moe_dispatch_rows_kernel[(n, triton.cdiv(channels, block))](
+            x, order, rows, n, channels, k, block
+        )
+    _moe_dispatch_metadata_kernel[(max(1, triton.cdiv(n, 256)),)](
+        top_idx,
+        gate,
+        order,
+        sorted_gate,
+        inverse,
+        offsets,
+        n,
+        num_experts,
+        triton.next_power_of_2(num_experts),
+        256,
+    )
+    return rows, sorted_gate, inverse, offsets
+
+
+@triton.jit
+def _moe_scale_add_kernel(
+    routed, shared, result, N: tl.constexpr, SCALE: tl.constexpr, BLOCK: tl.constexpr
+):
+    i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    value = tl.load(routed + i, i < N, other=0)
+    shared_value = tl.load(shared + i, i < N, other=0)
+    # Round the scaling result before addition, retaining eager boundaries.
+    scaled = (value.to(tl.float32) * SCALE).to(value.dtype).to(tl.float32)
+    tl.store(result + i, scaled + shared_value.to(tl.float32), i < N)
+
+
+def moe_scale_add(routed: Tensor, shared: Tensor, scale: float) -> Tensor:
+    """Fuse routed scaling and shared addition, with an intermediate rounding."""
+    if (
+        routed.is_cuda
+        and shared.device == routed.device
+        and routed.dtype in (torch.bfloat16, torch.float16)
+        and shared.dtype == routed.dtype
+        and shared.shape == routed.shape
+        and routed.is_contiguous()
+        and shared.is_contiguous()
+        and not torch.is_autocast_enabled()
+        and not (
+            torch.is_grad_enabled() and (routed.requires_grad or shared.requires_grad)
+        )
+    ):
+        result = torch.empty_like(routed)
+        if result.numel():
+            _moe_scale_add_kernel[(triton.cdiv(result.numel(), 1024),)](
+                routed,
+                shared,
+                result,
+                result.numel(),
+                scale,
+                1024,
+                enable_fp_fusion=False,
+            )
+        return result
+    return routed * scale + shared
+
+
 def swiglu_packed_backward(gate_up: Tensor, grad: Tensor) -> Tensor:
     """Return the gradient of ``silu(gate) * up`` with respect to ``gate_up``.
 
@@ -420,3 +815,130 @@ def modulate_fused(x: Tensor, shift: Tensor, scale: Tensor, rows: bool) -> Tenso
     ):
         return _ModulateFused.apply(x, shift, scale, rows)
     return _modulate_forward(x, shift, scale, rows)
+
+
+# ---------------------------------------------------------------------------
+# unchunked combine + scale + shared
+# add in one kernel, and the dispatch metadata without the row gather.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _moe_combine_scale_add_kernel(
+    expert_ptr,
+    gate_ptr,
+    inverse_ptr,
+    shared_ptr,
+    result_ptr,
+    T0,
+    C: tl.constexpr,
+    SCALE: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    """``moe_scale_add(moe_combine(...)[T0 + t], shared[t], SCALE)`` for token t."""
+    t = tl.program_id(0).to(tl.int64)
+    token = T0 + t
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    a0 = tl.full((BLOCK,), 0, tl.float32)
+    a1 = tl.full((BLOCK,), 0, tl.float32)
+    a2 = tl.full((BLOCK,), 0, tl.float32)
+    a3 = tl.full((BLOCK,), 0, tl.float32)
+    for slot in tl.static_range(8):
+        row = tl.load(inverse_ptr + token * 8 + slot)
+        gate = tl.load(gate_ptr + row).to(tl.float32)
+        raw = tl.load(expert_ptr + row * C + col, col < C, other=0)
+        value = (raw.to(tl.float32) * gate).to(raw.dtype).to(tl.float32)
+        if slot % 4 == 0:
+            a0 = a0 + value
+        elif slot % 4 == 1:
+            a1 = a1 + value
+        elif slot % 4 == 2:
+            a2 = a2 + value
+        else:
+            a3 = a3 + value
+    # moe_combine stores its sum in the expert dtype; moe_scale_add rounds the
+    # scaled value to that dtype before the float32 add and the final store.
+    routed = (((a0 + a1) + a2) + a3).to(result_ptr.dtype.element_ty)
+    scaled = (routed.to(tl.float32) * SCALE).to(routed.dtype).to(tl.float32)
+    shared_value = tl.load(shared_ptr + t * C + col, col < C, other=0)
+    tl.store(result_ptr + t * C + col, scaled + shared_value.to(tl.float32), col < C)
+
+
+def moe_combine_scale_add(
+    expert_output: Tensor,
+    sorted_gate: Tensor,
+    inverse: Tensor,
+    shared: Tensor,
+    scale: float,
+    token_start: int = 0,
+) -> Tensor:
+    """``moe_scale_add(moe_combine(expert_output, sorted_gate, inverse, 8)
+    [token_start:token_start + len(shared)], shared, scale)`` in one kernel
+    (CUDA, contiguous bf16/fp16 fast path only; callers check
+    ``moe_combine_scale_add_supported``)."""
+    channels = expert_output.shape[1]
+    result = torch.empty_like(shared)
+    if result.numel():
+        _moe_combine_scale_add_kernel[(shared.shape[0], triton.cdiv(channels, 256))](
+            expert_output,
+            sorted_gate,
+            inverse,
+            shared,
+            result,
+            token_start,
+            channels,
+            scale,
+            256,
+            enable_fp_fusion=False,
+        )
+    return result
+
+
+def moe_combine_scale_add_supported(
+    expert_output: Tensor,
+    sorted_gate: Tensor,
+    inverse: Tensor,
+    shared: Tensor,
+    top_k: int,
+) -> bool:
+    return (
+        expert_output.is_cuda
+        and expert_output.dtype in (torch.bfloat16, torch.float16)
+        and sorted_gate.dtype == expert_output.dtype
+        and shared.dtype == expert_output.dtype
+        and shared.dim() == 2
+        and shared.shape[1] == expert_output.shape[1]
+        and top_k == 8
+        and expert_output.shape[1] >= 128
+        and expert_output.is_contiguous()
+        and sorted_gate.is_contiguous()
+        and inverse.is_contiguous()
+        and shared.is_contiguous()
+        and not torch.is_autocast_enabled()
+        and not torch.is_grad_enabled()
+    )
+
+
+def moe_dispatch_metadata(
+    top_idx: Tensor, gate: Tensor, order: Tensor, num_experts: int
+) -> tuple[Tensor, Tensor, Tensor]:
+    """``moe_dispatch(...)[1:]`` (sorted gates, inverse, offsets) without the
+    row gather, for a GEMM that reads ``x[order[i] // top_k]`` itself. CUDA,
+    contiguous int64 ``top_idx``/``order`` only."""
+    n = order.numel()
+    sorted_gate = gate.new_empty(n)
+    inverse = torch.empty_like(order)
+    offsets = torch.empty(num_experts, dtype=torch.int32, device=order.device)
+    _moe_dispatch_metadata_kernel[(max(1, triton.cdiv(n, 256)),)](
+        top_idx,
+        gate,
+        order,
+        sorted_gate,
+        inverse,
+        offsets,
+        n,
+        num_experts,
+        triton.next_power_of_2(num_experts),
+        256,
+    )
+    return sorted_gate, inverse, offsets

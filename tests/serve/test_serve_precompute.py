@@ -87,6 +87,9 @@ class _PlanPolicy(_Policy):
         settings,
         trace=None,
         skip_last_video=None,
+        ctx_cache=False,
+        overlap_expert=False,
+        pair_cfg=False,
     ):
         self.calls.append(
             {"depth": len(cleans), "seed": int(seed), "skip": skip_last_video}

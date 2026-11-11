@@ -19,6 +19,8 @@ from praxis.serve.server import build_server, load_config, serve
 
 # CLI flag -> config key. A flag that is not set keeps the config value.
 FLAGS: dict[str, tuple[str, type]] = {
+    "decoder_attention_backend": ("model.decoder_attention_backend", str),
+    "encoder_attention_backend": ("model.encoder_attention_backend", str),
     "checkpoint": ("model.checkpoint", str),
     "exec_horizon": ("session.exec_horizon", int),
     "num_steps": ("sampler.num_steps", int),

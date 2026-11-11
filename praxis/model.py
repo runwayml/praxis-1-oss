@@ -19,6 +19,8 @@ from typing import Protocol, cast
 import torch
 from torch import Tensor, nn
 
+from praxis import layers as _layers
+from praxis import nvtx as NV
 from praxis.action_expert import ActionExpert, run_expert_on_taps_k
 from praxis.backbone import VideoBackbone, build_backbone
 from praxis.checkpoint import load_checkpoint, load_config, model_variant
@@ -74,6 +76,7 @@ class ChunkCausalBackbone(Protocol):
         noised: Tensor,
         timesteps: Tensor,
         decode: bool = True,
+        ctx: dict | None = None,
     ) -> ChunkCausalOutput: ...
 
 
@@ -244,6 +247,8 @@ class PraxisPolicy(nn.Module):
         *,
         routed_precision: str = "bf16",
         nvfp4_cache: str | Path | None = None,
+        decoder_attention_backend: str | None = None,
+        encoder_attention_backend: str | None = None,
     ) -> PraxisPolicy:
         """Load the checkpoint, optionally packing only routed experts as NVFP4.
 
@@ -251,11 +256,24 @@ class PraxisPolicy(nn.Module):
         one bank at a time on the CPU, so the BF16 banks never occupy CUDA
         memory. Shared experts, dense layers and the action expert retain
         their checkpoint tensors. The default uses the original strict loader.
+        Attention overrides apply to both precision modes.
         """
         if routed_precision not in ("bf16", "nvfp4"):
             raise ValueError("routed_precision must be 'bf16' or 'nvfp4'")
+        config = load_config(path)
+        for tower, backend in (
+            ("encoder", encoder_attention_backend),
+            ("decoder", decoder_attention_backend),
+        ):
+            if backend is None:
+                continue
+            from praxis.checkpoint import ATTENTION_BACKENDS
+
+            if backend not in ATTENTION_BACKENDS:
+                raise ValueError(f"unknown {tower} attention backend {backend!r}")
+            config["backbone"][tower]["attention_backend"] = backend
         with torch.device("meta"):
-            model = cls.from_config(load_config(path))
+            model = cls.from_config(config)
         if routed_precision == "nvfp4":
             from praxis.quantization.loading import (
                 check_nvfp4_device,
@@ -263,12 +281,7 @@ class PraxisPolicy(nn.Module):
             )
 
             check_nvfp4_device(device)
-            load_routed_nvfp4(
-                model,
-                path,
-                device=device,
-                cache=nvfp4_cache,
-            )
+            load_routed_nvfp4(model, path, device=device, cache=nvfp4_cache)
         else:
             load_checkpoint(model, path, device=str(device), assign=True)
         return model.eval().requires_grad_(False)
@@ -280,6 +293,11 @@ class PraxisPolicy(nn.Module):
     @property
     def device(self) -> torch.device:
         return self.backbone.encoder.registers.device
+
+    @property
+    def supports_context_cache(self) -> bool:
+        """NVFP4 expert scales couple context rows to the current query rows."""
+        return getattr(self, "routed_quantization", {}).get("format") != "nvfp4"
 
     @torch.no_grad()
     def sample_window_joint(
@@ -295,6 +313,9 @@ class PraxisPolicy(nn.Module):
         oracle_video: Tensor | None = None,
         return_window: bool = False,
         skip_last_video: bool | None = None,
+        ctx_cache: bool = True,
+        overlap_expert: bool = True,
+        pair_cfg: bool = False,
     ) -> tuple[Tensor | None, Tensor]:
         """Denoise the window of the chunk at depth ``d = len(cleans)`` jointly.
 
@@ -340,6 +361,21 @@ class PraxisPolicy(nn.Module):
           guidance combine at scale 1.0 is the identity, so the actions keep
           their bits. The video comes back as None. A ``trace`` call and a
           ``return_window`` call run all passes.
+        * ``ctx_cache=True``: the encoder computes the context tokens
+          (registers, anchor, text, clean) once per guidance branch and later
+          steps run only the query blocks of the noised tokens against the
+          cached keys and values. The outputs keep their exact bits. Ignored
+          when ``trace`` is set or routed experts use NVFP4. NVFP4 activation
+          scales depend on all routed rows, including the noised tokens.
+        * ``overlap_expert=True`` (guided): each step that runs both guidance
+          branches runs both encoder passes first, then queues the decoder on
+          the current stream and the two action-expert passes on a side CUDA
+          stream beside it. Same kernels on the same inputs, so the same bits.
+          Ignored when ``trace`` is set.
+        * ``pair_cfg=True`` (with ``overlap_expert``): the two
+          encoder passes run block by block in lockstep, and each
+          mixture-of-experts layer reads its routed weights once for both
+          (``EncoderTower.forward_chunk_causal_pair``). Same bits.
 
         Returns the video latent of the last chunk ``(1, 192, 6, h, w)`` (None
         with ``skip_last_video``) and its normalized action tokens
@@ -386,14 +422,149 @@ class PraxisPolicy(nn.Module):
         probe("noise.salt1", noise_a)
         ts = window_time_grid(settings.num_steps, settings.t_shift)
         probe("sampler.time_grid", torch.tensor(ts, dtype=torch.float64))
-        xv = to_device_async(noise_v, dev)
-        xa = to_device_async(noise_a, dev)
-        anchor_m = anchor.to(dev, md)
-        clean = torch.cat([z.to(dev, md) for z in cleans], dim=2) if d else None
-        pro = pro.to(dev, torch.float32)
-        text_c = text.to(dev, md)
-        text_u = None if text_uncond is None else text_uncond.to(dev, md)
+        with NV.op("sampler", "setup", mod="flow", block=None, pas="p"):
+            xv = to_device_async(noise_v, dev)
+            xa = to_device_async(noise_a, dev)
+            anchor_m = anchor.to(dev, md)
+            clean = torch.cat([z.to(dev, md) for z in cleans], dim=2) if d else None
+            pro = pro.to(dev, torch.float32)
+            text_c = text.to(dev, md)
+            text_u = None if text_uncond is None else text_uncond.to(dev, md)
         backbone = cast(ChunkCausalBackbone, self.backbone)
+
+        ctxs: dict[str, dict] | None = (
+            {"cond": {}, "uncond": {}}
+            if ctx_cache and self.supports_context_cache and trace is None
+            else None
+        )
+
+        def expert(
+            taps: ChunkCausalTaps, x_a: Tensor, t_cur: float, pas: str = "g"
+        ) -> Tensor:
+            with NV.op("sampler", "action_glue", mod="flow", block=None, pas=pas):
+                a_t = torch.full((1, kk), t_cur, device=dev)
+            with NV.ctx(mod="ae", **{"pass": pas, "block": "pre"}):
+                y = run_expert_on_taps_k(
+                    self.action_expert,
+                    taps.taps,
+                    taps.embeddings,
+                    taps.rope_ids,
+                    global_spans=taps.global_spans,
+                    noised_span=taps.noised_span,
+                    clean_span=taps.clean_span,
+                    n_chunks=kk,
+                    frames_per_chunk=taps.frames_per_chunk,
+                    tokens_per_frame=taps.tokens_per_frame,
+                    noised_actions=x_a[None],
+                    action_t_per_chunk=a_t,
+                    proprio_per_chunk=pro,
+                )
+            with NV.op("sampler", "action_glue", mod="flow", block=None, pas=pas):
+                return y.float()[0]
+
+        overlap = (
+            overlap_expert
+            and guided
+            and trace is None
+            and dev.type == "cuda"
+            and hasattr(backbone, "encoder")
+            and hasattr(backbone, "decoder")
+        )
+        side = torch.cuda.Stream(device=dev) if overlap else None
+
+        def velocities_overlapped(
+            x_v: Tensor, x_a: Tensor, t_cur: float, decode: bool, decode_u: bool
+        ) -> tuple[Tensor | None, Tensor, Tensor | None, Tensor | None]:
+            """Both guidance branches: encoders, then experts on ``side``
+            beside the decoders on the current stream."""
+            assert side is not None and text_u is not None
+            enc, dec = backbone.encoder, backbone.decoder  # type: ignore[attr-defined]
+            main = torch.cuda.current_stream(dev)
+            with NV.op("sampler", "timestep_prep", mod="flow", block=None, pas="p"):
+                t_trunk = torch.full((1, kk), t_cur, dtype=md, device=dev)
+                noised = x_v.to(md)
+            if pair_cfg:
+                (cond_c, taps_c), (cond_u, taps_u) = enc.forward_chunk_causal_pair(
+                    [
+                        {
+                            "text": text_in,
+                            "anchor": anchor_m,
+                            "clean": clean,
+                            "noised": noised,
+                            "timesteps": t_trunk,
+                            "ctx": None if ctxs is None else ctxs[branch],
+                        }
+                        for text_in, branch in ((text_c, "cond"), (text_u, "uncond"))
+                    ]
+                )
+            else:
+                with NV.ctx(mod="enc", **{"pass": "g", "block": "pre"}):
+                    cond_c, taps_c = enc.forward_chunk_causal(
+                        text_c,
+                        anchor_m,
+                        clean,
+                        noised,
+                        t_trunk,
+                        ctx=None if ctxs is None else ctxs["cond"],
+                    )
+                with NV.ctx(mod="enc", **{"pass": "u", "block": "pre"}):
+                    cond_u, taps_u = enc.forward_chunk_causal(
+                        text_u,
+                        anchor_m,
+                        clean,
+                        noised,
+                        t_trunk,
+                        ctx=None if ctxs is None else ctxs["uncond"],
+                    )
+            side.wait_stream(main)
+            # The decoder is queued first: the expert passes are launch-bound
+            # (many small kernels, blocking host copies), so the host feeds
+            # them while the decoder's long kernels run.
+            if pair_cfg and _layers.PAIR_DEC and decode and decode_u:
+                # Both decoder passes in lockstep, routed experts paired.
+                v_c, v_u = dec.forward_chunk_causal_pair(
+                    [
+                        {"noised": noised, "cond": cond, "timesteps": t_trunk}
+                        for cond in (cond_c, cond_u)
+                    ]
+                )
+            else:
+                with NV.ctx(mod="dec", **{"pass": "g", "block": "pre"}):
+                    v_c = (
+                        dec.forward_chunk_causal(noised, cond_c, t_trunk)
+                        if decode
+                        else None
+                    )
+                with NV.ctx(mod="dec", **{"pass": "u", "block": "pre"}):
+                    v_u = (
+                        dec.forward_chunk_causal(noised, cond_u, t_trunk)
+                        if decode_u
+                        else None
+                    )
+            with torch.cuda.stream(side):
+                a_c = expert(taps_c, x_a, t_cur, "g")
+                a_u = expert(taps_u, x_a, t_cur, "u") if act_uncond else None
+            main.wait_stream(side)
+            # Tensors made on one stream and used on the other.
+            for t in (
+                *taps_c.taps,
+                taps_c.embeddings,
+                *taps_u.taps,
+                taps_u.embeddings,
+                x_a,
+                pro,
+            ):
+                t.record_stream(side)
+            for t in (a_c, a_u):
+                if t is not None:
+                    t.record_stream(main)
+            with NV.op("sampler", "velocity_cast", mod="flow", block=None, pas="p"):
+                return (
+                    None if v_c is None else v_c.float(),
+                    a_c,
+                    None if v_u is None else v_u.float(),
+                    a_u,
+                )
 
         def velocity(
             text_in: Tensor,
@@ -401,6 +572,7 @@ class PraxisPolicy(nn.Module):
             x_a: Tensor,
             t_cur: float,
             decode: bool,
+            branch: str = "cond",
             act: bool = True,
         ) -> tuple[Tensor | None, Tensor | None]:
             probe("velocity.in.xt_v", x_v)
@@ -408,29 +580,20 @@ class PraxisPolicy(nn.Module):
             probe("velocity.in.t_cur", torch.tensor(t_cur, dtype=torch.float64))
             t_trunk = torch.full((1, kk), t_cur, dtype=md, device=dev)
             out = backbone.forward_chunk_causal(
-                text_in, anchor_m, clean, x_v.to(md), t_trunk, decode=decode
+                text_in,
+                anchor_m,
+                clean,
+                x_v.to(md),
+                t_trunk,
+                decode=decode,
+                **({"ctx": ctxs[branch]} if ctxs is not None else {}),
             )
             v = None if out.velocity is None else out.velocity.float()
             if v is not None:
                 probe("velocity.out.video", v)
             if not act:
                 return v, None
-            taps = out.taps
-            a = run_expert_on_taps_k(
-                self.action_expert,
-                taps.taps,
-                taps.embeddings,
-                taps.rope_ids,
-                global_spans=taps.global_spans,
-                noised_span=taps.noised_span,
-                clean_span=taps.clean_span,
-                n_chunks=kk,
-                frames_per_chunk=taps.frames_per_chunk,
-                tokens_per_frame=taps.tokens_per_frame,
-                noised_actions=x_a[None],
-                action_t_per_chunk=torch.full((1, kk), t_cur, device=dev),
-                proprio_per_chunk=pro,
-            ).float()[0]
+            a = expert(out.taps, x_a, t_cur)
             probe("velocity.out.action", a)
             return v, a
 
@@ -447,31 +610,47 @@ class PraxisPolicy(nn.Module):
         x0_v = None if oracle_video is None else oracle_video.float().cpu()
         for step in range(settings.num_steps):
             t_cur, t_next = ts[step], ts[step + 1]
+            NV.begin_euler(step)
             # the last step's video moves only the returned latent: skip its decoder
             video = not (skip_video and step == settings.num_steps - 1)
             if x0_v is not None:
                 xv = ((1 - t_cur) * x0_v + t_cur * noise_v).to(dev)
-            probe("pass.marker", torch.tensor([step, 0]))
-            v, a = velocity(text_c, xv, xa, t_cur, video)
+            # The unguided pass runs only for a part that a guidance scale reads.
+            uncond = guided and (video or act_uncond)
+            if overlap and uncond:
+                v, a, v_u, a_u = velocities_overlapped(
+                    xv, xa, t_cur, video, video and decode_uncond
+                )
+            else:
+                probe("pass.marker", torch.tensor([step, 0]))
+                v, a = velocity(text_c, xv, xa, t_cur, video)
+                if uncond:
+                    probe("pass.marker", torch.tensor([step, 1]))
+                    v_u, a_u = velocity(
+                        text_u,
+                        xv,
+                        xa,
+                        t_cur,
+                        video and decode_uncond,
+                        "uncond",
+                        act=act_uncond,
+                    )
             if a is None or (video and v is None):
                 raise RuntimeError(
                     f"the trunk pass of step {step} returned no "
                     f"{'actions' if a is None else 'video velocity'}"
                 )
-            if guided and (video or act_uncond):
-                if text_u is None:
-                    raise RuntimeError("guided sampling needs text_uncond")
-                probe("pass.marker", torch.tensor([step, 1]))
-                v_u, a_u = velocity(
-                    text_u, xv, xa, t_cur, video and decode_uncond, act=act_uncond
-                )
+            if uncond:
                 for kind, cond, unc, scale in (
                     ("video", v, v_u, settings.cfg_video_scale),
                     ("action", a, a_u, settings.cfg_scale),
                 ):
                     if unc is None or cond is None:  # a part not needed
                         continue
-                    out = guidance_combine(cond, unc, scale)
+                    with NV.op(
+                        "sampler", "cfg_combine", mod="flow", block=None, pas="p"
+                    ):
+                        out = guidance_combine(cond, unc, scale)
                     probe(f"cfg_combine.{kind}.cond", cond)
                     probe(f"cfg_combine.{kind}.uncond", unc)
                     probe(f"cfg_combine.{kind}.out", out)
@@ -480,17 +659,20 @@ class PraxisPolicy(nn.Module):
                     else:
                         a = out
             dt = t_next - t_cur
-            if video and v is not None:
-                xv = xv + dt * v
-            xa = xa + dt * a
+            with NV.op("sampler", "euler_update", mod="flow", block=None, pas="p"):
+                if video and v is not None:
+                    xv = xv + dt * v
+                xa = xa + dt * a
+            NV.end_euler()
         if x0_v is not None:
             xv = x0_v.to(dev)
         probe("out.video", xv)
         probe("out.action", xa)
         if return_window:
             return xv, xa[None]
-        video_last = None if skip_video else xv[:, :, d * lat :].contiguous()
-        actions = xa[d * lat :].contiguous()
+        with NV.op("sampler", "output", mod="flow", block=None, pas="p"):
+            video_last = None if skip_video else xv[:, :, d * lat :].contiguous()
+            actions = xa[d * lat :].contiguous()
         if video_last is not None:
             probe("out.video_last", video_last)
         probe("out.action_last", actions)

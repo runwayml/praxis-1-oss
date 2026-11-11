@@ -457,8 +457,11 @@ def test_session_tiles_and_flange_frame() -> None:
         inputs = sess.prepare(_obs(frames, p, lo, f + 1))
         depths.append(inputs.depth)
         assert all(c.shape[-2:] == (256, 832) for c in enc.clips)
-        cur = sa.tile_clip(frames["exterior"][f], frames["wrist"][f])
-        assert torch.equal(enc.clips[0], cur)
+        if inputs.depth == 0:
+            cur = sa.tile_clip(frames["exterior"][f], frames["wrist"][f])
+            assert torch.equal(enc.clips[0], cur)
+        # Warm calls encode only the executed stream and reuse its anchor.
+        assert len(enc.clips) == 1
         model_now = sa.pose8_to_model(p[f], sa.FR3_HAND)  # no descriptor: the FR3 rig
         assert np.array_equal(inputs.pose8_now, model_now)
         offs = [*[0, 21, 45][: inputs.depth], f]
@@ -485,7 +488,7 @@ def test_session_tiles_and_flange_frame() -> None:
     assert depths == [0, 1, 2, 3]
     assert sess.restart_count == 0
     # The executed frames of the window, in one tile clip.
-    stream = enc.clips[1]
+    stream = enc.clips[0]
     assert stream.shape == (1, 3, 69, 256, 832)
     want = sa.tile_clip(frames["exterior"][:69], frames["wrist"][:69])
     assert torch.equal(stream, want)
@@ -538,12 +541,13 @@ def test_session_clips_follow_the_checkpoint_antialias(antialias: bool) -> None:
     sess = Session(pipe)  # ty: ignore[invalid-argument-type]
     state = sess.state
     state.finish(state.prepare(_obs(frames, p, 0, 1)), torch.zeros(1, 6, 40))
+    cur = enc.clips[0]
     enc.clips = []
     state.prepare(_obs(frames, p, 0, 22))
-    cur, stream = enc.clips[0], enc.clips[1]
+    (stream,) = enc.clips
     assert cur.shape[-2:] == stream.shape[-2:] == (224, 832)
     want_cur = sa.tile_clip(
-        frames["exterior"][21], frames["wrist"][21], 224, 416, 0.03, antialias=antialias
+        frames["exterior"][0], frames["wrist"][0], 224, 416, 0.03, antialias=antialias
     )
     want_stream = sa.tile_clip(
         frames["exterior"][:21],
@@ -555,8 +559,8 @@ def test_session_clips_follow_the_checkpoint_antialias(antialias: bool) -> None:
     )
     assert torch.equal(cur, want_cur) and torch.equal(stream, want_stream)
     other = sa.tile_clip(
-        frames["exterior"][21],
-        frames["wrist"][21],
+        frames["exterior"][0],
+        frames["wrist"][0],
         224,
         416,
         0.03,

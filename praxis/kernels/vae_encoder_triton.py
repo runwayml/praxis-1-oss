@@ -46,7 +46,10 @@ def _rmsnorm_silu_kernel(
     M,  # positions T*H*W per batch row, each a run of C elements
     x_bs,
     y_bs,  # batch strides (y can be a view into a halo buffer)
-    sqrt_c,
+    y_offset,  # element offset inside the complete output allocation
+    # Specialize the scalar: Inductor otherwise uses an fp64 runtime argument
+    # where the eager Triton launcher used fp32, changing normalization bits.
+    sqrt_c: tl.constexpr,
     C: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_C: tl.constexpr,
@@ -56,7 +59,7 @@ def _rmsnorm_silu_kernel(
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     mask_m = offs_m < M
     xb = x_ptr + pid_b * x_bs
-    yb = y_ptr + pid_b * y_bs
+    yb = y_ptr + pid_b * y_bs + y_offset
     row_x = xb + offs_m[:, None].to(tl.int64) * C
     row_y = yb + offs_m[:, None].to(tl.int64) * C
 
@@ -138,12 +141,20 @@ def _avg_down_kernel(
 
 
 def rmsnorm_silu(
-    x: Tensor, out: Tensor, gamma: Tensor, sqrt_c: float, block_c: int
+    x: Tensor,
+    out: Tensor,
+    gamma: Tensor,
+    sqrt_c: float,
+    block_c: int,
+    *,
+    output_t_offset: int = 0,
 ) -> None:
     """Write ``silu(rmsnorm(x))`` into ``out``.
 
     ``x`` and ``out`` are channels-last (B, C, T, H, W) tensors with the same
-    shape. ``out`` can be a time slice of a larger buffer. ``gamma`` is a
+    shape, or ``out`` can include leading halo frames selected by
+    ``output_t_offset``. Passing the complete allocation keeps its storage
+    visible to compiler functionalization. ``gamma`` is a
     float32 (C,) tensor. ``block_c`` (64, 128 or 256) sets the summation order.
     """
     b, c = x.shape[0], x.shape[1]
@@ -157,12 +168,15 @@ def rmsnorm_silu(
         m,
         x.stride(0),
         out.stride(0),
+        output_t_offset * c * x.shape[-2] * x.shape[-1],
         sqrt_c,
         C=c,
         BLOCK_M=block_m,
         BLOCK_C=block_c,
         num_warps=warps,
         num_stages=NUM_STAGES,
+        # Match Triton's eager default when Inductor recompiles this user kernel.
+        enable_fp_fusion=True,
     )
 
 
@@ -201,3 +215,102 @@ def avg_down(x: Tensor, factor_t: int) -> Tensor:
         num_stages=NUM_STAGES,
     )
     return y
+
+
+# ---------------------------------------------------------------------------
+# the residual add of a VAE residual block
+# fused into the next block's first norm.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _add_rmsnorm_silu_kernel(
+    a_ptr,
+    b_ptr,
+    s_ptr,
+    y_ptr,
+    g_ptr,
+    M,
+    x_bs,
+    y_bs,
+    y_offset,
+    sqrt_c: tl.constexpr,
+    C: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+) -> None:
+    """``s = a + b`` (rounded to the dtype of ``s``, as the eager add) and ``silu(rmsnorm(s))`` with the
+    code of ``_rmsnorm_silu_kernel`` (same blocks, same sums). ``a``, ``b`` and ``s`` share one layout."""
+    pid_m = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    mask_m = offs_m < M
+    off_x = pid_b * x_bs + offs_m[:, None].to(tl.int64) * C
+    row_y = y_ptr + pid_b * y_bs + y_offset + offs_m[:, None].to(tl.int64) * C
+
+    acc = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    for c0 in tl.range(0, C, BLOCK_C):
+        offs_c = c0 + tl.arange(0, BLOCK_C)
+        mask = mask_m[:, None] & (offs_c[None, :] < C)
+        av = tl.load(a_ptr + off_x + offs_c[None, :], mask=mask, other=0.0).to(
+            tl.float32
+        )
+        bv = tl.load(b_ptr + off_x + offs_c[None, :], mask=mask, other=0.0).to(
+            tl.float32
+        )
+        sv = (av + bv).to(s_ptr.dtype.element_ty)
+        tl.store(s_ptr + off_x + offs_c[None, :], sv, mask=mask)
+        x = sv.to(tl.float32)
+        acc += tl.sum(x * x, axis=1)
+
+    denom = tl.maximum(tl.sqrt(acc), 1e-12)
+    tl.debug_barrier()
+
+    for c0 in tl.range(0, C, BLOCK_C):
+        offs_c = c0 + tl.arange(0, BLOCK_C)
+        mask_c = offs_c < C
+        mask = mask_m[:, None] & mask_c[None, :]
+        x = tl.load(s_ptr + off_x + offs_c[None, :], mask=mask, other=0.0).to(
+            tl.float32
+        )
+        g = tl.load(g_ptr + offs_c, mask=mask_c, other=0.0)
+        y = ((x / denom[:, None]) * sqrt_c) * g[None, :]
+        y = y * tl.sigmoid(y)
+        tl.store(row_y + offs_c[None, :], y.to(y_ptr.dtype.element_ty), mask=mask)
+
+
+def add_rmsnorm_silu(
+    a: Tensor,
+    b: Tensor,
+    s: Tensor,
+    out: Tensor,
+    gamma: Tensor,
+    sqrt_c: float,
+    block_c: int,
+    *,
+    output_t_offset: int = 0,
+) -> None:
+    """``s = a + b`` and ``rmsnorm_silu(s, out, ...)`` in one kernel. ``a``, ``b``, ``s`` channels-last
+    with one shape and strides; ``out`` as for :func:`rmsnorm_silu`."""
+    bsz, c = a.shape[0], a.shape[1]
+    m = a.numel() // (bsz * c)
+    block_m, warps = _NORM_LAUNCH[block_c]
+    grid = (triton.cdiv(m, block_m), bsz)
+    _add_rmsnorm_silu_kernel[grid](
+        a,
+        b,
+        s,
+        out,
+        gamma,
+        m,
+        a.stride(0),
+        out.stride(0),
+        output_t_offset * c * a.shape[-2] * a.shape[-1],
+        sqrt_c,
+        C=c,
+        BLOCK_M=block_m,
+        BLOCK_C=block_c,
+        num_warps=warps,
+        num_stages=NUM_STAGES,
+        enable_fp_fusion=True,
+    )

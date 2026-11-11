@@ -108,23 +108,24 @@ def _cached_bank(gate_up: Tensor, down: Tensor, path: Path | None):
 def check_nvfp4_device(device: str | torch.device) -> None:
     """Refuse a CUDA device that cannot run the NVFP4 experts, before loading.
 
-    The grouped NVFP4 GEMM runs on SM120 GPUs (RTX 5090, RTX PRO 6000
-    Blackwell) only, and needs FlashInfer from the ``nvfp4`` extra. A CPU
+    The NVFP4 experts run on SM100/SM103 and SM120 GPUs with FlashInfer (the
+    ``nvfp4`` extra) and on SM110 (Jetson Thor) with QuACK (the ``thor``
+    extra); see :func:`praxis.quantization.nvfp4.backend_for_device`. A CPU
     device is allowed, so that packing and the CPU tests can run.
     """
     device = torch.device(device)
     if device.type != "cuda":
         return
-    capability = torch.cuda.get_device_capability(device)
-    if capability != (12, 0):
-        raise RuntimeError(
-            "routed_precision='nvfp4' needs an SM120 GPU (RTX 5090, RTX PRO 6000 "
-            f"Blackwell); {torch.cuda.get_device_name(device)} is "
-            f"SM{capability[0]}{capability[1]}. Use routed_precision='bf16'."
-        )
-    if importlib.util.find_spec("flashinfer") is None:
+    from praxis.quantization.nvfp4 import backend_for_device
+
+    backend = backend_for_device(device)
+    package, extra = (
+        ("quack", "thor") if backend.startswith("quack") else ("flashinfer", "nvfp4")
+    )
+    if importlib.util.find_spec(package) is None:
         raise ImportError(
-            "routed_precision='nvfp4' needs FlashInfer: pip install -e '.[nvfp4]'"
+            f"routed_precision='nvfp4' on this GPU needs {package}: "
+            f"pip install -e '.[{extra}]'"
         )
 
 
@@ -144,6 +145,11 @@ def load_routed_nvfp4(
     packing recipe; a stale or corrupt entry raises instead of silently loading
     other weights.
     """
+    backend = None
+    if torch.device(device).type == "cuda":
+        from praxis.quantization.nvfp4 import backend_for_device
+
+        backend = backend_for_device(device)
     root = Path(path)
     files = weight_map(root)
     expected = module.state_dict(keep_vars=True)
@@ -204,8 +210,22 @@ def load_routed_nvfp4(
         )
     del native, expected
 
+    from praxis.quantization.nvfp4 import FUSED_SWIGLU_FP4
+    from praxis.quantization.nvfp4_calibration import (
+        FC1_OUTPUT_SCALES,
+        FC1_SOURCE_DIGESTS,
+    )
+
+    checkpoint_id = _checkpoint_id(root, files)
+    fc1_scales = (
+        FC1_OUTPUT_SCALES.get(checkpoint_id, {})
+        if backend == "flashinfer_sm100_contiguous_nvfp4" and FUSED_SWIGLU_FP4
+        else {}
+    )
+    if fc1_scales and set(fc1_scales) != set(banks):
+        raise CheckpointError("FC1 calibration does not cover the routed banks")
     receipts = []
-    cache_root = None if cache is None else Path(cache) / _checkpoint_id(root, files)
+    cache_root = None if cache is None else Path(cache) / checkpoint_id
     for index, (name, layer) in enumerate(banks.items(), 1):
         values = []
         for projection in ("gate_up", "down"):
@@ -219,11 +239,18 @@ def load_routed_nvfp4(
         bank, hit, source = _cached_bank(*values, cache_path)
         original_bytes = sum(v.numel() * v.element_size() for v in values)
         del values
-        layer.routed = bank.to(device=device)
+        bank = bank.to(device=device)
+        if name in fc1_scales:
+            expected_digests = FC1_SOURCE_DIGESTS[checkpoint_id][name]
+            if (source["gate_up_sha256"], source["down_sha256"]) != expected_digests:
+                raise CheckpointError(f"FC1 calibration source mismatch: {name}")
+            bank.set_fused_swiglu_scale(fc1_scales[name])
+        layer.routed = bank
         receipts.append(
             {
                 "name": name,
                 "cache_hit": hit,
+                "fc1_output_scale": fc1_scales.get(name),
                 "source": source,
                 "original_bytes": original_bytes,
                 "packed_bytes": sum(
@@ -235,8 +262,12 @@ def load_routed_nvfp4(
         raise CheckpointError("meta tensors remain after routed NVFP4 loading")
     module.routed_quantization = {
         "format": "nvfp4",
+        "backend": backend,
         "scope": "routed experts only",
         "activation_scale": "dynamic per expert (QAT recipe)",
+        "fc1_output_scale": "calibrated per bank"
+        if fc1_scales
+        else "dynamic per expert",
         "banks": receipts,
         "native_tensors": len(files) - len(routed_names),
         "non_routed_checkpoint_dtypes_preserved": True,

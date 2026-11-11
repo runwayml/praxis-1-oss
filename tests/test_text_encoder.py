@@ -4,8 +4,36 @@ import sys
 import types
 
 import pytest
+import torch
 
 from praxis import text_encoder
+
+
+def test_encode_accepts_new_processor_metadata() -> None:
+    encoder = text_encoder.TextEncoder.__new__(text_encoder.TextEncoder)
+    encoder.max_batch_size = 2
+    batch = {
+        "input_ids": torch.tensor([[1, 2, 0], [3, 0, 0]]),
+        "attention_mask": torch.tensor([[1, 1, 0], [1, 0, 0]]),
+        "mm_token_type_ids": torch.zeros((2, 3), dtype=torch.long),
+    }
+    seen = []
+
+    def tokenize(prompts):
+        seen.extend(prompts)
+        return batch
+
+    def encode_tokens(input_ids, attention_mask):
+        assert input_ids is batch["input_ids"]
+        assert attention_mask is batch["attention_mask"]
+        return input_ids.unsqueeze(-1).float()
+
+    encoder.tokenize = tokenize
+    encoder._encode_tokens = encode_tokens
+    result = encoder.encode(["pick", ""])
+    assert seen == ["pick", " "]
+    assert [x.shape for x in result] == [(1, 2, 1), (1, 1, 1)]
+    assert result[0].flatten().tolist() == [1, 2]
 
 
 def test_pin_fla_kernels_keeps_one_launch_setting(

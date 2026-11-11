@@ -228,6 +228,7 @@ class StubBackbone(nn.Module):
         noised: Tensor,
         timesteps: Tensor,
         decode: bool = True,
+        ctx: dict | None = None,
     ) -> StubOutput:
         self.calls.trunk.append(
             {
@@ -237,6 +238,7 @@ class StubBackbone(nn.Module):
                 "noised": noised,
                 "t": timesteps,
                 "decode": decode,
+                "ctx": ctx,
             }
         )
         kk = timesteps.shape[1]
@@ -422,6 +424,29 @@ def test_window_joint_equals_the_reference_loop(
             assert torch.equal(
                 calls.expert[j]["noised_actions"], calls.expert[j + 1]["noised_actions"]
             )
+
+
+@pytest.mark.parametrize("precision", ["bf16", "nvfp4"])
+@pytest.mark.parametrize("requested", [False, True])
+def test_context_cache_requires_row_independent_experts(
+    monkeypatch: pytest.MonkeyPatch, precision: str, requested: bool
+) -> None:
+    calls = Calls()
+    monkeypatch.setattr(model_mod, "run_expert_on_taps_k", _stub_expert(calls))
+    policy = _policy(calls)
+    if precision == "nvfp4":
+        policy.routed_quantization = {"format": precision}
+    assert policy.supports_context_cache is (precision == "bf16")
+    policy.sample_window_joint(
+        seed=5,
+        settings=SamplerSettings(),
+        ctx_cache=requested,
+        **_inputs(1),
+    )
+    # Even an explicit True must not route NVFP4 through a partial-row cache.
+    active = requested and precision == "bf16"
+    assert calls.trunk
+    assert all((call["ctx"] is not None) is active for call in calls.trunk)
 
 
 def test_window_joint_trace_names(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -660,6 +685,9 @@ def test_session_samples_the_window(cfg: float) -> None:
         layout="window_joint", cfg_scale=cfg, cfg_video_scale=1.0
     )
     session.seed = 100
+    session.skip_last_video = False
+    session.ctx_cache = False
+    session.overlap_expert = False
     inputs = StubInputs(
         prompt="Put the cube on the plate.",
         anchor=torch.zeros(1),
@@ -693,6 +721,8 @@ def test_session_passes_its_skip_last_video(skip: bool) -> None:
     session.sampler = SamplerSettings(layout="window_joint")
     session.seed = 0
     session.skip_last_video = skip
+    session.ctx_cache = False
+    session.overlap_expert = False
     inputs = StubInputs(
         prompt="Put the cube on the plate.",
         anchor=torch.zeros(1),
@@ -734,6 +764,8 @@ def test_a_session_without_skip_overrides_the_policy_flag(
     session.sampler = settings
     session.seed = 1
     session.skip_last_video = False
+    session.ctx_cache = False
+    session.overlap_expert = False
     chunk = StubInputs(
         prompt="p",
         anchor=inputs["anchor"],
@@ -744,7 +776,7 @@ def test_a_session_without_skip_overrides_the_policy_flag(
     )
     video, actions, _ = session._sample(cast(SingleArmChunkInputs, chunk))
     ref_video, ref_actions = policy.sample_window_joint(
-        seed=1, settings=settings, skip_last_video=False, **inputs
+        seed=1, settings=settings, skip_last_video=False, ctx_cache=False, **inputs
     )
     assert video is not None and ref_video is not None
     assert torch.equal(video, ref_video) and torch.equal(actions, ref_actions)

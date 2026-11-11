@@ -62,6 +62,9 @@ def test_code_defaults_are_the_droid_config() -> None:
     # Inference precision is opt-in; recommended YAML settings stay unchanged.
     assert model.pop("routed_precision", "bf16") == "bf16"
     assert model.pop("nvfp4_cache", None) is None
+    # The published praxis-sim 0.1.0 predates the graph options.
+    assert model.pop("action_cuda_graphs", True) is True
+    assert model.pop("nvfp4_moe_cuda_graphs", True) is True
     assert model == cfg["model"]
     assert (SamplerConfig().layout, SessionConfig().max_context_chunks) == (
         "window_joint",

@@ -236,7 +236,7 @@ def test_video_antialias_is_read() -> None:
         True,
     )
     assert model_variant(antialiased).antialias is True
-    with pytest.raises(CheckpointError, match="video.antialias"):
+    with pytest.raises(CheckpointError, match=r"video\.antialias"):
         model_variant(_with(SINGLE_ARM, "video.antialias", "yes"))
 
 

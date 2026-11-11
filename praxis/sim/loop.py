@@ -319,6 +319,8 @@ class ModelPolicy:
             # no NVFP4 fields: those runs keep the default bf16 loader.
             routed_precision=getattr(m, "routed_precision", "bf16"),
             nvfp4_cache=getattr(m, "nvfp4_cache", None),
+            action_cuda_graphs=getattr(m, "action_cuda_graphs", True),
+            nvfp4_moe_cuda_graphs=getattr(m, "nvfp4_moe_cuda_graphs", True),
             sampler=SamplerSettings(
                 num_steps=s.num_steps,
                 t_shift=s.t_shift,

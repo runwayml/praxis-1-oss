@@ -2,7 +2,13 @@ __pycache__/
 *.pyc
 outputs/
 *.egg-info/
+
+.venv/
+.pytest_cache/
+.ruff_cache/
 build/
 dist/
+weights/
+checkpoints/
 # Proxy auth tokens of praxis.serve.latency (keep them outside the checkout).
 modal_headers.json

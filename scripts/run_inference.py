@@ -59,6 +59,8 @@ def build_pipeline(cfg: dict) -> PraxisPipeline:
         vae_weights=m["vae_weights"],
         text_encoder=m["text_encoder"],
         device=m.get("device", "cuda"),
+        decoder_attention_backend=m.get("decoder_attention_backend"),
+        encoder_attention_backend=m.get("encoder_attention_backend"),
         vae_norm_block_c=(
             {int(k): int(v) for k, v in m["vae_norm_block_c"].items()}
             if m.get("vae_norm_block_c")
@@ -66,6 +68,8 @@ def build_pipeline(cfg: dict) -> PraxisPipeline:
         ),
         routed_precision=str(m.get("routed_precision", "bf16")),
         nvfp4_cache=m.get("nvfp4_cache"),
+        action_cuda_graphs=bool(m.get("action_cuda_graphs", True)),
+        nvfp4_moe_cuda_graphs=bool(m.get("nvfp4_moe_cuda_graphs", True)),
         sampler=SamplerSettings(
             num_steps=int(s["num_steps"]),
             t_shift=float(s["t_shift"]),
