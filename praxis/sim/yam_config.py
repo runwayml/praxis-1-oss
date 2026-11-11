@@ -9,7 +9,11 @@ Blocks:
 * ``sampler``: the sampler of each call. The defaults are the serve defaults
   of the bimanual rig: 2 Euler steps of the ``window_joint`` layout, flow
   shift 1, no text guidance.
-* ``session``: context chunks, rows per call and the sampler seed.
+* ``session``: the schedule (``rtc``, real-time chunking as on the robot,
+  or ``chunked``), the latency of a real-time call, context chunks, rows per
+  chunked call and the sampler seed.
+* ``player``: the smoothing of the executed poses (Savitzky-Golay, 7 rows,
+  order 2, as the robot client and the hosted demo play them).
 * ``policy``: the predicted video of the model policy.
 * ``episodes``: the stop rule and a scale of the time limits.
 * ``scene``: image size, shadows, anti-aliasing, the asset cache and an
@@ -40,6 +44,7 @@ from praxis.sim.yam_loop import (
     YamPolicy,
     YamSessionConfig,
 )
+from praxis.sim.yam_player import YamPlayerConfig
 from praxis.sim.yam_scene import YamSceneConfig
 
 YAM_POLICIES: tuple[str, ...] = ("model", "oracle", "hold")
@@ -150,6 +155,7 @@ class YamSuiteConfig:
     model: YamModelConfig = field(default_factory=YamModelConfig)
     sampler: YamSamplerConfig = field(default_factory=YamSamplerConfig)
     session: YamSessionConfig = field(default_factory=YamSessionConfig)
+    player: YamPlayerConfig = field(default_factory=YamPlayerConfig)
     policy: YamPolicySettings = field(default_factory=YamPolicySettings)
     episodes: YamEpisodesConfig = field(default_factory=YamEpisodesConfig)
     scene: YamSceneSettings = field(default_factory=YamSceneSettings)
@@ -223,4 +229,5 @@ def make_yam_policy(kind: str, cfg: YamSuiteConfig) -> YamPolicy:
             t_shift=s.t_shift,
         ),
         decode_video=cfg.policy.decode_video,
+        player=cfg.player,
     )

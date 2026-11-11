@@ -1,8 +1,13 @@
 # praxis closed-loop simulation suite with the bimanual checkpoint (two YAM arms).
-# The sampler and session values are the serve defaults of configs/serve_yam.yaml.
+# The sampler values are the serve defaults of configs/serve_yam.yaml. The
+# session runs as on the robot and in the hosted demo: real-time chunking, and
+# Savitzky-Golay smoothing of the executed poses (session.schedule=chunked and
+# player.smoothing=none play each chunk as the session returns it).
 #
 #   MUJOCO_GL=egl python scripts/run_sim_yam.py --config configs/sim_yam.yaml \
-#       --checkpoint checkpoints/praxis-1-yam --out outputs/sim_yam --seeds 2
+#       --checkpoint checkpoints/praxis-1-yam --out outputs/sim_yam --seeds 5
+#
+# This runs the four bag tasks, the default task set; --tasks all runs every task.
 #
 # Override single values on the command line: --set sampler.num_steps=4
 
@@ -19,10 +24,17 @@ sampler:
   t_shift: 1.0          # flow shift of the timestep grid
 
 session:
+  schedule: rtc           # rtc (real-time chunking, as on the robot) | chunked (play each chunk, then call)
+  latency_s: 0.25         # rtc: from a sample to its answer, in sim seconds (4 plan rows run meanwhile)
   max_context_chunks: 1   # executed chunks kept as context
-  exec_horizon: 24        # command rows per call
+  exec_horizon: 24        # chunked: command rows per call
   seed: 0                 # chunk k of the episode with seed s: seed + seed_stride * s + k (--sampler-seed replaces it)
   seed_stride: 1000
+
+player:
+  smoothing: savgol       # savgol (Savitzky-Golay over the executed poses) | none (the server's rows as they are)
+  window: 7               # rows of the window, centred on the running row
+  order: 2                # polynomial order of the fit
 
 episodes:
   stop_on_success: true

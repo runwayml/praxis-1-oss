@@ -5,10 +5,18 @@ One episode:
 1. Reset the task with the episode seed and observe.
 2. Call the policy with the frame stack of the last 25 ticks (the observation
    format of :mod:`praxis.bimanual`). It returns one chunk of command rows
-   (21 rows for the first call of a context window, 24 after).
+   (21 rows for the first call of a context window, 24 after), or a stream
+   of rows (a closed-loop policy).
 3. Execute each row for one 15 Hz tick, push the observation to the stack.
 4. Go back to step 2. Stop at success (plus ``after_success_s``) or at the
    time limit.
+
+The model policy runs the checkpoint as the robot client and the hosted demo
+do (``session.schedule: rtc``, the default): its stream predicts with the
+real-time rules of the server while the arms move, and plays the answers
+with a trajectory player that smooths the executed poses
+(:mod:`praxis.sim.yam_player`). ``session.schedule: chunked`` plays each
+chunk to its end instead, with the sim stopped during each call.
 
 The loop checks each rendered model view: after a run of black or flat views
 (an EGL renderer that shares a GPU with CUDA work can return them without an
@@ -19,8 +27,9 @@ Policies:
 * :class:`YamModelPolicy`: the bimanual praxis checkpoint through
   :class:`praxis.pipeline.PraxisPipeline`, with the serve defaults of the
   bimanual rig (``configs/serve_yam.yaml``: 2 Euler steps of the
-  ``window_joint`` layout, flow shift 1, no guidance, 1 context chunk, 24
-  rows per call). The prompt goes to the model verbatim, as on the server.
+  ``window_joint`` layout, flow shift 1, no guidance, 1 context chunk) and
+  the real-time schedule of the robot (a prediction every 12 rows). The
+  prompt goes to the model verbatim, as on the server.
 * :class:`YamOraclePolicy`: the scripted oracle of :mod:`praxis.sim.yam_scripted`.
 * :class:`YamHoldPolicy`: hold the start poses with the grippers open.
 
@@ -28,10 +37,10 @@ The model views are 416x260 by default (``configs/sim_yam.yaml``), the size
 that the client of the rig sends. The pipeline fits each view to a 256x416
 tile.
 
-With ``decode_video``, :class:`YamModelPolicy` also decodes the video that
-the model predicts for each call (one 256x1248 canvas per command row: top |
-wrist left | wrist right). The human view then shows it under the rendered
-views.
+With ``decode_video`` (``session.schedule: chunked``), :class:`YamModelPolicy`
+also decodes the video that the model predicts for each call (one 256x1248
+canvas per command row: top | wrist left | wrist right). The human view then
+shows it under the rendered views.
 """
 
 from __future__ import annotations
@@ -39,7 +48,7 @@ from __future__ import annotations
 import math
 import time
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -58,6 +67,12 @@ from praxis.sim.robot import pos_rot_to_pose12, pose7_to_pos_rot
 from praxis.sim.scene import CONTROL_HZ
 from praxis.sim.video import VideoWriter, compose_panels, overlay_text
 from praxis.sim.yam_env import YamEnv, YamObservation
+from praxis.sim.yam_player import (
+    JunctionConfig,
+    RealTimeChunking,
+    TrajectoryPlayer,
+    YamPlayerConfig,
+)
 from praxis.sim.yam_scene import MODEL_VIEWS, SIDES
 from praxis.sim.yam_scripted import OracleConfig, YamOracle
 
@@ -190,24 +205,61 @@ class YamOraclePolicy:
         return YamPolicyOutput(empty, np.zeros((0, 2), np.float32), stream=stream())
 
 
+SCHEDULES: tuple[str, ...] = ("rtc", "chunked")
+
+
 @dataclass
 class YamSessionConfig:
-    """Session settings of the bimanual checkpoint (``configs/serve_yam.yaml``)."""
+    """Session settings of the bimanual checkpoint (``configs/serve_yam.yaml``)
+    and the schedule of the client.
 
+    ``schedule``:
+
+    * ``rtc`` (the default): real-time chunking, as the robot and the hosted
+      demo run the checkpoint. The session predicts every 12 rows, the arms
+      keep moving while a call runs, and each chunk is joined to the plan
+      that runs meanwhile with the junction rule of the server
+      (:class:`praxis.sim.yam_player.RealTimeChunking`). Each answer arrives
+      ``latency_s`` after its tick on the sim clock: 0.25 s, the round trip
+      of the hosted demo, so 4 plan rows run before each answer.
+    * ``chunked``: play each chunk of ``exec_horizon`` rows to its end, then
+      call again. The sim stops during each call.
+    """
+
+    schedule: str = "rtc"
+    latency_s: float = 0.25  # rtc: from a sample to its answer, sim seconds
     max_context_chunks: int = 1
-    exec_horizon: int = 24  # command rows per call
+    exec_horizon: int = 24  # chunked: command rows per call
     seed: int = 0  # chunk k of the episode with seed s: seed + seed_stride * s + k
     seed_stride: int = 1000
+
+    def __post_init__(self) -> None:
+        if self.schedule not in SCHEDULES:
+            raise ValueError(
+                f"session.schedule must be one of {SCHEDULES}, got {self.schedule!r}"
+            )
+        cap = JunctionConfig().max_delay_sec(CONTROL_HZ)
+        if not (math.isfinite(float(self.latency_s)) and 0 <= self.latency_s <= cap):
+            raise ValueError(
+                f"session.latency_s must be 0..{cap:g} s (the rows a chunk has "
+                f"left after the stride), got {self.latency_s}"
+            )
 
 
 class YamModelPolicy:
     """The bimanual praxis checkpoint in closed loop: one session per episode.
 
     The session is the one of the policy server (:meth:`PraxisPipeline.session`),
-    so the sim and the server run the same code path. With ``decode_video``,
-    each call also decodes the predicted video. The decode does not change the
-    commands: the sampler seeds and the inputs stay the same. ``prompt`` None
-    sends the prompt of the env of each episode; a string replaces it.
+    so the sim and the server run the same code path. ``schedule: rtc`` runs
+    it with the real-time rules of the server
+    (:class:`praxis.sim.yam_player.RealTimeChunking`); ``schedule: chunked``
+    plays each chunk to its end. A
+    :class:`praxis.sim.yam_player.TrajectoryPlayer` plays the answers, with
+    the smoothing of ``player`` (Savitzky-Golay by default). With
+    ``decode_video`` (``chunked`` only), each call also decodes the predicted
+    video. The decode does not change the commands: the sampler seeds and the
+    inputs stay the same. ``prompt`` None sends the prompt of the env of each
+    episode; a string replaces it.
 
     One policy serves one episode at a time: it holds the session of the
     current episode.
@@ -221,6 +273,7 @@ class YamModelPolicy:
         prompt: str | None = None,
         session: YamSessionConfig | None = None,
         decode_video: bool = False,
+        player: YamPlayerConfig | None = None,
     ) -> None:
         if pipe.embodiment != "bimanual":
             raise ValueError(
@@ -229,8 +282,18 @@ class YamModelPolicy:
         self.pipe = pipe
         self.prompt = prompt
         self.cfg = session or YamSessionConfig()
+        self.player_cfg = player or YamPlayerConfig()
         self.decode_video = decode_video
+        if decode_video and self.cfg.schedule == "rtc":
+            raise ValueError(
+                "policy.decode_video needs session.schedule=chunked: a real-time "
+                "session returns commands only"
+            )
         self.session = None
+        self.player: TrajectoryPlayer | None = None
+        self.rtc: RealTimeChunking | None = None
+        # The GPU time of each prediction of a real-time episode (None: chunked).
+        self.prediction_s: list[float] | None = None
 
     @classmethod
     def load(
@@ -243,6 +306,7 @@ class YamModelPolicy:
         device: str = "cuda",
         sampler: SamplerSettings | None = None,
         decode_video: bool = False,
+        player: YamPlayerConfig | None = None,
     ) -> YamModelPolicy:
         """Load the checkpoint. ``sampler`` None = the serve defaults of the bimanual rig."""
         from praxis.model import SamplerSettings
@@ -255,20 +319,39 @@ class YamModelPolicy:
             device=device,
             sampler=sampler or SamplerSettings(t_shift=1.0, cfg_video_scale=1.0),
         )
-        return cls(pipe, prompt, session, decode_video)
+        return cls(pipe, prompt, session, decode_video, player)
 
     def reset(self, env: YamEnv, seed: int) -> None:
         c = self.cfg
+        prompt = env.prompt if self.prompt is None else self.prompt
+        sample_seed = int(c.seed) + int(c.seed_stride) * int(seed)
+        self.player = TrajectoryPlayer(CONTROL_HZ, self.player_cfg.smoother())
+        self.rtc = None
+        if c.schedule == "rtc":
+            # As the server opens a real-time session: the whole chunk, no
+            # video decoder on the last Euler step (the commands keep their bits).
+            self.session = self.pipe.session(
+                prompt=prompt,
+                seed=sample_seed,
+                max_context_chunks=c.max_context_chunks,
+                exec_horizon=None,
+                skip_last_video=True,
+            )
+            self.prediction_s = []
+            return
+        self.prediction_s = None
         self.session = self.pipe.session(
-            prompt=env.prompt if self.prompt is None else self.prompt,
-            seed=int(c.seed) + int(c.seed_stride) * int(seed),
+            prompt=prompt,
+            seed=sample_seed,
             max_context_chunks=c.max_context_chunks,
             exec_horizon=c.exec_horizon,
         )
 
     def act(self, history: YamHistory) -> YamPolicyOutput:
-        if self.session is None:
+        if self.session is None or self.player is None:
             raise RuntimeError("call reset before act")
+        if self.cfg.schedule == "rtc":
+            return self._act_rtc(history)
         t0 = time.monotonic()
         res = self.session.step(history.obs_dict())
         _sync(self.pipe)
@@ -287,7 +370,64 @@ class YamModelPolicy:
             frames = self.session.decode_video(res)
             predicted = frames.permute(0, 2, 3, 1).contiguous().cpu().numpy()
             info["decode_s"] = time.monotonic() - t1
-        return YamPolicyOutput(poses, grips, info, predicted=predicted)
+        stream = None
+        if self.player.smoother is not None:
+            stream = self._play(list(res.commands), history.latest.tick)
+        return YamPolicyOutput(poses, grips, info, stream=stream, predicted=predicted)
+
+    def _play(
+        self, rows: list[dict], tick: int
+    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Play one chunk from ``tick`` on through the player (the smoothed poses)."""
+        player = self.player
+        if player is None:
+            raise RuntimeError("call reset before act")
+        now = round(tick * player.row_ns)
+        player.merge(rows, now, now)
+        for i in range(len(rows)):
+            cmd = player.command_at(round((tick + i) * player.row_ns))
+            if cmd is None:
+                raise RuntimeError("the player has no command after a merge")
+            yield cmd
+
+    def _predict(self, stack: Callable[[], dict], executed_rows: int) -> list[dict]:
+        session, timing = self.session, self.prediction_s
+        if session is None or timing is None:
+            raise RuntimeError("call reset before act")
+        t0 = time.monotonic()
+        res = session.step(stack(), executed_rows=executed_rows)
+        _sync(self.pipe)
+        timing.append(time.monotonic() - t0)
+        return list(res.commands)
+
+    def _act_rtc(self, history: YamHistory) -> YamPolicyOutput:
+        """Return the stream of a real-time session: one command per tick, to the end."""
+        player = self.player
+        if player is None:
+            raise RuntimeError("call reset before act")
+        start = history.latest
+        hold = (
+            np.stack(
+                [pos_rot_to_pose12(*pose7_to_pos_rot(start.ee_pose[s])) for s in SIDES]
+            ).astype(np.float64),
+            np.zeros(2),
+        )
+        rtc = RealTimeChunking(self._predict, player, self.cfg.latency_s, hold)
+        self.rtc = rtc
+
+        def stream() -> Iterator[tuple[np.ndarray, np.ndarray]]:
+            while True:
+                yield rtc.tick(history.latest.tick, history.obs_dict)
+
+        state = getattr(self.session, "state", None)
+        info: dict[str, float | int | str] = {
+            "step_s": 0.0,
+            "prompt": str(getattr(state, "prompt", "")),
+        }
+        empty = np.zeros((0, 2, 12), np.float32)
+        return YamPolicyOutput(
+            empty, np.zeros((0, 2), np.float32), info, stream=stream()
+        )
 
 
 @dataclass
@@ -391,11 +531,16 @@ def run_yam_episode(
     model_prompt = ""
     predicted_slot = bool(getattr(policy, "decode_video", False))
 
+    def calls() -> list[float]:
+        # A real-time session makes its predictions inside one stream.
+        pred = getattr(policy, "prediction_s", None)
+        return call_s if pred is None else list(pred)
+
     def show(predicted: np.ndarray | None) -> None:
         if video is not None:
             video.write(
                 human_frame(
-                    env, obs, max(len(call_s) - 1, 0), predicted, predicted_slot
+                    env, obs, max(len(calls()) - 1, 0), predicted, predicted_slot
                 )
             )
 
@@ -428,6 +573,7 @@ def run_yam_episode(
                 done = True
                 break
     summary = env.summary()
+    call_s = calls()
     return YamEpisodeResult(
         task=env.task.name,
         seed=int(seed),
