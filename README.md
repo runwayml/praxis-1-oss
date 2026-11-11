@@ -439,10 +439,16 @@ runs sessions on synthetic observations at the shapes of a robot client:
 python scripts/benchmark_inference.py --set sampler.cfg_video_scale=1.0 --out outputs/bench_nocfg
 # With a torch.profiler trace (trace.json) and a kernel table (kernels.txt):
 python scripts/benchmark_inference.py --trace --out outputs/bench_trace
+# With the video decoder of the last Euler step:
+python scripts/benchmark_inference.py --set session.skip_video_decoder=off --out outputs/bench_decode
 ```
 
 Each session sends a first call with one frame (context depth 0, 21 command
-rows) and then calls with a stack of 25 frames (24 rows). The first session
+rows) and then calls with a stack of 25 frames (24 rows). As on the policy
+server, each call skips the video decoder of the last Euler step
+(`session.skip_video_decoder`, default on): the commands keep their bits, and
+with action guidance off (`cfg_scale` 1.0) the last step runs no unguided
+pass either, since that pass only guides the video. The first session
 is a warm-up: it compiles the attention kernels of each context depth, so
 its calls are not counted. The script writes the time of each call and of
 its stages to `calls.jsonl`, and `summary.json` with the median (p50), the
@@ -453,7 +459,7 @@ versions. The stages (`praxis/profiling.py`) are:
 |---|---|
 | `text_encode` | The text encoder. The pipeline caches each prompt, so this is 0 after the first call. |
 | `vae_encode` | The video encodes of the canvas: the current frame, and with context the executed frames and the window anchor. |
-| `backbone` | The video backbone calls: one per sampler pass, two passes per step with video guidance. |
+| `backbone` | The video backbone calls: one per sampler pass, two passes per step with video guidance. With `skip_video_decoder` on and action guidance off, the last step runs the guided pass only, without its video decoder. |
 | `expert` | The action expert calls on the taps of the backbone. |
 | `total_staged` | The whole policy call of the same sessions, with the canvas, the pose conversions and the command decode. |
 | `total` | The whole policy call in one more session without the stage timers: one synchronize before and one after the call. This is the call time a server sees. |
@@ -479,19 +485,26 @@ We ran the script on one NVIDIA H100 80GB HBM3 (Modal), with the image of
 4.0.0b36, bfloat16 weights, the `flash` attention backend and no
 `torch.compile` beyond the flex attention kernels. The checkpoint was
 `praxis-1-droid` with the settings of `configs/serve_droid.yaml`
-(2 steps, flow shift 12.5, 1 context chunk) and synthetic 416x234 views.
+(2 steps, flow shift 12.5, 1 context chunk, the video decoder of the last
+step skipped) and synthetic 416x234 views.
 Each row had a warm-up session of 10 calls, then staged sessions of 10
 calls (3 with video guidance 4.0, 2 with 1.0) and one plain session of 10
 calls. `Total` comes from the plain session, the other columns from the
-staged sessions. Each step runs one expert call, so a call has two. Times
-in ms as p50 / p90 / max:
+staged sessions. Each step runs one expert call, so a call has two. With
+video guidance the last step runs its guided pass only, so a call has three
+backbone passes. Times in ms as p50 / p90 / max:
 
 | Video guidance | Calls | Total | Total (staged) | Backbone | Expert | VAE encode | Text encode |
 |---|---|---|---|---|---|---|---|
-| `cfg_video_scale` 4.0 (default): 2 passes per step | first of a session (n=1; staged n=3) | 342 / 342 / 342 | 375 / 375 / 375 | 312 / 312 / 312 | 52 / 53 / 53 | 5 / 5 / 5 | 0 |
-| | later (n=9; staged n=27) | 701 / 729 / 742 | 730 / 733 / 734 | 589 / 590 / 591 | 53 / 54 / 55 | 58 / 58 / 58 | 0 |
-| `cfg_video_scale` 1.0: 1 pass per step | first of a session (n=1; staged n=2) | 189 / 189 / 189 | 218 / 218 / 218 | 157 / 157 / 157 | 52 / 52 / 52 | 5 / 5 / 5 | 0 |
-| | later (n=9; staged n=18) | 406 / 407 / 407 | 437 / 441 / 441 | 295 / 296 / 296 | 53 / 55 / 55 | 58 / 59 / 59 | 0 |
+| `cfg_video_scale` 4.0 (default): 2 passes per step, 1 on the last | first of a session (n=1; staged n=3) | 266 / 266 / 266 | 289 / 310 / 316 | 204 / 213 / 216 | 72 / 80 / 82 | 8 / 8 / 9 | 0 |
+| | later (n=9; staged n=27) | 501 / 513 / 530 | 544 / 557 / 612 | 372 / 378 / 381 | 78 / 81 / 83 | 66 / 67 / 69 | 0 |
+| `cfg_video_scale` 1.0: 1 pass per step | first of a session (n=1; staged n=2) | 192 / 192 / 192 | 210 / 212 / 213 | 125 / 126 / 126 | 73 / 74 / 74 | 7 / 7 / 7 | 0 |
+| | later (n=9; staged n=18) | 344 / 345 / 346 | 387 / 390 / 392 | 223 / 223 / 223 | 75 / 78 / 78 | 65 / 65 / 66 | 0 |
+
+In the same container, with the video decoder of the last step
+(`--set session.skip_video_decoder=off`), the later calls took 714 ms
+(`cfg_video_scale` 4.0) and 422 ms (1.0) at the p50 of `total`. The commands
+were bit-identical with and without the decoder on all 90 calls.
 
 These times include the video decode of the last Euler step. The policy
 server skips that decode by default (`skip_video_decoder`, see
@@ -507,10 +520,10 @@ resolves torch again, so the step above re-pins cuDNN 9.24 after it.
   The later calls hold one context chunk, so the backbone runs on twice the
   tokens and the VAE encodes the 24 executed frames.
 - The warm-up calls compile the attention kernels: the first call of the
-  process took 35.6 s (25.3 s with guidance off), the first call with
-  context 1.2 s (1.0 s).
+  process took 35.0 s (32.5 s with guidance off), the first call with
+  context 1.1 s (0.5 s).
 - A later call gives 24 command rows, 1.6 s of motion at 15 Hz. With the
-  default settings a call takes about half of that time.
+  default settings a call takes about a third of that time.
 - The inputs are synthetic. The routed experts of the backbone depend on
   the tokens, so real camera frames can give other times.
 - A robot client adds the image encode, the network and the server around

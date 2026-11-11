@@ -20,7 +20,7 @@ from test_sampler_window_joint import Calls, StubBackbone, _stub_expert
 
 from praxis import profiling
 from praxis.model import PraxisPolicy, SamplerSettings
-from praxis.pipeline import PraxisPipeline
+from praxis.pipeline import PraxisPipeline, Session, StepResult
 from praxis.robot_io import NormStats
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,10 +147,11 @@ def test_benchmark_times_each_stage_of_the_real_session(
     assert [r["rows"] for r in records] == [21, 24, 24] * 3
     staged = [r for r in records if not r["plain"]]
     for r in staged:
-        # num_steps 2: one backbone call per pass and step, and an expert call
-        # for each backbone call at most (a sampler may skip the expert of a
-        # pass whose actions it does not need).
-        assert r["backbone_calls"] == 2 * passes
+        # num_steps 2: one backbone call per pass and step, but the last step
+        # skips its video, so it runs no unguided pass (it only guides the
+        # video), and an expert call for each backbone call at most (a sampler
+        # may skip the expert of a pass whose actions it does not need).
+        assert r["backbone_calls"] == passes + 1
         assert 2 <= r["expert_calls"] <= r["backbone_calls"]
         assert r["vae_encode_calls"] == (1 if r["depth"] == 0 else 3)
         assert r["total"] >= r["backbone"] + r["expert"] + r["vae_encode"]
@@ -167,9 +168,43 @@ def test_benchmark_times_each_stage_of_the_real_session(
     s = bench.settings(pipe, session)
     assert s["cfg_mode"] == ("sequential" if passes == 2 else "off")
     assert s["passes_per_step"] == passes
+    assert s["last_step_passes"] == 1
     # The wrappers are gone after the run.
     assert "forward_chunk_causal" not in vars(pipe.policy.backbone)
     assert "encode" in vars(pipe.vae)
+
+
+@pytest.mark.parametrize(
+    ("value", "skip"),
+    [
+        *[(None, True), ("auto", True), (True, True), ("on", True), (1, True)],
+        *[(False, False), ("off", False), ("none", False), ("", False), (0, False)],
+    ],
+)
+def test_benchmark_skips_the_last_video_decoder_as_the_server(
+    stub_expert: None, monkeypatch: pytest.MonkeyPatch, value: object, skip: bool
+) -> None:
+    bench = _script()
+    pipe = _pipe(1.0)
+    session = {"max_context_chunks": 1, "exec_horizon": 24}
+    if value is not None:
+        session["skip_video_decoder"] = value
+    results = []
+    step = Session.step
+
+    def recorded(self: Session, obs: dict) -> StepResult:
+        results.append(step(self, obs))
+        return results[-1]
+
+    monkeypatch.setattr(Session, "step", recorded)
+    bench.run(pipe, session, sessions=1, calls=2, warmup_calls=2)
+    # A skipped call returns no predicted video.
+    assert len(results) == 4
+    assert all((r.pred_video_latent is None) is skip for r in results)
+    trunk = pipe.policy.backbone.calls.trunk  # ty: ignore[unresolved-attribute]
+    # num_steps 2, one pass per step: the second pass of each call is the last step.
+    assert [c["decode"] for c in trunk] == [True, not skip] * 4
+    assert bench.settings(pipe, session)["skip_video_decoder"] is skip
 
 
 def test_the_trace_session_is_extra_and_not_counted(
