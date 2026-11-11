@@ -50,7 +50,7 @@ serve = [
 # the MP4 writer's imageio. To work on the simulator itself in a checkout, install the
 # package editable on top: pip install -e packages/praxis-sim.
 sim = [
-    "praxis-sim>=0.1.0",
+    "praxis-sim>=0.1.0,<0.2.0",
     "imageio>=2.30",
     "imageio-ffmpeg>=0.4",
 ]
