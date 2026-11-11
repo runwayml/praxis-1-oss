@@ -15,6 +15,39 @@ your rig, with DROID as the worked example, and how to adapt `praxis-1-droid`
 to a task with LoRA on one 80 GB GPU. `praxis/sim/EVAL.md` tells how to measure a checkpoint on the
 simulated DROID tasks.
 
+## Quick start
+
+Clone the repository, install it, download the weights from Hugging Face
+and run the single-arm checkpoint in the simulation. It needs Python 3.12,
+one CUDA GPU with at least 80 GB of memory and the CUDA 13.0 driver. Log in
+to Hugging Face once first (`hf auth login`); the `hf` command comes with
+`transformers`, so log in after the install if you don't have it yet.
+
+```bash
+git clone https://github.com/runwayml/praxis-1-oss.git praxis-1 && cd praxis-1
+python3.12 -m venv .venv && . .venv/bin/activate
+pip install -U pip
+pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu130
+pip install packaging ninja wheel
+CAUSAL_CONV1D_FORCE_BUILD=TRUE MAX_JOBS=16 \
+  pip install --no-cache-dir --no-build-isolation causal-conv1d==1.6.1
+pip install -e packages/praxis-sim -e ".[kernels]" "imageio>=2.30" "imageio-ffmpeg>=0.4"   # praxis and praxis-sim from this checkout
+pip install "flash-attn-4[cu13]==4.0.0b36"
+pip install --no-deps nvidia-cudnn-cu13==9.24.0.43   # after every install that resolves torch
+
+hf download Wan-AI/Wan2.2-TI2V-5B Wan2.2_VAE.pth --local-dir weights
+hf download Qwen/Qwen3.5-2B --local-dir weights/Qwen3.5-2B
+hf download runwayml/praxis-1-droid --local-dir checkpoints/praxis-1-droid
+(cd checkpoints/praxis-1-droid && sha256sum -c --quiet SHA256SUMS && echo "checkpoint OK")
+
+MUJOCO_GL=egl python scripts/run_sim.py --config configs/sim_droid.yaml \
+  --set task.name=block_in_bowl --set task.prompt=null --set viewer.host=0.0.0.0
+```
+
+The last command runs three episodes of `block_in_bowl`. A web page on port
+8000 shows each episode live, and the videos go to `outputs/sim_droid`.
+"Install", "Get the weights" and "Simulation" below give the details.
+
 ## What the model does
 
 One policy call takes these inputs:
