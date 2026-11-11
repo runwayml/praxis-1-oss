@@ -7,7 +7,7 @@ Rules:
   ``scripts/record_sim_demos.py`` and ``scripts/run_sim_yam.py`` import
   ``praxis.sim``.
 * ``praxis.sim`` imports only the standard library, numpy, Pillow, PyYAML,
-  MuJoCo (with PyOpenGL, a MuJoCo dependency), imageio-ffmpeg, torch, the
+  MuJoCo (with PyOpenGL, a MuJoCo dependency), imageio-ffmpeg, torch, scipy, the
   simulator package ``praxis_sim`` and the core ``praxis`` modules (not
   ``praxis.serve``). Relative imports count too.
 * The core modules do not import the packages of the ``sim`` extra.
@@ -31,6 +31,7 @@ ALLOWED_THIRD_PARTY = {
     "imageio",
     "imageio_ffmpeg",
     "torch",
+    "scipy",  # the rotations of the real-time junction rule (praxis/sim/yam_player.py)
 }
 SIM_ONLY = {"mujoco", "OpenGL", "imageio_ffmpeg"}
 # The server package is not part of the core: the sim must not import it.

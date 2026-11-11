@@ -302,17 +302,64 @@ control. The simulator is `praxis_sim.yam_scene`, `yam_env`, `yam_tasks` and
 ```bash
 # The scripted oracle (no GPU, no weights): every task, 2 seeds, no video.
 python scripts/run_sim_yam.py --config configs/sim_yam.yaml --policy oracle \
-    --out outputs/sim_yam_oracle --seeds 2 --no-video
+    --out outputs/sim_yam_oracle --seeds 2 --no-video --tasks all
 
-# The checkpoint, 2 seeds per task (one GPU).
+# The checkpoint on the four bag tasks (the default task set), 5 seeds each (one GPU).
 MUJOCO_GL=egl python scripts/run_sim_yam.py --config configs/sim_yam.yaml \
-    --checkpoint checkpoints/praxis-1-yam --out outputs/sim_yam --seeds 2
+    --checkpoint checkpoints/praxis-1-yam --out outputs/sim_yam --seeds 5
 ```
+
+Without `--tasks`, the script runs the four bag tasks (`dice_in_bag`,
+`tennis_ball_in_bag`, `apple_in_bag`, `bell_in_bag`). `--tasks all` runs every
+task, and `--tasks a,b` runs a chosen list.
 
 - **Model path.** `YamModelPolicy` opens a session of `PraxisPipeline` with
   the settings of `configs/serve_yam.yaml`: 2 Euler steps of `window_joint`,
-  flow shift 1, no guidance, 1 context chunk, 24 rows per call. The rendered
-  views (416x260 each) go through the same canvas code as on the robot.
+  flow shift 1, no guidance, 1 context chunk. The rendered views (416x260
+  each) go through the same canvas code as on the robot.
+- **Schedule.** The sim runs the checkpoint as the robot client and the
+  hosted demo do (`praxis/sim/yam_player.py`):
+  - `session.schedule: rtc` (the default) is real-time chunking with the
+    rules of the server's real-time sessions. The session predicts every 12
+    rows on the frame stack of its tick, and the arms keep moving during a
+    call. Each chunk is joined to the plan that runs meanwhile with the
+    junction rule of the server (rebase, velocity fade, grip continuation,
+    reach clamp). Each answer arrives `session.latency_s` after its tick on
+    the sim clock (0.25 s, the round trip of the hosted demo: 4 plan rows
+    run before it), so a run does not depend on the speed of the GPU.
+    `tests/serve/test_sim_rtc_parity.py` checks that a sim episode sends
+    the same commands as a client of the server's real-time session.
+  - `session.schedule: chunked` plays each chunk of `exec_horizon` rows to
+    its end, then calls again. The sim stops during each call. Each chunk
+    starts from the pose where the last one ended, with no junction rule,
+    so the arms jump at each chunk boundary (every 1.6 s).
+- **Smoothing.** The trajectory player smooths the poses that the arms
+  execute with a Savitzky-Golay filter (`player.smoothing: savgol`, 7 rows,
+  order 2), as the hosted demo does. The window is centred on the running
+  row, over the rows already played and the plan rows still to come, so it
+  adds no lag. The grips and the plan of the junction rule keep the
+  session's rows. `player.smoothing: none` plays the rows as they are.
+  `--set session.schedule=chunked --set player.smoothing=none` plays the
+  chunks as the session returns them.
+- **Results.** `praxis-1-yam` on the four bag tasks, seeds 0-9 of each
+  task, one H100. Jitter is the mean absolute second difference per 15 Hz
+  tick (per axis) of the commanded grasp-site position, and of the arm
+  joint angles.
+
+  | Session | Success | Command jitter | Joint jitter | Largest step |
+  | --- | --- | --- | --- | --- |
+  | default (`rtc`, `savgol`) | 36/40 | 0.68 mm | 3.6 mrad | 2.3 cm |
+  | `chunked`, `savgol` | 33/40 | 0.85 mm | 3.4 mrad | 3.4 cm |
+  | `chunked`, `none` | 32/40 | 2.42 mm | 10.8 mrad | 4.0 cm |
+
+  Under `chunked`, the step into the first row of a chunk is 1.17 cm on
+  average (0.93 cm with `savgol`), against 0.43 cm within a chunk: the arms
+  jump every 1.6 s. `screwdriver_in_bin` (seeds 0-9) is the exception:
+  9/10 with `chunked` and `none`, 6/10 with `rtc` and `none`, 5/10 with
+  `chunked` and `savgol`, 1/10 with the default. The arm then holds the
+  screwdriver in the bin and does not let go, with the time limit tripled
+  too. The six tasks with a task-name prompt scored 0 with both sessions
+  (2 seeds each).
 - **Prompt.** The prompt goes to the model verbatim, as on the server. A
   pick-and-place task has its prompt in the caption form of the training
   data, with no closing period ("Pick up the screwdriver from the center of

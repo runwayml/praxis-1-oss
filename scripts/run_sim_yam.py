@@ -5,9 +5,10 @@ Usage:
     python scripts/run_sim_yam.py --config configs/sim_yam.yaml --policy oracle \\
         --out outputs/sim_yam_oracle --seeds 20 --no-video
 
-    # The bimanual checkpoint on 2 seeds per task (one GPU).
+    # The bimanual checkpoint on the four bag tasks, 5 seeds each (one GPU).
     MUJOCO_GL=egl python scripts/run_sim_yam.py --config configs/sim_yam.yaml \\
-        --checkpoint checkpoints/praxis-1-yam --out outputs/sim_yam --seeds 2
+        --checkpoint checkpoints/praxis-1-yam --out outputs/sim_yam --seeds 5 \\
+        --tasks dice_in_bag,tennis_ball_in_bag,apple_in_bag,bell_in_bag
 
     # A real cell: a rig profile sets the table, the cameras, textures and lights.
     MUJOCO_GL=egl python scripts/run_sim_yam.py --config configs/sim_yam.yaml \\
@@ -53,6 +54,9 @@ from praxis.sim.yam_loop import run_yam_episode
 from praxis.sim.yam_scene import load_rig_profile
 from praxis.sim.yam_tasks import YAM_TASKS, YamTaskConfig
 
+# The bag tasks the released bimanual checkpoint solves; --tasks all runs every task.
+DEFAULT_TASKS = ("dice_in_bag", "tennis_ball_in_bag", "apple_in_bag", "bell_in_bag")
+
 
 def parse_units(args: argparse.Namespace) -> list[tuple[str, int]]:
     """Return the (task, seed) units of the command line."""
@@ -64,7 +68,12 @@ def parse_units(args: argparse.Namespace) -> list[tuple[str, int]]:
                 raise SystemExit(f"--units items are task:seed, got {item!r}")
             units.append((task.strip(), int(seed)))
     else:
-        tasks = args.tasks.split(",") if args.tasks else sorted(YAM_TASKS)
+        if args.tasks == "all":
+            tasks = sorted(YAM_TASKS)
+        elif args.tasks:
+            tasks = args.tasks.split(",")
+        else:
+            tasks = list(DEFAULT_TASKS)
         units = [(t, s) for s in range(args.seeds) for t in tasks]
     unknown = sorted({t for t, _ in units} - set(YAM_TASKS))
     if unknown:
@@ -128,7 +137,11 @@ def run() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--units", default=None, help="task:seed,task:seed,...")
     ap.add_argument("--seeds", type=int, default=2, help="seeds 0..N-1 per task")
-    ap.add_argument("--tasks", default=None, help="comma list (default: all tasks)")
+    ap.add_argument(
+        "--tasks",
+        default=None,
+        help="comma list, or all (default: the 4 bag tasks)",
+    )
     ap.add_argument(
         "--sampler-seed", type=int, default=None, help="replaces session.seed"
     )

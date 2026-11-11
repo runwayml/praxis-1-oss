@@ -219,7 +219,7 @@ The extras of `pyproject.toml`:
 |---|---|---|
 | (none) | torch, torchvision, triton, transformers, safetensors, numpy, pillow, pyyaml | the model |
 | `kernels` | flash-linear-attention, causal-conv1d | the text encoder kernels of the validation results (see below) |
-| `sim` | praxis-sim (mujoco, gymnasium; `packages/praxis-sim` of this repository, from PyPI), imageio, imageio-ffmpeg | the MuJoCo simulation |
+| `sim` | praxis-sim (mujoco, gymnasium; `packages/praxis-sim` of this repository, from PyPI), imageio, imageio-ffmpeg, scipy | the MuJoCo simulation |
 | `video` | imageio, imageio-ffmpeg | mp4 export of `scripts/run_inference.py` |
 | `serve` | the web server, the image decoders and the cloud host client | the policy server (`praxis/serve/README.md`) |
 | `train` | huggingface_hub, av, pyarrow | the fine-tune (`praxis/train/README.md`) |

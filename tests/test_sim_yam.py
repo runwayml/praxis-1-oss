@@ -327,6 +327,14 @@ def test_sim_yam_config_loads() -> None:
     assert cfg.sampler.t_shift == 1.0 and cfg.sampler.cfg_video_scale == 1.0
     assert (cfg.scene.image_width, cfg.scene.image_height) == (416, 260)
     assert cfg.scene.rig_profile is None
+    # The session of the hosted demo: real-time chunking, a 0.25 s round trip
+    # and Savitzky-Golay 7/2 on the executed poses.
+    assert (cfg.session.schedule, cfg.session.latency_s) == ("rtc", 0.25)
+    assert (cfg.player.smoothing, cfg.player.window, cfg.player.order) == (
+        "savgol",
+        7,
+        2,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +405,7 @@ def test_model_policy_drives_the_rig_through_the_session() -> None:
         policy = YamModelPolicy(
             pipe,  # ty: ignore[invalid-argument-type]
             env.prompt,
-            YamSessionConfig(),
+            YamSessionConfig(schedule="chunked"),
         )
         res = run_yam_episode(env, policy, 0, max_ticks=21 + 24 + 24)
         assert res.calls == 3 and res.ticks == 69

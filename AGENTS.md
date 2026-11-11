@@ -23,7 +23,7 @@ results reproducible. `README.md` is the user guide.
 | `praxis/kernels/` | Triton kernels (forward and backward) that keep the bits of the checkpoint |
 | `praxis/quantization/`, `praxis/kernels/nvfp4.py` | the optional routed NVFP4 inference on SM120 GPUs (`model.routed_precision: nvfp4`): packing, the cached load and the activation kernels |
 | `praxis/serve/` | the policy server (WebSocket, Positronic protocol) and the Modal app. See `praxis/serve/README.md` |
-| `praxis/sim/` | the closed loop of the MuJoCo simulation (the model loop, the video writer, the live viewer). See `praxis/sim/README.md` |
+| `praxis/sim/` | the closed loop of the MuJoCo simulation (the model loop, the YAM client: trajectory player, real-time chunking and smoothing, the video writer, the live viewer). See `praxis/sim/README.md` |
 | `packages/praxis-sim/` | the simulator as its own package, `praxis_sim` (no torch): the single-arm DROID rig, tasks, scripted oracles, the Gymnasium wrapper. `praxis.sim.<module>` names still resolve to it |
 | `packages/praxis-sim/src/praxis_sim/eval_suites.py`, `praxis/sim/EVAL.md` | the fixed evaluation scenarios of the single-arm checkpoint |
 | `praxis/eval/` | the offline action error on fixed DROID windows (oracle and deployment legs) |
