@@ -1,4 +1,4 @@
-# praxis-1
+# Praxis-1
 
 [![Tech report](https://img.shields.io/badge/Tech%20Report-Runway-black)](https://runway.com/research/praxis-1-video-pretraining-to-robot-control)
 [![Model on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/model-on-hf-md.svg)](https://huggingface.co/collections/runwayml/praxis-1)
