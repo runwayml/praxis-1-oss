@@ -1,0 +1,58 @@
+# praxis policy server settings for an SO-100 / SO-101 checkpoint
+# ("embodiment": "so101", praxis/so101.py).
+# Start: python -m praxis.serve --config configs/serve_so101.yaml
+# The sampler and session values are the defaults of the session parameters.
+# They are the settings of the SO101 serve preset of the fine-tune (4 steps,
+# t_shift 12.5, action CFG 1, video CFG 4 with the blank caption, 1 context
+# chunk, 24 rows per call, no video decoder on the last step). They have not
+# been tuned on a robot with this server. A client changes a value for one
+# session in the query of the session URL, for example
+# ws://<host>:8000/api/v1/session?views=1&sample_seed=0&num_steps=4
+#
+# The session parameters of the rig: views (1 | 2), grip_closed and grip_open
+# (the follower's gripper.pos at closure 1 / 0; praxis/so101.py has the
+# contract). The client is eval/so101/so101_client.py (LeRobot). The chunked
+# schedule is the default; schedule=rtc serves real-time chunking as on the
+# other rigs (praxis/serve/README.md, "Real-time chunking").
+#
+# The checkpoint config sets the rest of the variant: the canvas (the fit rule
+# of training: a 640x480 view gives a 288x416 tile), the 6-D joint head and
+# the caption of the unguided pass.
+
+model:
+  checkpoint: checkpoints/praxis-1-so101-nvfp4  # praxis checkpoint directory
+  vae_weights: weights/Wan2.2_VAE.pth          # public Wan2.2 VAE weights
+  text_encoder: weights/Qwen3.5-2B             # public Qwen3.5-2B (Hugging Face layout)
+  embodiment: so101                            # the rig of the checkpoint
+  device: cuda
+  vae_norm_block_c: null
+  # The checkpoint was trained with NVFP4 QAT of the routed experts
+  # (ffn.routed: 17 MoE layers, 34 matrices). nvfp4 serves them packed on an
+  # SM120 / SM100 GPU (the [nvfp4] extra; README, "Optional routed NVFP4
+  # inference"); bf16 serves the bf16 masters on any GPU (H100):
+  # --set model.routed_precision=bf16.
+  routed_precision: nvfp4
+  # A directory for the packed banks (about 14 GB; the first boot packs them
+  # in a few minutes), for example outputs/nvfp4_cache. null packs on each boot.
+  nvfp4_cache: null
+
+sampler:
+  num_steps: 4           # Euler steps per chunk
+  cfg_scale: 1.0         # text guidance scale of the actions (1.0 = off)
+  cfg_video_scale: 4.0   # text guidance scale of the video
+  cfg_batched: false     # no effect with window_joint: the passes run one after the other
+  layout: window_joint   # joint Euler over the whole context window
+  t_shift: 12.5          # flow shift of the timestep grid
+  solver: euler          # window_joint needs euler
+  action_steps: null     # window_joint needs null
+
+session:
+  exec_horizon: 24                # command rows per call (null = the full chunk)
+  control_mode: none              # the so101 rig has no other mode
+  context_mode: observed          # observed | stateless
+  max_context_chunks: 1           # context chunks of the window
+  carry_mode: clean
+  skip_video_decoder: on          # on | off (on skips the video decoder of the last Euler step)
+  prompt: ""                      # the client sends the task (prompt= in the query, or task in each call)
+  schedule: chunked               # chunked | rtc (real-time chunking)
+  precompute: on                  # real-time sessions: the window encode and the trunk passes ahead of the call

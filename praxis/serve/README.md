@@ -1,11 +1,12 @@
 # praxis policy server
 
 `praxis/serve/` is a policy server for Positronic robot clients. It serves
-the single-arm checkpoint `praxis-1-droid` (`configs/serve_droid.yaml`) and
-the bimanual checkpoint `praxis-1-yam` (`configs/serve_yam.yaml`). It speaks the
-Positronic offboard protocol over a WebSocket. Its paths, session
-parameters, handshake and message formats follow that protocol. A
-Positronic client changes only its policy address.
+the single-arm checkpoint `praxis-1-droid` (`configs/serve_droid.yaml`), the
+bimanual checkpoint `praxis-1-yam` (`configs/serve_yam.yaml`) and an SO-100 /
+SO-101 checkpoint (`configs/serve_so101.yaml`, see "Serve an SO-100 / SO-101
+checkpoint"). It speaks the Positronic offboard protocol over a WebSocket.
+Its paths, session parameters, handshake and message formats follow that
+protocol. A Positronic client changes only its policy address.
 
 ## Serving
 
@@ -53,8 +54,8 @@ The checkpoint uses the `flash` attention backend. It needs the
 `flash-attn-4` package. The section "Get the weights" of the top README
 tells how to use the `triton` backend instead.
 
-`model.embodiment` of the serve config (`single_arm` or `bimanual`) names
-the rig of the checkpoint. A checkpoint of another rig fails at the boot.
+`model.embodiment` of the serve config (`single_arm`, `bimanual` or `so101`)
+names the rig of the checkpoint. A checkpoint of another rig fails at the boot.
 
 The serve config holds the current recommended sampling settings. These
 settings can change when we have more robot results:
@@ -234,14 +235,58 @@ The default session is the chunked schedule. Real-time chunking is opt-in
 with `schedule=rtc` in the query (see "Real-time chunking"); it needs
 Positronic 0.4.4 or later.
 
+## Serve an SO-100 / SO-101 checkpoint
+
+An so101 checkpoint (`"embodiment": "so101"`, `praxis/so101.py`; top README,
+"SO-101 rig") has a 6-D joint head: the 5 arm joints and the gripper of an
+SO-100 / SO-101 follower in LeRobot's `use_degrees=True` units. Serve it with
+`configs/serve_so101.yaml`. The checkpoint was trained with NVFP4 QAT of the
+routed experts, and the config serves them as NVFP4 (`routed_precision:
+nvfp4`, an SM120 or SM100 GPU with the `[nvfp4]` extra); on another GPU set
+the bf16 masters:
+
+```bash
+python -m praxis.serve --config configs/serve_so101.yaml \
+    --set model.checkpoint=checkpoints/praxis-1-so101-nvfp4 \
+    --set model.nvfp4_cache=outputs/nvfp4_cache      # keeps the packed banks between boots
+python -m praxis.serve --config configs/serve_so101.yaml --set model.routed_precision=bf16
+# the bf16 checkpoint praxis-1-so101
+python -m praxis.serve --config configs/serve_so101.yaml \
+    --set model.checkpoint=checkpoints/praxis-1-so101 --set model.routed_precision=bf16
+```
+
+The client is `eval/so101/so101_client.py` (LeRobot; no praxis import). A
+Positronic client with a LeRobot driver works too: the session is the
+observed-context session of the other rigs, with these rig settings:
+
+- The frame stack keys are `image.exterior`, `image.wrist` (with `views=2`,
+  the default) and `state`, the `(6,)` LeRobot reading `shoulder_pan.pos ..
+  wrist_roll.pos` in degrees and `gripper.pos` in 0..100. A chunked
+  observation carries the executed chunk and the current entry
+  (`history_frames` 24; the meta's `stack_entries` is 25).
+- The session parameters of the rig: `views` (1 or 2; a 1-view session reads
+  `image.exterior` only), `grip_closed` and `grip_open` (the follower's
+  `gripper.pos` at closure 1 and 0; measure them with
+  `so101_client.py --measure-grip`). The other rigs refuse them.
+- The commands are `{"joints": (6,), "timestamp": s}`: absolute targets in
+  the units of `state` (the `so101_joints` wire). The answer also holds
+  `actions` `(R, 6)` float32, `timestamps` and `joint_names` next to
+  `result`.
+- The canvas is the fit rule of training on the session's views: the client
+  bounds each view to a 416x416 box (a 640x480 view gives 416x312), the
+  server makes a 288x416 tile of it. The warmup runs the 2-view and the
+  1-view canvas.
+- `schedule=rtc` serves real-time chunking as on the other rigs (see
+  "Real-time chunking"), with the junction rule on the joint angles.
+
 ## Real-time chunking
 
 With the chunked schedule, the robot plays each chunk to its end, then asks
 for the next one and waits for the answer. With real-time chunking the robot
 asks while it still runs the current chunk, so it does not stop between
-chunks. It is opt-in: both serve configs default to the chunked schedule
-(`schedule: chunked` in `configs/serve_droid.yaml` and
-`configs/serve_yam.yaml`). A client asks for real-time chunking with
+chunks. It is opt-in: the serve configs default to the chunked schedule
+(`schedule: chunked` in `configs/serve_droid.yaml`, `configs/serve_yam.yaml`
+and `configs/serve_so101.yaml`). A client asks for real-time chunking with
 `/api/v1/session?schedule=rtc`, and a deploy turns it on for every session
 with `schedule: rtc` in the `session` block of its config.
 
@@ -299,12 +344,21 @@ default chunked schedule.
 - On the bimanual rig, targets past the reach of a YAM arm move back onto a
   reach radius (`rtc_reach_max_m`). The reach model puts the arm bases where
   Positronic's `yam_bimanual` embodiment puts them. Set
-  `rtc_reach_max_m=off` on a rig with other arm bases. The single-arm rig
-  has no reach clamp.
+  `rtc_reach_max_m=off` on a rig with other arm bases. The single-arm and
+  the so101 rig have no reach clamp and refuse `rtc_reach_max_m`.
 - On the single-arm rig, the rows stay in the frame of the client (the frame
   the robot runs), every row keeps the control law of the session
   (`droid_impedance`), and the server checks each prediction's current pose
   against the forward kinematics of `robot_state.q`, as on a chunked call.
+- On the so101 rig, the rows are joint targets (degrees x 5, `gripper.pos`).
+  The junction is the same rule with each joint angle as a linear channel
+  (`praxis.serve.rtc.rebase_joints`): the prefix rows of the plan, then the
+  model's joints plus the offset at the prefix end, handed back over
+  `rtc_rebase_decay` rows with the velocity fade, and the gripper fade of
+  `rtc_grip_rows`. `server_timing` reports the offset as `rtc_junction_deg`.
+  The reach clamp is a pose rule and does not apply: the joint targets are
+  bounded by the follower's calibration and by LeRobot's
+  `max_relative_target` on the client.
 
 The session parameters of real-time chunking:
 
@@ -316,7 +370,7 @@ The session parameters of real-time chunking:
 | `rtc_vel_fade` | 6 | Rows over which the velocity fades from the plan to the model (0 turns it off). |
 | `rtc_grip` | `cont` | `cont` fades the grippers from the plan, `model` takes the model's grips. |
 | `rtc_grip_rows` | 16 | Rows of the gripper fade. |
-| `rtc_reach_max_m` | `auto` | Bimanual rig: reach radius in m, `auto` (0.595 on both arms), `off`, one radius, or `left,right`. |
+| `rtc_reach_max_m` | `auto` | Bimanual rig: reach radius in m, `auto` (0.595 on both arms), `off`, one radius, or `left,right`. The other rigs refuse it. |
 | `sample_fps` | 15 | Samples per second, a whole multiple of the 15 Hz action rate. Above 15 Hz, a prediction off the row grid of the previous one (the client skipped its sample, or a replan) restarts the context, which refills from the frame stack (one context chunk). |
 | `max_in_flight` | 16 | Calls that the client may have in flight (1 to 16). |
 | `precompute` | `on` | Runs the window encode and the trunk passes of each prediction on the samples before it (see below). `off` turns it off. Real-time sessions only. |
@@ -336,7 +390,7 @@ action expert. The window rows are samples that arrive before the
 prediction, and no trunk pass reads the actions or the current pose. So the
 server does this work on the samples before the prediction
 (`praxis/serve/precompute.py`). It is on by default (`precompute: on` in
-both serve configs), and it applies to real-time sessions only
+the serve configs), and it applies to real-time sessions only
 (`schedule=rtc`). The default session is chunked: it does not use the
 precompute, and it is not faster with it. A client turns it off with
 `?precompute=off`, and a deploy with `precompute: off` in the `session`

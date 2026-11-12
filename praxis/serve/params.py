@@ -60,6 +60,11 @@ SESSION_PARAMS: frozenset[str] = frozenset(
         "rtc_grip_rows",
         "rtc_reach_max_m",
         "precompute",
+        # The so101 rig (praxis.so101.SESSION_PARAMS): the views of the session
+        # and the follower's gripper readings. The other rigs refuse them.
+        "views",
+        "grip_closed",
+        "grip_open",
     }
 )
 # Keys that the server reads itself. They do not go to the policy.

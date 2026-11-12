@@ -17,8 +17,11 @@ Both checkpoints also have NVFP4 versions, fine-tuned with quantization-aware
 training of the routed experts:
 [`runwayml/praxis-1-droid-nvfp4`](https://huggingface.co/runwayml/praxis-1-droid-nvfp4)
 and [`runwayml/praxis-1-yam-nvfp4`](https://huggingface.co/runwayml/praxis-1-yam-nvfp4)
-(see [Get the weights](#get-the-weights)). A checkpoint for the SO-101 arm is
-coming.
+(see [Get the weights](#get-the-weights)). For the SO-100 / SO-101 arm there
+are [`runwayml/praxis-1-so101`](https://huggingface.co/runwayml/praxis-1-so101)
+and its NVFP4 version
+[`runwayml/praxis-1-so101-nvfp4`](https://huggingface.co/runwayml/praxis-1-so101-nvfp4)
+(see [SO-101 rig](#so-101-rig)).
 
 This repository holds the inference code and the instructions to run it. The
 code needs PyTorch and a few small packages. It does not need any other code
@@ -407,9 +410,12 @@ This option changes the action outputs. The bitwise agreement of the native
 path does not apply to quantized inference.
 
 **Accuracy.** This option changes the actions, and has not been run in closed
-loop on an SM120 GPU yet. The released checkpoints are bf16 checkpoints, so
-for them NVFP4 is post-training quantization. Earlier checks simulated the
-same 4-bit rounding on H100s with two NVFP4 fine-tunes (quantization-aware training), and the results differ:
+loop on an SM120 GPU yet. The released single-arm and bimanual checkpoints are
+bf16 checkpoints, so for them NVFP4 is post-training quantization. The SO-101
+checkpoint `praxis-1-so101-nvfp4` is the exception: it was trained with NVFP4 QAT of the routed
+experts (17 MoE layers, 34 matrices), so `routed_precision: nvfp4` serves it
+in its training precision (see [SO-101 rig](#so-101-rig)). Earlier checks
+simulated the same 4-bit rounding on H100s with two NVFP4 fine-tunes (quantization-aware training), and the results differ:
 - an NVFP4 fine-tune of `praxis-1-droid` on RoboLab (action CFG 1.0, video CFG 4.0,
   `t_shift` 12.5): 279/600 with NVFP4, against 287/600 for the same weights in
   bf16, no clear difference;
@@ -625,6 +631,8 @@ The praxis checkpoints are on Hugging Face, in the `runwayml` organization:
 | Base | [`runwayml/praxis-1-base`](https://huggingface.co/runwayml/praxis-1-base) | `checkpoints/praxis-1-base` | the pretrained model without action heads: the start of a fine-tune for a new rig |
 | Single-arm (DROID), NVFP4 QAT | [`runwayml/praxis-1-droid-nvfp4`](https://huggingface.co/runwayml/praxis-1-droid-nvfp4) | `checkpoints/praxis-1-droid-nvfp4` | `praxis-1-droid` with quantization-aware training of the routed experts for NVFP4 |
 | Bimanual (YAM), NVFP4 QAT | [`runwayml/praxis-1-yam-nvfp4`](https://huggingface.co/runwayml/praxis-1-yam-nvfp4) | `checkpoints/praxis-1-yam-nvfp4` | `praxis-1-yam` with quantization-aware training of the routed experts for NVFP4 |
+| SO-100 / SO-101 | [`runwayml/praxis-1-so101`](https://huggingface.co/runwayml/praxis-1-so101) | `checkpoints/praxis-1-so101` | the SO-100 / SO-101 joint-space checkpoint (see [SO-101 rig](#so-101-rig)) |
+| SO-100 / SO-101, NVFP4 QAT | [`runwayml/praxis-1-so101-nvfp4`](https://huggingface.co/runwayml/praxis-1-so101-nvfp4) | `checkpoints/praxis-1-so101-nvfp4` | `praxis-1-so101` with quantization-aware training of the routed experts for NVFP4, the default of `configs/serve_so101.yaml` |
 
 Each checkpoint is a directory with `config.json`,
 `model.safetensors.index.json`, 17 safetensors shards and `SHA256SUMS`
@@ -655,8 +663,8 @@ for C in praxis-1-droid praxis-1-yam praxis-1-base; do   # take only the ones yo
 done
 ```
 
-The NVFP4 checkpoints download the same way
-(`for C in praxis-1-droid-nvfp4 praxis-1-yam-nvfp4; do ...`).
+The NVFP4 and SO-101 checkpoints download the same way
+(`for C in praxis-1-droid-nvfp4 praxis-1-yam-nvfp4 praxis-1-so101 praxis-1-so101-nvfp4; do ...`).
 
 The recommended sampler settings were measured on `praxis-1-droid`.
 
@@ -1029,9 +1037,9 @@ guidance (`cfg_scale` and `cfg_video_scale` 1.0) and 3 context chunks.
 
 ## Single-arm rig
 
-The checkpoint config selects the rig: `"embodiment": "single_arm"` or
-`"embodiment": "bimanual"` in `config.json`. The loader refuses a config
-without one of them.
+The checkpoint config selects the rig: `"embodiment": "single_arm"`,
+`"embodiment": "bimanual"` or `"embodiment": "so101"` in `config.json`. The
+loader refuses a config without one of them.
 
 The single-arm inference and server configs use
 `checkpoints/praxis-1-droid`.
@@ -1135,6 +1143,71 @@ which needs the `flash-attn-4` package (`uv pip install "flash-attn-4[cu13]==4.0
 `docker/Dockerfile` installs it). Set the backend to `triton` to use the
 Triton kernel of flex attention instead (see "Get the weights"). The two
 backends differ in the last bits.
+
+## SO-101 rig
+
+The SO-100 / SO-101 checkpoint (`"embodiment": "so101"`) is the model variant
+of the single-arm checkpoint with a 6-D joint-space head: the 5 arm joints and
+the gripper of an SO-100 / SO-101 follower arm (LeRobot), reading one or two
+cameras. The rig code is `praxis/so101.py`; the server serves it with
+`configs/serve_so101.yaml` (`praxis/serve/README.md`, "Serve an SO-100 /
+SO-101 checkpoint"); the client on the robot is `eval/so101/so101_client.py`.
+
+Weights: [`runwayml/praxis-1-so101`](https://huggingface.co/runwayml/praxis-1-so101)
+and [`runwayml/praxis-1-so101-nvfp4`](https://huggingface.co/runwayml/praxis-1-so101-nvfp4)
+(see [Get the weights](#get-the-weights)). `praxis-1-so101-nvfp4` is
+`praxis-1-so101` fine-tuned with NVFP4 quantization-aware training of the
+routed experts (`ffn.routed`: 17 MoE layers, 34 matrices) with bf16 masters,
+so `routed_precision: nvfp4` is its training precision, not post-training
+quantization (see "Optional routed NVFP4 inference"). The serve config reads
+it from `checkpoints/praxis-1-so101-nvfp4`. The two checkpoints have the same
+`config.json`; `tests/data/praxis-1-so101.json` is a copy of it.
+
+The data of the rig, in LeRobot terms (`SOFollower` with `use_degrees=True`,
+the LeRobot 0.7 default):
+
+- Observations: `state` `(T, 6)` = `shoulder_pan.pos`, `shoulder_lift.pos`,
+  `elbow_flex.pos`, `wrist_flex.pos`, `wrist_roll.pos` in degrees (0 = the
+  calibrated mid-range) and `gripper.pos` in the follower's 0..100 scale;
+  the views `image.exterior` and, with two cameras, `image.wrist`. Each value
+  carries a leading time axis: one entry per executed 15 Hz row, the current
+  entry last. A joint reading past 200 deg is refused as a raw tick (not
+  `use_degrees`).
+- Canvas: the fit rule of training on the session's views, side by side,
+  exterior then wrist: each view scaled down (antialiased, never up) to fit
+  416x416 with its aspect kept, the views to one common height, each trimmed
+  to the 32-px grid. A 640x480 camera gives a 288x416 tile, so two views
+  make a 288x832 canvas and one view 288x416; other camera sizes give other
+  canvases, as in training. The checkpoint config's 288x416 tile is the tile
+  of the native 480x640 view.
+- Actions: 6 values per row, `[q0 .. q4, g]`: the joints in radians,
+  relative to the joints at the start of the chunk, and the absolute gripper
+  closure `g` in 0..1. All six are q99-normalized; the proprio is the
+  absolute row at each chunk start, mean/std-normalized. The decode adds the
+  anchor joints and converts back to degrees and `gripper.pos`. Chunk 0 of a
+  context window gives 21 rows, every later chunk 24, at 15 Hz; the context
+  is one chunk (22 entries behind the current one) by default.
+- Gripper calibration: the closure is `1 - (gripper.pos - closed) / (open -
+  closed)`, with `closed` / `open` the follower's `gripper.pos` when fully
+  closed / open (the session parameters `grip_closed`, `grip_open`). Training
+  mapped the p1 / p99 reading of each table to closure 1 / 0, so "low =
+  closed" is an assumption about the training data, not a rule of LeRobot;
+  a follower whose reading grows as it closes gives `closed > open`, which the
+  rig accepts. The defaults 1.4 / 42.1 are the training medians; measure your
+  own follower with `so101_client.py --measure-grip` and pass the readings.
+- Commands: `joints` (`(6,)` absolute targets in the units of `state`, the
+  values of LeRobot's `send_action`) and `timestamp`; the handshake names the
+  `so101_joints` wire. The rig has one control mode, `none`: the follower
+  keeps its own position loop. The client sends the arm the 15 Hz rows
+  interpolated at 30 Hz, and starts from the folded rest pose of the training
+  episodes (`shoulder_lift` about -100 deg, `elbow_flex` about 95 deg); it
+  stops when the arm is far from it.
+- Prompt: the task string goes to the text encoder verbatim. Send a short
+  imperative task sentence, as in the serve preset: "Pick up the red cube and
+  put it in the box."
+- Schedules: the chunked schedule by default; `schedule=rtc` serves
+  real-time chunking with the junction rule on the joint angles
+  (`praxis/serve/README.md`, "Real-time chunking").
 
 ## Simulation
 

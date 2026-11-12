@@ -2,9 +2,10 @@
 
 praxis-1 is a standalone implementation of a robot policy: a video and action
 model that predicts the next action chunk from camera frames, the robot
-state and a text prompt. It runs two checkpoints of one model variant: the
-single-arm DROID checkpoint `praxis-1-droid` and the bimanual YAM checkpoint
-`praxis-1-yam`. This file
+state and a text prompt. It runs three checkpoints of one model variant: the
+single-arm DROID checkpoint `praxis-1-droid`, the bimanual YAM checkpoint
+`praxis-1-yam` and the SO-100 / SO-101 joint-space checkpoint
+`praxis-1-so101` (with its NVFP4 version `praxis-1-so101-nvfp4`). This file
 points to the parts of the code base and gives the rules that keep the
 results reproducible. `README.md` is the user guide.
 
@@ -18,6 +19,7 @@ results reproducible. `README.md` is the user guide.
 | `praxis/sampler.py` | the flow sampler: timestep grids, the seeded noise, guidance |
 | `praxis/pipeline.py` | `PraxisPipeline` and its sessions: one call turns observations into robot commands |
 | `praxis/single_arm.py`, `praxis/bimanual.py`, `praxis/robot_io.py` | the robot input and output of each rig: canvases, pose frames, normalization, command decoding |
+| `praxis/so101.py` | the SO-100 / SO-101 rig (`"embodiment": "so101"`): LeRobot joint units, the fit-rule canvas of 1 or 2 views, the streaming session, the hooks of its server sessions |
 | `praxis/checkpoint.py` | the checkpoint format: `config.json` validation, strict load, `save_checkpoint`, `SHA256SUMS` |
 | `praxis/vae.py`, `praxis/text_encoder.py` | the video autoencoder and the text encoder |
 | `praxis/kernels/` | Triton kernels (forward and backward) that keep the bits of the checkpoint |
@@ -27,6 +29,7 @@ results reproducible. `README.md` is the user guide.
 | `packages/praxis-sim/` | the simulator as its own package, `praxis_sim` (no torch): the single-arm DROID rig, tasks, scripted oracles, the Gymnasium wrapper. `praxis.sim.<module>` names still resolve to it |
 | `packages/praxis-sim/src/praxis_sim/eval_suites.py`, `praxis/sim/EVAL.md` | the fixed evaluation scenarios of the single-arm checkpoint |
 | `praxis/eval/` | the offline action error on fixed DROID windows (oracle and deployment legs) |
+| `eval/so101/` | the LeRobot client of a praxis serve endpoint on an so101 checkpoint (no praxis import). See its `README.md` |
 | `praxis/eval/autoregressive/` | the video-only autoregressive prompt-adherence eval: sets, VLM judge, scorer. See its `README.md` |
 | `praxis/train/` | the fine-tune: data windows (`DatasetSpec` for other single-arm rigs), objective, MoE balance, FSDP trainer, normalization statistics. See `praxis/train/README.md` |
 | `praxis/rig.py` | the base checkpoint `praxis-1-base` to a single-arm checkpoint: rig config fields and new head tensors (`scripts/init_heads.py`) |
@@ -45,6 +48,7 @@ results reproducible. `README.md` is the user guide.
 | An evaluation suite | `MUJOCO_GL=egl python scripts/run_sim_eval.py --suite hard --checkpoint CKPT --out OUT` |
 | Compare two suite runs | `python scripts/compare_sim_eval.py OUT_A OUT_B` |
 | The policy server | `python -m praxis.serve --config configs/serve_droid.yaml` |
+| The policy server of an so101 checkpoint, and its LeRobot client | `python -m praxis.serve --config configs/serve_so101.yaml`, `python eval/so101/so101_client.py --url ws://<host>:8000/api/v1/session --fake-robot --prompt "..."` |
 | The offline action error | `python scripts/run_action_error_eval.py --checkpoint CKPT --vae VAE --text-encoder TEXT --data DROID --out OUT` |
 | Judge and score autoregressive rollouts | `python scripts/score_autoregressive_eval.py judge --set droid --run RUN`, then `... score --set droid RUN_A RUN_B` |
 | Inference speed, per stage, on a local GPU | `python scripts/benchmark_inference.py --config configs/serve_droid.yaml` |

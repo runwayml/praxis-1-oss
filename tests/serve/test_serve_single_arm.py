@@ -251,7 +251,7 @@ def test_meta_names_the_single_arm_rig() -> None:
 
 @pytest.mark.parametrize("embodiment", ["two_arm", "other"])
 def test_factory_refuses_a_checkpoint_of_another_rig(embodiment: str) -> None:
-    with pytest.raises(ValueError, match="single-arm and the bimanual checkpoints"):
+    with pytest.raises(ValueError, match="single-arm, the bimanual and the so101"):
         _factory({**SINGLE_ARM, "embodiment": embodiment})
 
 

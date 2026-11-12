@@ -20,7 +20,10 @@ goes through these steps:
 3. For each observation, the server sends ``{"result": [rows],
    "effective_prompt": str, "prompt_original": None, "server_timing":
    {...}}``. The prompt goes to the model verbatim, so ``prompt_original``
-   (the prompt before a rewrite) is always None.
+   (the prompt before a rewrite) is always None. A rig can add keys next to
+   ``result`` (:meth:`praxis.serve.policy.ServedPolicy.answer_extras`): an
+   so101 session adds ``actions`` ``(R, 6)`` float32, ``timestamps`` and
+   ``joint_names`` for the LeRobot client.
 
 Protocol v2 (a real-time session) differs in these steps:
 
@@ -241,6 +244,7 @@ class InferenceServer:
                     "prompt_original": None,
                 }
                 timing["policy_ms"] = round((t_pol - t_des) * 1e3, 1)
+                response.update(policy.answer_extras(rows))
                 timing.update(policy.timing)
                 timing["send_iso"] = _iso_now()
                 if policy.return_timing:
@@ -314,7 +318,7 @@ def load_config(path: str | Path, overrides: Sequence[str] = ()) -> dict:
 def build_factory(cfg: dict) -> PolicyFactory:
     """Load the model of a serve config and return its policy factory.
 
-    The server serves the single-arm and the bimanual checkpoints.
+    The server serves the single-arm, the bimanual and the so101 checkpoints.
     ``model.embodiment`` of the config must match the checkpoint, else the
     boot fails.
     """
@@ -340,8 +344,9 @@ def build_factory(cfg: dict) -> PolicyFactory:
         raise ValueError(
             f"model.embodiment of the serve config is {m.get('embodiment')!r}, but "
             f"the checkpoint {m['checkpoint']} is for the {pipe.embodiment!r} rig. "
-            "Serve the single-arm checkpoint with configs/serve_droid.yaml and "
-            "the bimanual checkpoint with configs/serve_yam.yaml."
+            "Serve the single-arm checkpoint with configs/serve_droid.yaml, "
+            "the bimanual checkpoint with configs/serve_yam.yaml and an so101 "
+            "checkpoint with configs/serve_so101.yaml."
         )
     factory = PolicyFactory(pipe, dict(cfg.get("session") or {}), str(m["checkpoint"]))
     factory({}).close()  # a bad default fails the boot, not each session
@@ -366,24 +371,45 @@ def warmup(factory: PolicyFactory, executor: ThreadPoolExecutor) -> None:
     The warmup compiles the attention kernels of each depth before the first
     robot call. It uses 2 sampler steps and synthetic observations. Each
     later session starts with a new context. A real-time session samples the
-    same window shapes, so the chunked warmup covers it too.
+    same window shapes, so the chunked warmup covers it too. A rig with
+    several canvases runs one session per canvas
+    (``RigHooks.warmup_variants``: the 2-view and the 1-view so101 canvas).
+    The log line gives the peak CUDA memory of the process after it.
     """
     t0 = time.monotonic()
     depths = int(factory.defaults["max_context_chunks"]) + 1
-    policy = factory(
-        {
-            "schedule": "chunked",
-            "context_mode": "observed",
-            "num_steps": 2,
-            "action_steps": None,
-            "max_context_chunks": depths - 1,
-        }
+    for variant in factory.hooks.warmup_variants:
+        policy = factory(
+            {
+                "schedule": "chunked",
+                "context_mode": "observed",
+                "num_steps": 2,
+                "action_steps": None,
+                "max_context_chunks": depths - 1,
+                **variant,
+            }
+        )
+        for step in range(depths):
+            obs = warmup_obs(step, embodiment=factory.embodiment, **variant)
+            executor.submit(policy.select_action, obs).result()
+        policy.close()
+    logger.info(
+        "warmup: %d depths x %d sessions in %.1f s, GPU memory %s",
+        depths,
+        len(factory.hooks.warmup_variants),
+        time.monotonic() - t0,
+        _gpu_memory() or "n/a",
     )
-    for step in range(depths):
-        obs = warmup_obs(step, embodiment=factory.embodiment)
-        executor.submit(policy.select_action, obs).result()
-    policy.close()
-    logger.info("warmup: %d depths in %.1f s", depths, time.monotonic() - t0)
+
+
+def _gpu_memory() -> dict[str, int]:
+    """Return the peak CUDA memory of the process in MiB (empty without CUDA)."""
+    if not torch.cuda.is_available() or not torch.cuda.is_initialized():
+        return {}
+    return {
+        "peak_allocated_mib": round(torch.cuda.max_memory_allocated() / 2**20),
+        "peak_reserved_mib": round(torch.cuda.max_memory_reserved() / 2**20),
+    }
 
 
 def build_server(cfg: dict) -> InferenceServer:

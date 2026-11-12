@@ -17,9 +17,11 @@ runwayml/praxis-1-droid --local-dir checkpoints/praxis-1-droid``):
 
 The serve config of the single-arm checkpoint is ``configs/serve_droid.yaml``
 (the default). The bimanual checkpoint uses ``configs/serve_yam.yaml``
-(``PRAXIS_CONFIG=configs/serve_yam.yaml``). Both checkpoints use the
-``flash`` attention backend of the trunk; the image installs ``flash-attn-4``
-for it.
+(``PRAXIS_CONFIG=configs/serve_yam.yaml``) and an so101 checkpoint
+``configs/serve_so101.yaml`` (its ``routed_precision: nvfp4`` needs the
+``nvfp4`` extra and an SM120 or SM100 GPU; ``bf16`` runs on the default
+H100). The checkpoints use the ``flash`` attention backend of the trunk; the
+image installs ``flash-attn-4`` for it.
 
 Modal builds the image from ``docker/Dockerfile``. The volume holds the
 ``checkpoints/`` and ``weights/`` directories of the repository layout. The

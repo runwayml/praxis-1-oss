@@ -27,6 +27,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINTS = Path(os.environ.get("PRAXIS_CHECKPOINT_DIR", ROOT / "checkpoints"))
 REFUSED = OTHER_VARIANT_REFUSED.split("(")[0].strip()
 CHECKPOINT_CONFIG = Path(__file__).resolve().parent / "data" / "praxis-1-droid.json"
+# The so101 checkpoint (joint space, 6-D head, 480x640 views): a copy of its
+# config.json.
+SO101_CONFIG = Path(__file__).resolve().parent / "data" / "praxis-1-so101.json"
 
 # The variant fields of a config of another rig (format 1, no embodiment).
 OTHER_RIG: dict = {
@@ -180,11 +183,46 @@ def test_other_rig_config_is_refused(config: dict) -> None:
     with pytest.raises(CheckpointError) as err:
         validate_config(config)
     assert str(err.value) == OTHER_RIG_REFUSED
-    assert '"embodiment": "single_arm" or "bimanual"' in str(err.value)
-    assert "single-arm or the bimanual checkpoint" in str(err.value)
+    assert '"embodiment": "single_arm", "bimanual" or "so101"' in str(err.value)
+    assert "the single-arm, the bimanual or an so101 checkpoint" in str(err.value)
     if "embodiment" not in config and config["format_version"] == 1:
         with pytest.raises(CheckpointError, match="single_arm"):
             model_variant(config)
+
+
+def test_so101_config_validates() -> None:
+    """The config.json of the so101 checkpoint (a copy in tests/data) loads
+    unchanged: the ``so101`` rig, ``pose_frame`` ``joints``, a 6-D head and
+    288x416 tiles (the fit of a 480x640 view) of the views exterior, wrist."""
+    config = json.loads(SO101_CONFIG.read_text())
+    assert config["embodiment"] == "so101" and config["format_version"] == 2
+    validate_config(config)
+    variant = model_variant(config)
+    assert variant.tile_size == (288, 416) and variant.antialias is True
+    assert variant.pose_frame == "joints" and variant.canvas == "tiles"
+    assert variant.attention_backend == "flash"
+    assert config["action_space"]["dim"] == 6
+    assert config["video"]["views"] == ["exterior", "wrist"]
+    assert config["normalization"]["q99_normed_dims"] == [0, 1, 2, 3, 4, 5]
+    # A config without the field takes the frame of its rig.
+    without = {k: v for k, v in config.items() if k != "pose_frame"}
+    assert model_variant(without).pose_frame == "joints"
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "match"),
+    [
+        ("pose_frame", "rig", "pose_frame"),
+        ("pose_frame", "flange", "pose_frame"),
+        ("video.views", ["exterior"], "views"),
+        ("action_space.dim", 10, "action_space.dim"),
+    ],
+)
+def test_bad_so101_config_is_refused(path: str, value: object, match: str) -> None:
+    config = _with(json.loads(SO101_CONFIG.read_text()), path, value)
+    config = _with(config, "video.tile_bounds_rows_cols", None)
+    with pytest.raises(CheckpointError, match=match):
+        validate_config(config)
 
 
 @pytest.mark.parametrize(

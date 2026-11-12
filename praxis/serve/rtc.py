@@ -42,6 +42,14 @@ output, so the junctions do not feed back into an oscillation.
 
 Rows are arrays ``(T, arms, 13)``: ``xyz3 | R9 row-major | grip1`` per arm,
 the layout of the command dicts.
+
+On the so101 rig the rows are ``(T, 6)`` joint targets (degrees x 5,
+``gripper.pos``; :mod:`praxis.so101`). The junction is the same rule with each
+joint angle as a linear channel and the gripper as the grip
+(:func:`rebase_joints`, :func:`grip_crossfade_joints`): the embedding
+:func:`joints_as_arms` puts joint ``j`` on the x axis of arm ``j`` with the
+identity rotation, so the pose rule runs unchanged. The reach clamp is a pose
+rule and does not apply to joint targets.
 """
 
 from __future__ import annotations
@@ -232,6 +240,19 @@ def read_plan(
     the server reads the plan mapping only. A ``chunk_offset_sec`` off the row
     grid raises ``ValueError``.
     """
+    rows = read_plan_rows(obs, fps, max_rows)
+    return None if rows is None else rows_to_array(rows, chans)
+
+
+def read_plan_rows(
+    obs: cabc.Mapping, fps: float, max_rows: int = CHUNK_ROWS
+) -> list | None:
+    """Return the command rows of the observation's ``action_prefix`` plan.
+
+    The checks of :func:`read_plan` without the row layout: the plan mapping,
+    at most ``max_rows`` rows, the offsets, ``chunk_offset_sec`` on the row
+    grid. None without an ``action_prefix``.
+    """
     raw = obs.get(ACTION_PREFIX)
     if raw is None:
         return None
@@ -255,7 +276,7 @@ def read_plan(
         raise ValueError(
             f"{CHUNK_OFFSET_SEC}={offset} is not a row of the chunk at {float(fps):g} fps"
         )
-    return rows_to_array(list(actions), chans)
+    return list(actions)
 
 
 def prefix_rows(estimated_sec: float, fps: float, available: int) -> int:
@@ -384,3 +405,83 @@ def grip_crossfade(
     for i in range(min(int(rows), len(out) - p)):
         old = out[p - 1, :, 12] if cont is None else cont[min(i, len(cont) - 1), :, 12]
         out[p + i, :, 12] = old + _ramp(i, int(rows)) * (out[p + i, :, 12] - old)
+
+
+# ---------------------------------------------------------------------------
+# Joint rows (the so101 rig)
+# ---------------------------------------------------------------------------
+
+
+def joint_rows_to_array(
+    rows: cabc.Sequence[cabc.Mapping], key: str, dim: int
+) -> np.ndarray:
+    """Convert joint command rows to ``(T, dim)`` float64.
+
+    A row without a finite ``key`` of ``dim`` values raises ``ValueError``.
+    """
+    out = np.zeros((len(rows), dim), np.float64)
+    for t, row in enumerate(rows):
+        if not isinstance(row, cabc.Mapping):
+            raise ValueError(f"{ACTION_PREFIX} rows must be command mappings")
+        q = np.asarray(row.get(key), np.float64).reshape(-1)
+        if q.shape != (dim,) or not np.all(np.isfinite(q)):
+            raise ValueError(f"{key}: expected {dim} finite joint targets")
+        out[t] = q
+    return out
+
+
+def write_joint_rows(
+    rows: cabc.Sequence[cabc.Mapping], arr: np.ndarray, key: str
+) -> list[dict]:
+    """Return copies of ``rows`` with ``key`` from ``arr`` (float32). The other
+    keys of each row stay."""
+    return [{**row, key: arr[t].astype(np.float32)} for t, row in enumerate(rows)]
+
+
+def joints_as_arms(q: np.ndarray) -> np.ndarray:
+    """Embed joint rows ``(T, D)`` as pose rows ``(T, D - 1, 13)``: joint ``j``
+    on the x axis of arm ``j``, the identity rotation, the last column (the
+    gripper) as the grip of every arm."""
+    q = np.asarray(q, np.float64)
+    t, d = q.shape
+    out = np.zeros((t, d - 1, ROW_WIDTH), np.float64)
+    out[:, :, 0] = q[:, :-1]
+    out[:, :, 3:12] = np.eye(3).reshape(-1)
+    out[:, :, 12] = q[:, -1:]
+    return out
+
+
+def arms_as_joints(rows: np.ndarray) -> np.ndarray:
+    """Inverse of :func:`joints_as_arms`: ``(T, D - 1, 13)`` -> ``(T, D)``."""
+    return np.concatenate([rows[:, :, 0], rows[:, :1, 12]], axis=1)
+
+
+def rebase_joints(
+    new: np.ndarray, prefix: np.ndarray, decay: int = 0, vel_fade: int = 0
+) -> tuple[np.ndarray, dict[str, float]]:
+    """Join the model's joint rows ``new`` ``(T, D)`` to the prefix the robot runs.
+
+    :func:`rebase_into_prefix` on :func:`joints_as_arms`: rows ``k < P`` are
+    the prefix; from row ``P`` the offset of the prefix end from the model at
+    row ``P - 1`` is added to each joint and handed back over ``decay`` rows,
+    and the joint velocity fades over ``vel_fade`` rows. The grips of rows
+    from ``P`` are the model's. Returns the rows and the largest offset over
+    the joints at row ``P - 1`` (``junction_deg``, the units of the rows).
+    """
+    out, stats = rebase_into_prefix(
+        joints_as_arms(new), joints_as_arms(prefix), decay, vel_fade
+    )
+    return arms_as_joints(out), {
+        "prefix_rows": stats["prefix_rows"],
+        "junction_deg": stats["junction_cm"] / 100.0,
+    }
+
+
+def grip_crossfade_joints(
+    out: np.ndarray, p: int, continuation: np.ndarray | None, rows: int
+) -> None:
+    """:func:`grip_crossfade` on the last column of joint rows ``(T, D)``, in place."""
+    arms = joints_as_arms(out)
+    cont = None if continuation is None else joints_as_arms(continuation)
+    grip_crossfade(arms, p, cont, rows)
+    out[:, -1] = arms[:, 0, 12]
