@@ -2,6 +2,8 @@
 
 [![Tech report](https://img.shields.io/badge/Tech%20Report-Runway-black)](https://runway.com/research/praxis-1-video-pretraining-to-robot-control)
 [![Model on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/model-on-hf-md.svg)](https://huggingface.co/collections/runwayml/praxis-1)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.12-blue.svg)](pyproject.toml)
 
 Praxis is a video-action policy for robot arms. There are two checkpoints of
 one model variant: `praxis-1-droid`, the single-arm checkpoint, for a
@@ -554,8 +556,7 @@ training. The forward kernels are the same for inference and training.
 
 `Autoencoder.encode_eager` is a plain PyTorch fallback for GPUs without
 Triton. Its output is close to the fused path, but it is not bitwise equal.
-The original implementation uses another kernel of the VAE encoder (see
-"Validation").
+The original implementation uses another kernel of the VAE encoder.
 
 ## Install
 
@@ -1228,33 +1229,6 @@ kernels: the setting of the validation runs (`FLA_KERNEL_CONFIGS` in
 On SM120 GPUs, attention runs on the Triton backend instead of Flash, and on
 GPUs with less shared memory one text-encoder kernel is pinned to two stages.
 The outputs there are deterministic but differ in bits from the H100 results.
-
-## Validation
-
-We compared praxis with the original implementation of the checkpoint on
-one H100 in bfloat16, with PyTorch 2.13 and the `flash` attention backend.
-We compared raw bytes, so `-0.0` and `+0.0` count as different. These runs
-used `praxis-1-droid-k`. `praxis-1-droid` has the same architecture, normalization statistics and
-action codec, other weights, and a 224x416 canvas with an antialiased
-resize. The `praxis-1-droid-k` comparisons do not show `praxis-1-droid` parity. The last column
-gives the `praxis-1-droid` status: the CPU data path checks below ran on `praxis-1-droid`, the
-GPU checks are pending.
-
-These historical comparisons use `vae_decoder_impl="reference"`. The default
-fused decoder can produce different output bits.
-
-| Part | Result (`praxis-1-droid-k`) | `praxis-1-droid` |
-|---|---|---|
-| Action expert | 259 of 259 values equal per case, 6 cases (1 to 3 chunks, two timesteps). The values cover the inputs, the rotary tables, the masks, every block output and the velocity. | Pending (GPU). |
-| Trunk | 64 of 64 checks equal per case, 4 cases (1 to 3 chunks, and the first sampler step of 1 chunk). The checks cover the rotary positions, the masks, every block output of both towers, the taps and the velocity. | Pending (GPU). |
-| Full sampler | 8 fixed cases equal in fresh processes: context depth 0 to 2 with two seeds, and two cases with text guidance 3.0 and flow shift 1.0. The checks cover the noise, the time grid, the velocity inputs and outputs, the guidance combine and the outputs (19 values per case, 43 with guidance). | Pending (GPU). |
-| Robot input and output | The tile canvas, the action and proprio codec on the checkpoint stats and the pose frame conversion equal the values of the original implementation (`tests/test_data_path.py`). | Codec and pose frame: the pinned codec values hold on the `praxis-1-droid` statistics (`test_pinned_stats_are_the_checkpoint_stats`: they equal its `normalization` block). Canvas: equal to the training data path for 416x234 frames, the RoboLab input (`test_antialias_clip_equals_the_training_canvas`). Other frame sizes are not bitwise equal: training resizes to 416 wide and then trims to the 32-px grid, praxis crops to the tile aspect and then resizes. In an offline check against the training code, the antialiased canvases of 1280x720 and 512x288 frames differed by about 3 levels (mean absolute, 0 to 255) on random noise and by less than 0.4 on smooth gradients. |
-| Video autoencoder | Not bitwise equal. The original implementation uses another kernel of the encoder. The latents differ by 1 or 2 bfloat16 units in the last place in a part of the values. The weights are equal. | Pending (GPU). The autoencoder and its weights are shared; its output on `praxis-1-droid` inputs has not been compared. |
-| Closed loop | 3 tasks x 4 seeds in the simulation (`block_in_bowl`, `stack_block`, `press_button`). With the encoder of the original implementation, all 12 episodes are equal on every tick. With the encoder of praxis, 7 of 12 episodes succeed, the same count as the original implementation. | Pending (GPU). |
-
-The text encoder (Qwen3.5-2B, frozen) does not depend on the checkpoint.
-Its check against the original implementation gave 1079 of 1079 values equal (token ids,
-every hidden layer, output).
 
 ## Tests
 
