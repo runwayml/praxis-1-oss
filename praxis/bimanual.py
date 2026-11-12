@@ -321,7 +321,7 @@ def fit_row_sizes(
     return resize, trimmed
 
 
-def _resize(fr: torch.Tensor, h: int, w: int) -> torch.Tensor:
+def resize_frames(fr: torch.Tensor, h: int, w: int) -> torch.Tensor:
     """Return the uint8 ``(T, 3, h, w)`` antialiased bilinear resize of ``fr``.
 
     The resize runs in float32 with ``align_corners=False``, then a round and a
@@ -346,7 +346,7 @@ def _resize(fr: torch.Tensor, h: int, w: int) -> torch.Tensor:
     )
 
 
-def _trim(fr: torch.Tensor, h: int, w: int) -> torch.Tensor:
+def trim_centre(fr: torch.Tensor, h: int, w: int) -> torch.Tensor:
     """Return the centre trim of ``fr`` to ``h x w``."""
     fh, fw = fr.shape[-2], fr.shape[-1]
     if h > fh or w > fw:
@@ -393,7 +393,7 @@ def canvas_clip(
                 "aspects are not supported yet"
             )
         tiles = [
-            _trim(_resize(f, *r), tile_h, tile_w)
+            trim_centre(resize_frames(f, *r), tile_h, tile_w)
             for f, r in zip(frames, resize, strict=True)
         ]
     else:

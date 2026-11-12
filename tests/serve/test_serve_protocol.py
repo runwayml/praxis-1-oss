@@ -503,7 +503,8 @@ def test_param_literals() -> None:
     }
     with pytest.raises(ValueError, match=r"Unknown session params \['bogus'\]"):
         params.parse_session_params({"bogus": "1"})
-    assert len(params.SESSION_PARAMS) == 38
+    # 38 of every rig and the 3 of the so101 rig (praxis.so101.SESSION_PARAMS).
+    assert len(params.SESSION_PARAMS) == 41
 
 
 def test_rollout_ids_and_seeds() -> None:
@@ -972,7 +973,7 @@ def test_boot_rejects_bad_defaults() -> None:
 def test_boot_rejects_a_checkpoint_of_another_rig() -> None:
     sampler = SamplerSettings(num_steps=2, layout="window_joint")
     pipe = FakePipeline({**SINGLE_ARM, "embodiment": "two_arm"}, sampler)
-    with pytest.raises(ValueError, match="single-arm and the bimanual checkpoints"):
+    with pytest.raises(ValueError, match="single-arm, the bimanual and the so101"):
         PolicyFactory(pipe, {}, "/ckpt/other")  # ty: ignore[invalid-argument-type]
 
 
@@ -982,7 +983,7 @@ def test_boot_rejects_a_checkpoint_of_another_rig() -> None:
         ("single_arm", [], None),
         ("two_arm", [], "Serve the single-arm checkpoint"),
         ("single_arm", ["model.embodiment=two_arm"], "Serve the single-arm"),
-        ("two_arm", ["model.embodiment=two_arm"], "single-arm and the bimanual"),
+        ("two_arm", ["model.embodiment=two_arm"], "single-arm, the bimanual and"),
     ],
 )
 def test_boot_checks_the_rig_of_the_checkpoint(

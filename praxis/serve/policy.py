@@ -25,9 +25,13 @@ and adds the session rules of the server:
   before it (:mod:`praxis.serve.precompute`). It applies to real-time
   sessions only: a chunked session does not use it.
 
-The server serves the single-arm checkpoint (the ``franka_ee`` wire) and the
-bimanual checkpoint (the ``yam_ee2`` wire). The handshake meta holds the
-variant of the checkpoint (:func:`praxis.checkpoint.model_variant`).
+The server serves the single-arm checkpoint (the ``franka_ee`` wire), the
+bimanual checkpoint (the ``yam_ee2`` wire) and an so101 checkpoint (the
+``so101_joints`` wire). :data:`RIG_WIRES` holds the wire of each rig and
+:data:`RIG_HOOKS` the hooks of a rig beyond the common session: its own
+session parameters, its warmup sessions, its handshake and answer keys (the
+so101 rig declares them in :mod:`praxis.so101`). The handshake meta holds
+the variant of the checkpoint (:func:`praxis.checkpoint.model_variant`).
 
 The checks of the session parameters run in a fixed order. The first bad
 value gives the error message of the session.
@@ -38,13 +42,14 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import numpy as np
 
-from praxis import bimanual, robot_io, single_arm
+from praxis import bimanual, robot_io, single_arm, so101
 from praxis.checkpoint import model_variant
-from praxis.pipeline import PraxisPipeline, StepResult
+from praxis.pipeline import RIGS, PraxisPipeline, StepResult
 from praxis.sampler import action_substep_grid, check_guidance, sampler_num_evals
 from praxis.serve import params, periodic, precompute, rtc
 from praxis.serve.wire import compress_images, image_codecs
@@ -98,27 +103,117 @@ STACK_KEYS: tuple[str, ...] = (
     "grip",
 )
 
-# The wire of each rig: the handshake ``embodiment``, the action layout and
-# the command keys.
-RIG_WIRES: dict[str, dict[str, object]] = {
-    "single_arm": {
-        "embodiment": "franka_ee",
-        "action_layout": "ee-10d [xyz3 rot6d6 grip1], rel-to-anchor, grip abs",
-        "wire_commands": ["robot_command", "target_grip"],
-    },
-    "bimanual": {
-        "embodiment": "yam_ee2",
-        "action_layout": (
+
+@dataclasses.dataclass(frozen=True)
+class RigWire:
+    """The wire of a rig: the handshake ``embodiment``, the action layout, the
+    command keys, the row layout of the real-time junction (``poses`` with the
+    ``sides`` of its arms, or ``joints``) and whether the YAM reach clamp
+    (``rtc_reach_max_m``) applies."""
+
+    embodiment: str
+    action_layout: str
+    wire_commands: tuple[str, ...]
+    rows: str = "poses"
+    sides: tuple[str, ...] = ()
+    reach_clamp: bool = False
+
+
+RIG_WIRES: dict[str, RigWire] = {
+    "single_arm": RigWire(
+        embodiment="franka_ee",
+        action_layout="ee-10d [xyz3 rot6d6 grip1], rel-to-anchor, grip abs",
+        wire_commands=("robot_command", "target_grip"),
+    ),
+    "bimanual": RigWire(
+        embodiment="yam_ee2",
+        action_layout=(
             "ee-20d [L: xyz3 rot6d6 grip1 | R: same], each arm rel-to-its-anchor, "
             "grips abs"
         ),
-        "wire_commands": [
+        wire_commands=(
             "robot_command.left",
             "robot_command.right",
             "target_grip.left",
             "target_grip.right",
-        ],
-    },
+        ),
+        sides=tuple(bimanual.SIDES),
+        reach_clamp=True,
+    ),
+    "so101": RigWire(
+        embodiment="so101_joints",
+        action_layout=(
+            "joints-6d [q0..q4 rad rel-to-anchor | gripper closure abs]; wire: "
+            "absolute LeRobot use_degrees targets (deg x 5, gripper.pos 0..100)"
+        ),
+        wire_commands=(so101.COMMAND_KEY,),
+        rows="joints",
+    ),
+}
+
+
+def _no_options(o: Mapping[str, object]) -> dict[str, object]:
+    return {}
+
+
+def _no_extras(*args: object) -> dict[str, object]:
+    return {}
+
+
+@dataclasses.dataclass(frozen=True)
+class RigHooks:
+    """The hooks of a rig beyond the common session.
+
+    ``params`` are its own session parameters (a session of another rig
+    refuses them) and ``session_options`` turns them into the ``rig_options``
+    of :meth:`praxis.pipeline.PraxisPipeline.session`. The warmup runs one
+    session per entry of ``warmup_variants`` (its parameters), on the
+    observations of ``warmup_obs(step, stack, **variant)``. ``meta_extras``
+    adds to the handshake meta (the rig session and the frames of the stack),
+    ``answer_extras`` to the answer of a chunked call (its rows).
+    ``stack_keys`` gives the frame stack keys of a session whose rig options
+    change them (an so101 session of one view has no wrist key).
+    """
+
+    params: frozenset[str] = frozenset()
+    session_options: Callable[[Mapping[str, object]], dict[str, object]] = _no_options
+    #: The frame stack keys of a session from its ``rig_options`` (None: the
+    #: keys of the rig, ``PolicyFactory.stack_keys``).
+    stack_keys: Callable[[Mapping[str, object]], tuple[str, ...]] | None = None
+    warmup_variants: tuple[dict[str, int], ...] = ({},)
+    warmup_obs: Callable[..., dict] | None = None
+    meta_extras: Callable[[object, int], dict[str, object]] = _no_extras
+    answer_extras: Callable[[list[dict]], dict[str, object]] = _no_extras
+
+
+RIG_HOOKS: dict[str, RigHooks] = {
+    "single_arm": RigHooks(),
+    "bimanual": RigHooks(warmup_obs=bimanual.warmup_obs),
+    "so101": RigHooks(
+        params=so101.SESSION_PARAMS,
+        session_options=so101.session_options,
+        stack_keys=so101.stack_keys_of,
+        warmup_variants=so101.WARMUP_VARIANTS,
+        warmup_obs=so101.warmup_obs,
+        meta_extras=so101.meta_extras,
+        answer_extras=so101.answer_extras,
+    ),
+}
+#: The owner rig of each rig session parameter.
+RIG_PARAM_OWNERS: dict[str, str] = {
+    k: rig for rig, hooks in RIG_HOOKS.items() for k in hooks.params
+}
+#: The rigs that bound each view to a square of their ``RESTRICT_SIDE`` on
+#: the client: whether the restrict comes before the stack (each frame is
+#: resized once on its own tick) and whether the past stack offsets are half
+#: a frame late. The single-arm rig follows its variant.
+RESTRICT_SQUARE: dict[str, tuple[bool, bool]] = {
+    # The YAM deploy keeps the restrict last (a resize per tick costs the rig
+    # computer), with half-frame offsets.
+    "bimanual": (False, True),
+    # The LeRobot client fits each frame as it reads it and records one entry
+    # per executed row, on the row clock.
+    "so101": (True, False),
 }
 
 
@@ -165,25 +260,28 @@ class PolicyFactory:
         if pipe.embodiment not in RIG_WIRES:
             raise ValueError(
                 f"the checkpoint {checkpoint} is for the {pipe.embodiment!r} rig. "
-                "The server serves the single-arm and the bimanual checkpoints."
+                "The server serves the single-arm, the bimanual and the so101 "
+                "checkpoints."
             )
         variant = model_variant(config)
         self.embodiment = pipe.embodiment
-        self.rig = bimanual if pipe.embodiment == "bimanual" else single_arm
+        self.rig = RIGS[pipe.embodiment][0]
         self.wire = RIG_WIRES[pipe.embodiment]
+        self.hooks = RIG_HOOKS[pipe.embodiment]
         # The client bounds each view before it sends it. An antialiased canvas
         # asks for the fit size of its tiles: 416x234 for praxis-1-droid, resized once
-        # per tick ahead of the stack, as in training. The bimanual rig bounds
-        # each view to a 416x416 box with the aspect kept (1920x1200 ->
-        # 416x260) after the stack, as on the YAM rig, with half-frame
-        # stack offsets. Otherwise the rig sends the views at 1024x288. The
-        # server makes the tiles.
+        # per tick ahead of the stack, as in training. The bimanual and the
+        # so101 rig bound each view to a 416x416 box with the aspect kept
+        # (1920x1200 -> 416x260, 640x480 -> 416x312), see RESTRICT_SQUARE.
+        # Otherwise the rig sends the views at 1024x288. The server makes the
+        # tiles.
         self.restrict_first = variant.antialias
         self.half_frame = variant.antialias
-        if pipe.embodiment == "bimanual":
-            self.stack_keys = bimanual.STACK_KEYS
-            self.restrict = (bimanual.RESTRICT_SIDE, bimanual.RESTRICT_SIDE)
-            self.restrict_first = False
+        if pipe.embodiment in RESTRICT_SQUARE:
+            side = int(self.rig.RESTRICT_SIDE)
+            self.stack_keys = tuple(self.rig.STACK_KEYS)
+            self.restrict = (side, side)
+            self.restrict_first, self.half_frame = RESTRICT_SQUARE[pipe.embodiment]
         elif variant.antialias:
             self.stack_keys = STACK_KEYS
             fh, fw = single_arm.fit_resize_size(variant.tile_size[1])
@@ -229,6 +327,25 @@ class ServedPolicy:
         d = factory.defaults
         s = factory.pipe.sampler
         self.factory = factory
+        foreign = sorted(
+            k
+            for k in o
+            if RIG_PARAM_OWNERS.get(k, factory.embodiment) != factory.embodiment
+        )
+        if foreign:
+            owners = sorted({RIG_PARAM_OWNERS[k] for k in foreign})
+            raise ValueError(
+                f"{foreign} are session parameters of the {', '.join(owners)} rig; "
+                f"this server serves the {factory.embodiment} rig"
+            )
+        # The settings of the rig session beyond the common ones, and the
+        # frame stack keys of this session.
+        self.rig_options = factory.hooks.session_options(o)
+        self.stack_keys: tuple[str, ...] = (
+            factory.stack_keys
+            if factory.hooks.stack_keys is None
+            else tuple(factory.hooks.stack_keys(self.rig_options))
+        )
         if "pad_start" in o and params.parse_on_off(o["pad_start"]) is True:
             raise ValueError(
                 "pad_start=true is not served: the rig TemporalStack is hardcoded "
@@ -341,7 +458,7 @@ class ServedPolicy:
         served = {
             "history_frames": self.history_frames,
             "stride": 1,
-            "stack_keys": factory.stack_keys,
+            "stack_keys": self.stack_keys,
         }
         for key, actual in served.items():
             if key not in o:
@@ -394,6 +511,7 @@ class ServedPolicy:
             sampler=sampler,
             skip_last_video=self.skip_video_decoder,
             **({"precompute": True} if self.precompute else {}),
+            **({"rig_options": self.rig_options} if self.rig_options else {}),
         )
         self._history: periodic.SampleHistory | None = None
         self._grid: periodic.PredictGrid | None = None
@@ -412,7 +530,7 @@ class ServedPolicy:
             if self.precompute:
                 rows = max(rows, self.session.state.stream.max_raws)
             self._history = periodic.SampleHistory(
-                keys=factory.stack_keys,
+                keys=self.stack_keys,
                 history_rows=self.history_frames,
                 ratio=ratio,
                 capacity=periodic.history_capacity(rows, ratio),
@@ -485,10 +603,10 @@ class ServedPolicy:
             "compile": self.compile,
             "skip_video_decoder": self.skip_video_decoder,
             "action_steps": self.action_steps,
-            "embodiment": f.wire["embodiment"],
+            "embodiment": f.wire.embodiment,
             "control_mode": self.control_mode,
-            "action_layout": f.wire["action_layout"],
-            "wire_commands": list(f.wire["wire_commands"]),
+            "action_layout": f.wire.action_layout,
+            "wire_commands": list(f.wire.wire_commands),
             "wan_pattern": "contiguous-window-144444",
             "chunk_rows": robot_io.ACTION_CHUNK,
             "action_fps": f.fps,
@@ -505,7 +623,15 @@ class ServedPolicy:
             "compress_images": compress_images(),
             "image_codecs": image_codecs(),
             **self._rtc_meta(),
+            **f.hooks.meta_extras(self.session.state, self.history_frames),
         }
+
+    def answer_extras(self, rows: list[dict] | None) -> dict[str, object]:
+        """Return the keys of the rig next to ``result`` in the answer of a call
+        (none for a sample that does not predict)."""
+        if rows is None:
+            return {}
+        return self.factory.hooks.answer_extras(rows)
 
     @property
     def local_stack(self) -> dict:
@@ -517,7 +643,7 @@ class ServedPolicy:
         """
         f = self.factory
         stack = params.local_stack(
-            f.stack_keys,
+            self.stack_keys,
             self.history_frames,
             f.fps,
             *f.restrict,
@@ -737,28 +863,51 @@ class ServedPolicy:
         return out
 
     def _join(self, rows: list[dict], obs: dict, delay_sec: float) -> list[dict]:
-        """Join the chunk to the plan that the robot runs until the answer arrives."""
+        """Join the chunk to the plan that the robot runs until the answer arrives.
+
+        The row layout of the rig (``RigWire.rows``) selects the
+        junction: the pose rule (:func:`praxis.serve.rtc.rebase_into_prefix`)
+        or the same rule on joint rows (:func:`praxis.serve.rtc.rebase_joints`).
+        """
         cfg = self.rtc
         if cfg is None:
             raise RuntimeError("_join serves a real-time session only")
         f = self.factory
-        chans = rtc.channels(bimanual.SIDES if f.embodiment == "bimanual" else ())
         fps = f.fps
-        new = rtc.rows_to_array(rows, chans)
-        plan = rtc.read_plan(obs, chans, fps)
-        if plan is None:
-            plan = new[:0]
+        joints = f.wire.rows == "joints"
+        key = f.wire.wire_commands[0]
+        chans = rtc.channels(f.wire.sides)
+        plan_rows = rtc.read_plan_rows(obs, fps)
+        if joints:
+            dim = int(f.rig.ACTION_DIM)
+            new = rtc.joint_rows_to_array(rows, key, dim)
+            plan = (
+                new[:0]
+                if plan_rows is None
+                else rtc.joint_rows_to_array(plan_rows, key, dim)
+            )
+        else:
+            new = rtc.rows_to_array(rows, chans)
+            plan = new[:0] if plan_rows is None else rtc.rows_to_array(plan_rows, chans)
         p = min(rtc.prefix_rows(delay_sec, fps, len(plan)), len(new))
-        out, stats = rtc.rebase_into_prefix(
-            new, plan[:p], cfg.rebase_decay, cfg.vel_fade
-        )
         self._junction = {
             "rtc_prefix_rows": p,
             "rtc_delay_ms": round(delay_sec * 1e3, 1),
-            "rtc_junction_cm": round(stats["junction_cm"], 2),
         }
+        cont = plan[p:] if p < len(plan) else plan[-1:]
+        if joints:
+            out, stats = rtc.rebase_joints(
+                new, plan[:p], cfg.rebase_decay, cfg.vel_fade
+            )
+            self._junction["rtc_junction_deg"] = round(stats["junction_deg"], 2)
+            if cfg.grip == "cont" and p:
+                rtc.grip_crossfade_joints(out, p, cont, cfg.grip_rows)
+            return rtc.strip_timestamps(rtc.write_joint_rows(rows, out, key))
+        out, stats = rtc.rebase_into_prefix(
+            new, plan[:p], cfg.rebase_decay, cfg.vel_fade
+        )
+        self._junction["rtc_junction_cm"] = round(stats["junction_cm"], 2)
         if cfg.grip == "cont" and p:
-            cont = plan[p:] if p < len(plan) else plan[-1:]
             rtc.grip_crossfade(out, p, cont, cfg.grip_rows)
         if cfg.reach_max_m:
             # The prefix rows were clamped when they were served.
@@ -797,15 +946,17 @@ def _rtc_session(
 ) -> tuple[rtc.RTCConfig, periodic.PeriodicConfig]:
     """Return the junction and the periodic settings of a real-time session.
 
-    Real-time chunking serves the observed context of both rigs. The reach
-    clamp is the YAM model: the single-arm rig has none, and refuses
-    ``rtc_reach_max_m``. A bad value raises ``ValueError``.
+    Real-time chunking serves the observed context of every rig. The reach
+    clamp is the YAM model (``RigWire.reach_clamp``): the other
+    rigs have none and refuse ``rtc_reach_max_m`` (the so101 rig serves joint
+    targets, which the follower's calibration and LeRobot's
+    ``max_relative_target`` bound). A bad value raises ``ValueError``.
     """
-    bimanual_rig = factory.embodiment == "bimanual"
+    bimanual_rig = factory.wire.reach_clamp
     if not bimanual_rig and o.get("rtc_reach_max_m") is not None:
         raise ValueError(
             "rtc_reach_max_m is the reach clamp of the bimanual YAM rig; the "
-            "single-arm rig has none"
+            f"{factory.embodiment} rig has none"
         )
     if context_mode != "observed":
         raise ValueError(
@@ -838,10 +989,17 @@ def _rtc_session(
     return cfg, flow
 
 
-def warmup_obs(step: int, stack: int = 25, embodiment: str = "single_arm") -> dict:
-    """Return a synthetic observation with a full frame stack for the boot warmup."""
-    if embodiment == "bimanual":
-        return bimanual.warmup_obs(step, stack)
+def warmup_obs(
+    step: int, stack: int = 25, embodiment: str = "single_arm", **variant: object
+) -> dict:
+    """Return a synthetic observation with a full frame stack for the boot warmup.
+
+    ``variant`` holds the session parameters of a warmup session of the rig
+    (``RigHooks.warmup_variants``), for example the views of an so101 session.
+    """
+    hook = RIG_HOOKS[embodiment].warmup_obs
+    if hook is not None:
+        return hook(step, stack, **variant)
     h, w = 288, 512
     t = step * robot_io.ACTION_CHUNK + np.arange(stack)
 

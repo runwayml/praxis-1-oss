@@ -8,28 +8,47 @@ returns the robot commands of that chunk, with the predicted video latent and
 the normalized actions.
 
 The pipeline runs the single-arm checkpoint (``"embodiment":
-"single_arm"``) on the single-arm rig (:mod:`praxis.single_arm`) and the
+"single_arm"``) on the single-arm rig (:mod:`praxis.single_arm`), the
 bimanual checkpoint (``"embodiment": "bimanual"``) on the bimanual rig
-(:mod:`praxis.bimanual`), with the ``window_joint`` sampler.
+(:mod:`praxis.bimanual`) and an so101 checkpoint (``"embodiment": "so101"``)
+on the SO-100 / SO-101 rig (:mod:`praxis.so101`), with the ``window_joint``
+sampler. :data:`RIGS` maps each embodiment to its rig.
 """
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 
 import numpy as np
 import torch
 from torch import Tensor
 
-from praxis import bimanual, single_arm
+from praxis import bimanual, single_arm, so101
 from praxis.checkpoint import model_variant
 from praxis.model import PraxisPolicy, SamplerSettings, TrunkPlan
 from praxis.robot_io import NormStats, text_encoder_prompt
 from praxis.text_encoder import TextEncoder
 from praxis.vae import Autoencoder
+
+#: The rig of each embodiment of the checkpoint config: the rig module, its
+#: serve session and its default control mode. The loader refuses every other
+#: config (:data:`praxis.checkpoint.EMBODIMENTS`).
+RIGS: dict[str, tuple[ModuleType, type, str]] = {
+    "single_arm": (single_arm, single_arm.SingleArmServeSession, "droid_impedance"),
+    "bimanual": (bimanual, bimanual.BimanualServeSession, "none"),
+    "so101": (so101, so101.So101ServeSession, "none"),
+}
+
+ChunkInputs = (
+    single_arm.SingleArmChunkInputs
+    | bimanual.BimanualChunkInputs
+    | so101.So101ChunkInputs
+)
 
 
 @dataclass
@@ -108,7 +127,7 @@ class PraxisPipeline:
         self.vae_decoder_impl = decoder_impl
         self.text = TextEncoder(text_encoder, device=self.device)
         self.sampler = sampler or SamplerSettings()
-        # The loader refuses every config but the single-arm and bimanual ones.
+        # The loader refuses every config but those of RIGS.
         self.embodiment = str(self.policy.config["embodiment"])
         self.variant = model_variant(self.policy.config)
         norm = self.policy.config["normalization"]
@@ -181,12 +200,13 @@ class PraxisPipeline:
         sampler: SamplerSettings | None = None,
         skip_last_video: bool = False,
         precompute: bool = False,
+        rig_options: dict | None = None,
     ) -> Session:
         """Open a session for one robot episode.
 
         The defaults are the recommended settings of the checkpoint.
         ``control_mode`` defaults to ``droid_impedance`` on the single-arm rig
-        and ``none`` on the bimanual rig.
+        and ``none`` on the other rigs (:data:`RIGS`).
         ``sampler`` replaces the sampler settings of the pipeline for this
         session.
         ``skip_last_video`` skips the video decoder on the last Euler step of
@@ -194,6 +214,10 @@ class PraxisPipeline:
         predicted video (:meth:`Session.decode_video` refuses it).
         ``precompute`` lets the session take the latents and the trunk passes
         of its next call made ahead of it (:meth:`Session.plan`).
+        ``rig_options`` holds the settings of the rig session beyond the common
+        ones (the so101 rig: ``n_views`` and ``grip``,
+        :class:`praxis.so101.So101ServeSession`); a rig whose session has no
+        such setting refuses it.
         """
         return Session(
             self,
@@ -205,6 +229,7 @@ class PraxisPipeline:
             sampler=sampler,
             skip_last_video=skip_last_video,
             precompute=precompute,
+            rig_options=rig_options,
         )
 
 
@@ -268,6 +293,7 @@ class Session:
         sampler: SamplerSettings | None = None,
         skip_last_video: bool = False,
         precompute: bool = False,
+        rig_options: dict | None = None,
     ) -> None:
         self.pipe = pipeline
         self.sampler = sampler or pipeline.sampler
@@ -298,28 +324,42 @@ class Session:
         config = pipeline.policy.config
         # The checkpoint config sets the tiles of the canvas. The canvas and
         # the pose frame of each rig are fixed.
-        rig = bimanual if config.get("embodiment") == "bimanual" else single_arm
+        embodiment = str(config.get("embodiment"))
+        rig, session_cls, default_mode = RIGS[embodiment]
         if control_mode is None:
-            control_mode = "none" if rig is bimanual else "droid_impedance"
-        session_cls = (
-            bimanual.BimanualServeSession
-            if rig is bimanual
-            else single_arm.SingleArmServeSession
+            control_mode = default_mode
+        common = {
+            "encode": pipeline.vae.encode,
+            "stats": pipeline.stats,
+            "device": pipeline.device,
+            "prompt": prompt,
+            "max_context_chunks": max_context_chunks,
+            "fps": float(config["chunking"].get("grid_hz", rig.FPS)),
+            "dims": rig.q99_dims(config),
+            "control_mode": control_mode,
+            "exec_horizon": exec_horizon,
+            "n_chunks": int(config["chunking"].get("n_chunks", rig.N_CHUNKS)),
+        }
+        # The canvas settings that the session of the rig takes (the fit-rule
+        # canvas of the so101 rig has no aspect crop).
+        accepted = inspect.signature(session_cls).parameters
+        canvas = {
+            "tile_size": variant.tile_size,
+            "aspect_tol": variant.aspect_tol,
+            "antialias": variant.antialias,
+        }
+        options = dict(rig_options or {})
+        unknown = sorted(
+            k for k in options if k not in accepted or k in common or k in canvas
         )
+        if unknown:
+            raise ValueError(
+                f"rig_options {unknown} are not settings of the {embodiment} rig"
+            )
         self.state = session_cls(
-            encode=pipeline.vae.encode,
-            stats=pipeline.stats,
-            device=pipeline.device,
-            prompt=prompt,
-            max_context_chunks=max_context_chunks,
-            fps=float(config["chunking"].get("grid_hz", rig.FPS)),
-            dims=rig.q99_dims(config),
-            control_mode=control_mode,
-            exec_horizon=exec_horizon,
-            n_chunks=int(config["chunking"].get("n_chunks", rig.N_CHUNKS)),
-            tile_size=variant.tile_size,
-            aspect_tol=variant.aspect_tol,
-            antialias=variant.antialias,
+            **common,
+            **{k: v for k, v in canvas.items() if k in accepted},
+            **options,
         )
         # The trunk passes of the next call, run ahead of it (plan), and
         # the encode that serves its stored latents.
@@ -429,10 +469,7 @@ class Session:
             },
         )
 
-    def _sample(
-        self,
-        inputs: single_arm.SingleArmChunkInputs | bimanual.BimanualChunkInputs,
-    ) -> tuple[Tensor | None, Tensor, Tensor]:
+    def _sample(self, inputs: ChunkInputs) -> tuple[Tensor | None, Tensor, Tensor]:
         """Sample one chunk. Return the video latent, the actions and the text.
 
         The video latent is None when the session skips the video of the last
