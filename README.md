@@ -413,12 +413,10 @@ same 4-bit rounding on H100s with two NVFP4 fine-tunes (quantization-aware train
 - an NVFP4 fine-tune of `praxis-1-droid` on RoboLab (action CFG 1.0, video CFG 4.0,
   `t_shift` 12.5): 279/600 with NVFP4, against 287/600 for the same weights in
   bf16, no clear difference;
-- an NVFP4 fine-tune of `praxis-1-droid-k` on the `hard` simulation suite (action CFG 1.0,
+- an NVFP4 fine-tune of an earlier single-arm checkpoint on the `hard` simulation suite (action CFG 1.0,
   video CFG 1.0, `t_shift` 8.0, 2 steps, `max_context_chunks` 3): 138/352 with
-  NVFP4, against 188/352 for `praxis-1-droid-k` in bf16, clearly lower. This compares with
-  the bf16 starting checkpoint, so the extra training is part of the gap. The
-  `praxis-1-droid-k` run here is a later run than the 175/352 of `praxis/sim/EVAL.md`, with
-  the same settings.
+  NVFP4, against 188/352 for that checkpoint in bf16, clearly lower. This compares with
+  the bf16 starting checkpoint, so the extra training is part of the gap.
 
 Measure the checkpoint you use before you deploy it, for example on the `hard`
 simulation suite:
@@ -660,10 +658,7 @@ done
 The NVFP4 checkpoints download the same way
 (`for C in praxis-1-droid-nvfp4 praxis-1-yam-nvfp4; do ...`).
 
-The tests also use the config of the earlier single-arm checkpoint `praxis-1-droid-k`
-(`tests/data/praxis-1-droid-k.json`, SHA-256
-`f09961f066aa9fde871cd5032daedfd986dfd1f4b1901ada15f97a858b4ba6b9`): the same
-architecture with 256x416 tiles and a resize without antialias. The
+The
 recommended sampler settings were measured on `praxis-1-droid`.
 
 `praxis-1-base` is the pretrained model without the action heads of a rig,
@@ -1046,7 +1041,7 @@ The data of the rig:
 
 - Canvas: the pipeline crops each view to the tile aspect (centre crop) and
   resizes it to the tile of the checkpoint config: 224x416 for `praxis-1-droid`, with
-  antialias (`video.antialias: true`), 256x416 for `praxis-1-droid-k`. The exterior tile
+  antialias (`video.antialias: true`). The exterior tile
   and the wrist tile make the canvas (224x832 for `praxis-1-droid`).
 - Actions: 10 values per row, `[xyz3, rot6d6, grip1]`. The position and the
   rotation are relative to the arm pose at the start of the chunk. The
@@ -1130,7 +1125,7 @@ variant of the model:
   - Text guidance swaps the instruction for the blank caption `" "`.
 - Data.
   - The pipeline resizes each view to the tile of the checkpoint config:
-    224 x 416 for `praxis-1-droid` (a 224 x 832 canvas), 256 x 416 for `praxis-1-droid-k`. The
+    224 x 416 for `praxis-1-droid` (a 224 x 832 canvas). The
     resize uses antialias when the config has `video.antialias: true`
     (`praxis-1-droid`).
   - The pose is the flange pose with no turn.

@@ -38,7 +38,7 @@ task. Thus they can show a gain or a loss.
 
 ### The 7 DROID tasks
 
-| Task | Prompt | Success | Time limit | `praxis-1-droid-k` |
+| Task | Prompt | Success | Time limit | Earlier checkpoint |
 |---|---|---|---|---|
 | `lift_cube` | Pick up the red cube. | the cube is 5 cm or more above its rest height for 0.25 s | 11.0 s | 30/32 |
 | `cube_on_plate` | Put the red cube on the blue plate. | the cube is on the plate, released | 16.0 s | 31/32 |
@@ -50,7 +50,7 @@ task. Thus they can show a gain or a loss.
 
 ### The 11 harder tasks
 
-| Task | Prompt | What makes it hard | Time limit | `praxis-1-droid-k` |
+| Task | Prompt | What makes it hard | Time limit | Earlier checkpoint |
 |---|---|---|---|---|
 | `cube_in_tray` | Put the red cube in the tray. | an 8 cm open tray, the cube far from it | 14.2 s | 18/32 |
 | `cube_on_color` | Put the red cube on the blue square. | three 6 cm color squares, the seed names the target | 14.2 s | 19/32 |
@@ -65,13 +65,13 @@ task. Thus they can show a gain or a loss.
 | `stack_three_blocks` | Stack the blocks. | three blocks in one tower, any order | 31.8 s | 9/32 |
 
 The color tasks name the target in the prompt, so the prompt of the table is
-one example. The `praxis-1-droid-k` column gives the successes of the earlier
-checkpoint `praxis-1-droid-k` with the settings of that run (`cfg_scale` 1.0,
+one example. The "Earlier checkpoint" column gives the successes of
+an earlier single-arm checkpoint with the settings of that run (`cfg_scale` 1.0,
 `cfg_video_scale` 1.0, `t_shift` 8.0, `max_context_chunks` 3);
 16 scenes x 2 sampler seeds. The
 suites have not been run on `praxis-1-droid` with the current settings yet.
 `peg_in_hole_4mm` and `peg_in_hole_2mm` are registered but not in a suite:
-`praxis-1-droid-k` solves 2 of 32 episodes at 4 mm.
+the earlier checkpoint solves 2 of 32 episodes at 4 mm.
 
 ## Run a suite
 
@@ -151,12 +151,12 @@ say so with the results.
 
 ## Result: the DROID fine-tune of the checkpoint
 
-This is a past measurement: we fine-tuned `praxis-1-droid-k` on DROID in full (3e-6 after
+This is a past measurement: we fine-tuned an earlier single-arm checkpoint on DROID in full (3e-6 after
 50 warmup steps, cosine to 3e-7 at step 1,200, 96 windows per step; the repo
 no longer ships that config, see `praxis/train/README.md`) and ran the two
 suites on each save with the settings of that run (`cfg_scale` 1.0,
-`cfg_video_scale` 1.0, `t_shift` 8.0, `max_context_chunks` 3). These are `praxis-1-droid-k`
-results. `praxis-1-droid` has not been fine-tuned and measured this way yet. The best
+`cfg_video_scale` 1.0, `t_shift` 8.0, `max_context_chunks` 3). These are results of
+that checkpoint. `praxis-1-droid` has not been fine-tuned and measured this way yet. The best
 save by the rule above is step 600:
 
 | Suite | Start | Step 600 | B - A, 95 % interval | Won / lost | McNemar p |
