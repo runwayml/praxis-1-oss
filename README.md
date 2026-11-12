@@ -1151,7 +1151,7 @@ of the single-arm checkpoint with a 6-D joint-space head: the 5 arm joints and
 the gripper of an SO-100 / SO-101 follower arm (LeRobot), reading one or two
 cameras. The rig code is `praxis/so101.py`; the server serves it with
 `configs/serve_so101.yaml` (`praxis/serve/README.md`, "Serve an SO-100 /
-SO-101 checkpoint"); the client on the robot is `eval/so101/so101_client.py`.
+SO-101 checkpoint"); the client on the robot is `demo/so101/so101_client.py`.
 
 Weights: [`runwayml/praxis-1-so101`](https://huggingface.co/runwayml/praxis-1-so101)
 and [`runwayml/praxis-1-so101-nvfp4`](https://huggingface.co/runwayml/praxis-1-so101-nvfp4)
@@ -1199,9 +1199,10 @@ the LeRobot 0.7 default):
   values of LeRobot's `send_action`) and `timestamp`; the handshake names the
   `so101_joints` wire. The rig has one control mode, `none`: the follower
   keeps its own position loop. The client sends the arm the 15 Hz rows
-  interpolated at 30 Hz, and starts from the folded rest pose of the training
-  episodes (`shoulder_lift` about -100 deg, `elbow_flex` about 95 deg); it
-  stops when the arm is far from it.
+  interpolated at 30 Hz. It moves the arm to the folded rest pose of the
+  training episodes (`shoulder_lift` about -100 deg, `elbow_flex` about
+  95 deg) before the first chunk and back to it when the run ends; it stops
+  when the arm does not reach that pose.
 - Prompt: the task string goes to the text encoder verbatim. Send a short
   imperative task sentence, as in the serve preset: "Pick up the red cube and
   put it in the box."

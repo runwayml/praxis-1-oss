@@ -255,7 +255,7 @@ python -m praxis.serve --config configs/serve_so101.yaml \
     --set model.checkpoint=checkpoints/praxis-1-so101 --set model.routed_precision=bf16
 ```
 
-The client is `eval/so101/so101_client.py` (LeRobot; no praxis import). A
+The client is `demo/so101/so101_client.py` (LeRobot; no praxis import). A
 Positronic client with a LeRobot driver works too: the session is the
 observed-context session of the other rigs, with these rig settings:
 

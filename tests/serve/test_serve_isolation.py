@@ -2,7 +2,7 @@
 
 A release without the server deletes ``praxis/serve/``, ``docker/``,
 ``.dockerignore``, ``configs/serve_*.yaml``, ``tests/serve/`` and the
-clients of the server (``eval/so101/``), and the ``[serve]`` extra of
+clients of the server (``demo/so101/``), and the ``[serve]`` extra of
 ``pyproject.toml`` (see ``praxis/serve/README.md``). These tests make sure
 that the rest of the code then still works.
 """
@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 # The paths that a release without the server deletes.
-SERVER_PARTS = ("praxis/serve/", "docker/", "tests/serve/", "eval/so101/")
+SERVER_PARTS = ("praxis/serve/", "docker/", "tests/serve/", "demo/so101/")
 # Packages that only the server may need. The core must not list them.
 SERVER_ONLY = {"fastapi", "starlette", "uvicorn", "websockets", "msgpack", "modal"}
 

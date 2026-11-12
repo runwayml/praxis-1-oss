@@ -2,7 +2,7 @@
 
 The real server app runs under uvicorn on a free local port, with a stand-in
 for the networks. The client speaks the protocol of the LeRobot client
-(``eval/so101/so101_client.py``): the query keys ``views``, ``grip_closed``,
+(``demo/so101/so101_client.py``): the query keys ``views``, ``grip_closed``,
 ``grip_open``, ``state`` and the JPEG image markers in, ``actions`` ``(R, 6)``
 out. The real-time sessions run as the periodic recipe of a Positronic client
 does (``test_serve_rtc._drive``), on the stand-in networks and on the tiny
@@ -810,13 +810,13 @@ def test_chunked_and_real_time_so101_sessions_run_on_the_tiny_model(
 def test_the_lerobot_client_runs_a_fake_robot_against_the_server(
     server: tuple[str, PolicyFactory], tmp_path: Path
 ) -> None:
-    """eval/so101/so101_client.py --fake-robot: the stack grows with the
+    """demo/so101/so101_client.py --fake-robot: the stack grows with the
     executed rows (1, then 22, then 25 entries), the chunks are 21, 24, 24
     rows, the context depth 0, 1, 1."""
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
-        "so101_client", ROOT / "eval" / "so101" / "so101_client.py"
+        "so101_client", ROOT / "demo" / "so101" / "so101_client.py"
     )
     assert spec is not None and spec.loader is not None
     client = importlib.util.module_from_spec(spec)

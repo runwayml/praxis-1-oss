@@ -119,7 +119,7 @@ DEG_TO_RAD = np.pi / 180.0
 #: The gripper readings at closure 1 / 0 without a measurement: the
 #: hour-weighted medians of the p1 / p99 ``gripper.pos`` of the SO training
 #: tables, rounded. Measure your own follower and replace them
-#: (``eval/so101/so101_client.py --measure-grip``).
+#: (``demo/so101/so101_client.py --measure-grip``).
 DEFAULT_GRIP_CLOSED = 1.4
 DEFAULT_GRIP_OPEN = 42.1
 #: The least distance of the two gripper readings.

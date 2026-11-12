@@ -11,7 +11,7 @@
 #
 # The session parameters of the rig: views (1 | 2), grip_closed and grip_open
 # (the follower's gripper.pos at closure 1 / 0; praxis/so101.py has the
-# contract). The client is eval/so101/so101_client.py (LeRobot). The chunked
+# contract). The client is demo/so101/so101_client.py (LeRobot). The chunked
 # schedule is the default; schedule=rtc serves real-time chunking as on the
 # other rigs (praxis/serve/README.md, "Real-time chunking").
 #
