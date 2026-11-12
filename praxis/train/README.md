@@ -520,8 +520,7 @@ files have only one key frame. This decode needs CPU time:
 
 The data recipe is the DROID recipe of the checkpoint. The canvas follows
 the checkpoint config (see "Canvas"). For `praxis-1-droid` the canvas of a 1280x720
-frame is close to its training canvas but not bitwise equal (see
-"Validation" in the top README):
+frame is close to its training canvas but not bitwise equal:
 
 - Episodes: the successful episodes with a language instruction and at
   least 102 frames (the window and 0.5 s more).
@@ -614,7 +613,7 @@ The weights, the gradients and the AdamW moments take 8 bytes per
 parameter: 203 GiB for the 27.2B parameters. FSDP divides them by the number
 of GPUs. Each GPU also holds the activations, a copy of the autoencoder and a
 copy of the text encoder. We measured these values on H100 GPUs with 80 GB,
-with `praxis-1-droid-k` (`praxis-1-droid` has the same model and a smaller canvas):
+with an earlier single-arm checkpoint (`praxis-1-droid` has the same model and a smaller canvas):
 
 | GPUs | Gradient accumulation | Windows per step | Peak memory per GPU | Time per step |
 |---|---|---|---|---|
@@ -711,7 +710,7 @@ hardware. Pass rule:
 If the loss still falls at the last step, run more steps
 (`--set train.steps=1200`).
 
-We ran the check on 4 H100 GPUs from `praxis-1-droid-k`, a single-arm checkpoint with
+We ran the check on 4 H100 GPUs from an earlier single-arm checkpoint with
 trained heads. From the base, the new heads start with a larger action loss,
 so the loss of step 1 is larger; the pass rule is the same.
 
@@ -735,7 +734,7 @@ GPUs.
 ## Validation of the training step
 
 We compared the training step of praxis with the original training code
-on one H100, with `praxis-1-droid-k`. Both sides used the same windows and
+on one H100, with an earlier single-arm checkpoint. Both sides used the same windows and
 the same random values (timesteps, noise, dropout and rotary offsets). Both
 sides used the Triton kernel of flex attention in the trunk, activation
 checkpointing and deterministic algorithms. The test computed the gradients

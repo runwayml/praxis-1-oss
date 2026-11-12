@@ -27,9 +27,6 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINTS = Path(os.environ.get("PRAXIS_CHECKPOINT_DIR", ROOT / "checkpoints"))
 REFUSED = OTHER_VARIANT_REFUSED.split("(")[0].strip()
 CHECKPOINT_CONFIG = Path(__file__).resolve().parent / "data" / "praxis-1-droid.json"
-# The earlier checkpoint praxis-1-droid-k: the same model with 256x416 tiles
-# and no antialias.
-K_CONFIG = Path(__file__).resolve().parent / "data" / "praxis-1-droid-k.json"
 
 # The variant fields of a config of another rig (format 1, no embodiment).
 OTHER_RIG: dict = {
@@ -134,19 +131,29 @@ def test_single_arm_config_loads() -> None:
     assert variant.text_uncond == "blank_caption" and variant.blank_caption == " "
 
 
+def _tall_tiles(config: dict) -> dict:
+    """The same model with 256x416 tiles and a resize without antialias."""
+    out = _with(config, "video.antialias", False)
+    out = _with(out, "video.height", 256)
+    out = _with(out, "video.tile_height", 256)
+    out = _with(out, "video.tile_bounds_rows_cols.exterior", [0, 256, 0, 416])
+    return _with(out, "video.tile_bounds_rows_cols.wrist", [0, 256, 416, 832])
+
+
 @pytest.mark.parametrize(
-    ("path", "tile_size", "antialias"),
-    [(CHECKPOINT_CONFIG, (224, 416), True), (K_CONFIG, (256, 416), False)],
+    ("tall", "tile_size", "antialias"),
+    [(False, (224, 416), True), (True, (256, 416), False)],
 )
 def test_checkpoint_config_validates(
-    path: Path, tile_size: tuple[int, int], antialias: bool
+    tall: bool, tile_size: tuple[int, int], antialias: bool
 ) -> None:
-    """The config.json of the checkpoints (copies in tests/data) load unchanged.
+    """The config.json of the checkpoint (a copy in tests/data) loads unchanged.
 
-    ``praxis-1-droid.json`` is the default checkpoint, ``praxis-1-droid-k.json``
-    the earlier one.
+    The second case changes it to 256x416 tiles without antialias.
     """
-    config = json.loads(path.read_text())
+    config = json.loads(CHECKPOINT_CONFIG.read_text())
+    if tall:
+        config = _tall_tiles(config)
     assert config["embodiment"] == "single_arm" and config["format_version"] == 2
     validate_config(config)
     variant = model_variant(config)

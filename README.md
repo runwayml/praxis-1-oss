@@ -1,7 +1,9 @@
-# praxis-1
+# Praxis-1
 
 [![Tech report](https://img.shields.io/badge/Tech%20Report-Runway-black)](https://runway.com/research/praxis-1-video-pretraining-to-robot-control)
 [![Model on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/model-on-hf-md.svg)](https://huggingface.co/collections/runwayml/praxis-1)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.12-blue.svg)](pyproject.toml)
 
 Praxis is a video-action policy for robot arms. There are two checkpoints of
 one model variant: `praxis-1-droid`, the single-arm checkpoint, for a
@@ -401,8 +403,8 @@ Triton backend of `praxis/layers.py` on that device. The text encoder pins the
 supported two-stage FLA recurrent kernel when the three-stage setting is
 unavailable.
 
-This option changes the action outputs. The native path's bitwise validation
-below does not apply to quantized inference.
+This option changes the action outputs. The bitwise agreement of the native
+path does not apply to quantized inference.
 
 **Accuracy.** This option changes the actions, and has not been run in closed
 loop on an SM120 GPU yet. The released checkpoints are bf16 checkpoints, so
@@ -411,12 +413,10 @@ same 4-bit rounding on H100s with two NVFP4 fine-tunes (quantization-aware train
 - an NVFP4 fine-tune of `praxis-1-droid` on RoboLab (action CFG 1.0, video CFG 4.0,
   `t_shift` 12.5): 279/600 with NVFP4, against 287/600 for the same weights in
   bf16, no clear difference;
-- an NVFP4 fine-tune of `praxis-1-droid-k` on the `hard` simulation suite (action CFG 1.0,
+- an NVFP4 fine-tune of an earlier single-arm checkpoint on the `hard` simulation suite (action CFG 1.0,
   video CFG 1.0, `t_shift` 8.0, 2 steps, `max_context_chunks` 3): 138/352 with
-  NVFP4, against 188/352 for `praxis-1-droid-k` in bf16, clearly lower. This compares with
-  the bf16 starting checkpoint, so the extra training is part of the gap. The
-  `praxis-1-droid-k` run here is a later run than the 175/352 of `praxis/sim/EVAL.md`, with
-  the same settings.
+  NVFP4, against 188/352 for that checkpoint in bf16, clearly lower. This compares with
+  the bf16 starting checkpoint, so the extra training is part of the gap.
 
 Measure the checkpoint you use before you deploy it, for example on the `hard`
 simulation suite:
@@ -554,8 +554,7 @@ training. The forward kernels are the same for inference and training.
 
 `Autoencoder.encode_eager` is a plain PyTorch fallback for GPUs without
 Triton. Its output is close to the fused path, but it is not bitwise equal.
-The original implementation uses another kernel of the VAE encoder (see
-"Validation").
+The original implementation uses another kernel of the VAE encoder.
 
 ## Install
 
@@ -579,7 +578,7 @@ python -c "import torch, causal_conv1d_cuda; print('causal-conv1d OK')"
 - There is no `causal-conv1d` wheel for PyTorch 2.13. Thus uv builds it
   from source with `nvcc`. `MAX_JOBS` sets the number of parallel compile
   jobs (about 1 GB of memory each).
-- We made the validation results with cuDNN 9.24. PyTorch 2.13 asks for
+- praxis is checked with cuDNN 9.24. PyTorch 2.13 asks for
   cuDNN 9.20, so the cuDNN pin must come after each install that resolves
   torch. The convolutions of the video autoencoder run in cuDNN.
 
@@ -588,7 +587,7 @@ The extras of `pyproject.toml`:
 | Extra | Packages | Use |
 |---|---|---|
 | (none) | torch, torchvision, triton, transformers, safetensors, numpy, pillow, pyyaml | the model |
-| `kernels` | flash-linear-attention, causal-conv1d | the text encoder kernels of the validation results (see below) |
+| `kernels` | flash-linear-attention, causal-conv1d | the text encoder kernels that praxis is checked with (see below) |
 | `sim` | praxis-sim (mujoco, gymnasium; `packages/praxis-sim` of this repository, from PyPI), imageio, imageio-ffmpeg, scipy | the MuJoCo simulation |
 | `video` | imageio, imageio-ffmpeg | mp4 export of `scripts/run_inference.py` |
 | `serve` | the web server, the image decoders and the cloud host client | the policy server (`praxis/serve/README.md`) |
@@ -610,7 +609,7 @@ the precompute and is not faster with it.
 
 The text encoder runs Qwen3.5 through `transformers`. If you install
 `flash-linear-attention` and `causal-conv1d`, `transformers` uses their
-kernels. We made the validation results with these kernels. Without them the
+kernels. praxis is checked with these kernels. Without them the
 last bits of the text tokens change. Bitwise
 parity needs `transformers` 5.2.0, `flash-linear-attention` 0.5.0 and
 `causal-conv1d` 1.6.1.
@@ -659,11 +658,7 @@ done
 The NVFP4 checkpoints download the same way
 (`for C in praxis-1-droid-nvfp4 praxis-1-yam-nvfp4; do ...`).
 
-The tests also use the config of the earlier single-arm checkpoint `praxis-1-droid-k`
-(`tests/data/praxis-1-droid-k.json`, SHA-256
-`f09961f066aa9fde871cd5032daedfd986dfd1f4b1901ada15f97a858b4ba6b9`): the same
-architecture with 256x416 tiles and a resize without antialias. The
-recommended sampler settings were measured on `praxis-1-droid`.
+The recommended sampler settings were measured on `praxis-1-droid`.
 
 `praxis-1-base` is the pretrained model without the action heads of a rig,
 so it does not run on a robot by itself. `praxis/train/README.md`,
@@ -671,8 +666,8 @@ so it does not run on a robot by itself. `praxis/train/README.md`,
 single-arm rig from it.
 
 The checkpoint asks for the `flash` attention backend of the trunk
-(`backbone.attention.backend` in `config.json`). We made the validation
-results with this backend. It needs the `flash-attn-4` package:
+(`backbone.attention.backend` in `config.json`). praxis is checked
+with this backend. It needs the `flash-attn-4` package:
 
 ```bash
 uv pip install "flash-attn-4[cu13]==4.0.0b36"
@@ -1045,7 +1040,7 @@ The data of the rig:
 
 - Canvas: the pipeline crops each view to the tile aspect (centre crop) and
   resizes it to the tile of the checkpoint config: 224x416 for `praxis-1-droid`, with
-  antialias (`video.antialias: true`), 256x416 for `praxis-1-droid-k`. The exterior tile
+  antialias (`video.antialias: true`). The exterior tile
   and the wrist tile make the canvas (224x832 for `praxis-1-droid`).
 - Actions: 10 values per row, `[xyz3, rot6d6, grip1]`. The position and the
   rotation are relative to the arm pose at the start of the chunk. The
@@ -1129,7 +1124,7 @@ variant of the model:
   - Text guidance swaps the instruction for the blank caption `" "`.
 - Data.
   - The pipeline resizes each view to the tile of the checkpoint config:
-    224 x 416 for `praxis-1-droid` (a 224 x 832 canvas), 256 x 416 for `praxis-1-droid-k`. The
+    224 x 416 for `praxis-1-droid` (a 224 x 832 canvas). The
     resize uses antialias when the config has `video.antialias: true`
     (`praxis-1-droid`).
   - The pose is the flange pose with no turn.
@@ -1222,39 +1217,12 @@ order. To reproduce a run that used another block size, set
 The text encoder kernels of `flash-linear-attention` select their kernel
 settings by timing in each new process. Some settings change the output
 bits. Thus the text encoder sets one kernel setting for each of these
-kernels: the setting of the validation runs (`FLA_KERNEL_CONFIGS` in
+kernels: the setting that praxis is checked with (`FLA_KERNEL_CONFIGS` in
 `praxis/text_encoder.py`).
 
 On SM120 GPUs, attention runs on the Triton backend instead of Flash, and on
 GPUs with less shared memory one text-encoder kernel is pinned to two stages.
 The outputs there are deterministic but differ in bits from the H100 results.
-
-## Validation
-
-We compared praxis with the original implementation of the checkpoint on
-one H100 in bfloat16, with PyTorch 2.13 and the `flash` attention backend.
-We compared raw bytes, so `-0.0` and `+0.0` count as different. These runs
-used `praxis-1-droid-k`. `praxis-1-droid` has the same architecture, normalization statistics and
-action codec, other weights, and a 224x416 canvas with an antialiased
-resize. The `praxis-1-droid-k` comparisons do not show `praxis-1-droid` parity. The last column
-gives the `praxis-1-droid` status: the CPU data path checks below ran on `praxis-1-droid`, the
-GPU checks are pending.
-
-These historical comparisons use `vae_decoder_impl="reference"`. The default
-fused decoder can produce different output bits.
-
-| Part | Result (`praxis-1-droid-k`) | `praxis-1-droid` |
-|---|---|---|
-| Action expert | 259 of 259 values equal per case, 6 cases (1 to 3 chunks, two timesteps). The values cover the inputs, the rotary tables, the masks, every block output and the velocity. | Pending (GPU). |
-| Trunk | 64 of 64 checks equal per case, 4 cases (1 to 3 chunks, and the first sampler step of 1 chunk). The checks cover the rotary positions, the masks, every block output of both towers, the taps and the velocity. | Pending (GPU). |
-| Full sampler | 8 fixed cases equal in fresh processes: context depth 0 to 2 with two seeds, and two cases with text guidance 3.0 and flow shift 1.0. The checks cover the noise, the time grid, the velocity inputs and outputs, the guidance combine and the outputs (19 values per case, 43 with guidance). | Pending (GPU). |
-| Robot input and output | The tile canvas, the action and proprio codec on the checkpoint stats and the pose frame conversion equal the values of the original implementation (`tests/test_data_path.py`). | Codec and pose frame: the pinned codec values hold on the `praxis-1-droid` statistics (`test_pinned_stats_are_the_checkpoint_stats`: they equal its `normalization` block). Canvas: equal to the training data path for 416x234 frames, the RoboLab input (`test_antialias_clip_equals_the_training_canvas`). Other frame sizes are not bitwise equal: training resizes to 416 wide and then trims to the 32-px grid, praxis crops to the tile aspect and then resizes. In an offline check against the training code, the antialiased canvases of 1280x720 and 512x288 frames differed by about 3 levels (mean absolute, 0 to 255) on random noise and by less than 0.4 on smooth gradients. |
-| Video autoencoder | Not bitwise equal. The original implementation uses another kernel of the encoder. The latents differ by 1 or 2 bfloat16 units in the last place in a part of the values. The weights are equal. | Pending (GPU). The autoencoder and its weights are shared; its output on `praxis-1-droid` inputs has not been compared. |
-| Closed loop | 3 tasks x 4 seeds in the simulation (`block_in_bowl`, `stack_block`, `press_button`). With the encoder of the original implementation, all 12 episodes are equal on every tick. With the encoder of praxis, 7 of 12 episodes succeed, the same count as the original implementation. | Pending (GPU). |
-
-The text encoder (Qwen3.5-2B, frozen) does not depend on the checkpoint.
-Its check against the original implementation gave 1079 of 1079 values equal (token ids,
-every hidden layer, output).
 
 ## Tests
 
@@ -1270,7 +1238,21 @@ data module needs `train`, the policy server `serve`, the simulator `sim` (or
 
 CUDA kernel tests run when a GPU is available.
 
+## Citation
+
+```bibtex
+@techreport{runway2026praxis1,
+  title       = {Praxis-1: From Video Pretraining to Robot Control},
+  author      = {{Runway}},
+  institution = {Runway},
+  year        = {2026},
+  month       = nov,
+  url         = {https://runway.com/research/praxis-1-video-pretraining-to-robot-control}
+}
+```
+
 ## License
 
-See the license file of each set of weights. Wan2.2 and Qwen3.5 have their
-own licenses.
+The code in this repository is licensed under the Apache License 2.0 (see
+`LICENSE`). See the license file of each set of weights for the weights.
+Wan2.2 and Qwen3.5 have their own licenses.

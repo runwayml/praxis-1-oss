@@ -229,8 +229,7 @@ The bar was written before any number of this implementation:
    rollout is not expected to be bitwise equal. Known sources of
    difference: the attention kernel (the published rollout used a KV cache
    over the context, this repository runs the full window, the
-   bitwise-checked serve path) and the video encoder kernel (see
-   "Validation" in the main `README.md`). The noise follows the published
+   bitwise-checked serve path) and the video encoder kernel. The noise follows the published
    scheme (`1000 * seed + chunk`, salt 0). The bar: per-frame PSNR,
    reported, and full adherence inside the published 95 % interval, with a
    paired difference that is not significant.
