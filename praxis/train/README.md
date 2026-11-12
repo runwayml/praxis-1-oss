@@ -520,8 +520,7 @@ files have only one key frame. This decode needs CPU time:
 
 The data recipe is the DROID recipe of the checkpoint. The canvas follows
 the checkpoint config (see "Canvas"). For `praxis-1-droid` the canvas of a 1280x720
-frame is close to its training canvas but not bitwise equal (see
-"Validation" in the top README):
+frame is close to its training canvas but not bitwise equal:
 
 - Episodes: the successful episodes with a language instruction and at
   least 102 frames (the window and 0.5 s more).

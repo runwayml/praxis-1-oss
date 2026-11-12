@@ -403,8 +403,8 @@ Triton backend of `praxis/layers.py` on that device. The text encoder pins the
 supported two-stage FLA recurrent kernel when the three-stage setting is
 unavailable.
 
-This option changes the action outputs. The native path's bitwise validation
-below does not apply to quantized inference.
+This option changes the action outputs. The bitwise agreement of the native
+path does not apply to quantized inference.
 
 **Accuracy.** This option changes the actions, and has not been run in closed
 loop on an SM120 GPU yet. The released checkpoints are bf16 checkpoints, so
@@ -580,7 +580,7 @@ python -c "import torch, causal_conv1d_cuda; print('causal-conv1d OK')"
 - There is no `causal-conv1d` wheel for PyTorch 2.13. Thus uv builds it
   from source with `nvcc`. `MAX_JOBS` sets the number of parallel compile
   jobs (about 1 GB of memory each).
-- We made the validation results with cuDNN 9.24. PyTorch 2.13 asks for
+- praxis is checked with cuDNN 9.24. PyTorch 2.13 asks for
   cuDNN 9.20, so the cuDNN pin must come after each install that resolves
   torch. The convolutions of the video autoencoder run in cuDNN.
 
@@ -589,7 +589,7 @@ The extras of `pyproject.toml`:
 | Extra | Packages | Use |
 |---|---|---|
 | (none) | torch, torchvision, triton, transformers, safetensors, numpy, pillow, pyyaml | the model |
-| `kernels` | flash-linear-attention, causal-conv1d | the text encoder kernels of the validation results (see below) |
+| `kernels` | flash-linear-attention, causal-conv1d | the text encoder kernels that praxis is checked with (see below) |
 | `sim` | praxis-sim (mujoco, gymnasium; `packages/praxis-sim` of this repository, from PyPI), imageio, imageio-ffmpeg, scipy | the MuJoCo simulation |
 | `video` | imageio, imageio-ffmpeg | mp4 export of `scripts/run_inference.py` |
 | `serve` | the web server, the image decoders and the cloud host client | the policy server (`praxis/serve/README.md`) |
@@ -611,7 +611,7 @@ the precompute and is not faster with it.
 
 The text encoder runs Qwen3.5 through `transformers`. If you install
 `flash-linear-attention` and `causal-conv1d`, `transformers` uses their
-kernels. We made the validation results with these kernels. Without them the
+kernels. praxis is checked with these kernels. Without them the
 last bits of the text tokens change. Bitwise
 parity needs `transformers` 5.2.0, `flash-linear-attention` 0.5.0 and
 `causal-conv1d` 1.6.1.
@@ -672,8 +672,8 @@ so it does not run on a robot by itself. `praxis/train/README.md`,
 single-arm rig from it.
 
 The checkpoint asks for the `flash` attention backend of the trunk
-(`backbone.attention.backend` in `config.json`). We made the validation
-results with this backend. It needs the `flash-attn-4` package:
+(`backbone.attention.backend` in `config.json`). praxis is checked
+with this backend. It needs the `flash-attn-4` package:
 
 ```bash
 uv pip install "flash-attn-4[cu13]==4.0.0b36"
@@ -1223,7 +1223,7 @@ order. To reproduce a run that used another block size, set
 The text encoder kernels of `flash-linear-attention` select their kernel
 settings by timing in each new process. Some settings change the output
 bits. Thus the text encoder sets one kernel setting for each of these
-kernels: the setting of the validation runs (`FLA_KERNEL_CONFIGS` in
+kernels: the setting that praxis is checked with (`FLA_KERNEL_CONFIGS` in
 `praxis/text_encoder.py`).
 
 On SM120 GPUs, attention runs on the Triton backend instead of Flash, and on

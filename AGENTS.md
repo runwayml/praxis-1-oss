@@ -52,8 +52,8 @@ results reproducible. `README.md` is the user guide.
 | A fine-tune of the base on your rig (full, 8 GPUs) | `scripts/compute_norm_stats.py`, `scripts/init_heads.py`, then `scripts/finetune.py`, all with `--config configs/finetune_base.yaml` |
 | A LoRA fine-tune of `praxis-1-droid` on the DROID rig (one 80 GB GPU) | `torchrun --nproc_per_node 1 scripts/finetune.py --config configs/finetune_droid_lora.yaml` |
 
-The extras of `pyproject.toml`: `kernels` (the text encoder kernels of the
-validation results), `video`, `serve`, `sim`, `train`, `eval`, `nvfp4` (the
+The extras of `pyproject.toml`: `kernels` (the text encoder kernels that
+praxis is checked with), `video`, `serve`, `sim`, `train`, `eval`, `nvfp4` (the
 optional routed NVFP4 inference on SM120 GPUs), `dev`.
 
 ## Checks before a commit
@@ -76,8 +76,7 @@ pytest tests/
 ## Rules that keep the results
 
 - Output bits are part of the contract. praxis gives the same bits as the
-  original implementation for the same inputs and seeds (see "Validation"
-  in `README.md`). A change in a kernel, an operation order, a dtype, an
+  original implementation for the same inputs and seeds. A change in a kernel, an operation order, a dtype, an
   autotune setting or a compile option can change the bits. If a change can
   change the bits, say so and give a check that compares the outputs before
   and after.
