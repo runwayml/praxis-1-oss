@@ -25,7 +25,7 @@ def test_chunked_combine_keeps_fp32_products(dtype, top_k, scaling, with_shared)
     inverse = torch.randperm(5 * top_k)
     shared = torch.randn(5, 129, dtype=dtype) if with_shared else None
     expected = _sum_rows_of_tokens(
-        rows, inverse.view(5, top_k), gates.float() * scaling
+        rows, inverse.view(5, top_k), (gates.float() * scaling)[inverse].view(5, top_k)
     )
     if shared is not None:
         expected = expected.to(dtype) + shared
@@ -39,7 +39,8 @@ def test_chunked_combine_output_slice_and_gradients():
     gates = torch.randn(24, requires_grad=True)
     shared = torch.randn(3, 128, requires_grad=True)
     inverse = torch.randperm(24)
-    expected = _sum_rows_of_tokens(rows, inverse.view(3, 8), gates * 2.5) + shared
+    scale = (gates * 2.5)[inverse].view(3, 8)
+    expected = _sum_rows_of_tokens(rows, inverse.view(3, 8), scale) + shared
     storage = torch.full((5, 128), 123.0)
     actual = moe_chunked_combine(
         rows, gates, inverse, 8, 2.5, shared=shared, out=storage[1:4]

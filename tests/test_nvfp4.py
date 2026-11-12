@@ -898,5 +898,7 @@ def test_combine_kernel_equals_the_bf16_reduction(shape):
     inverse[order] = torch.arange(order.numel(), device=x.device)
     scale = sorted_gate.float() * 2.5
     out = combine_rows(values, inverse, scale, tokens, top_k)
-    expected = _sum_rows_of_tokens(values, inverse.view(tokens, top_k), scale)
+    expected = _sum_rows_of_tokens(
+        values, inverse.view(tokens, top_k), scale[inverse].view(tokens, top_k)
+    )
     assert torch.equal(out, expected.to(torch.bfloat16))
