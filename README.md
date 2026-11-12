@@ -658,8 +658,7 @@ done
 The NVFP4 checkpoints download the same way
 (`for C in praxis-1-droid-nvfp4 praxis-1-yam-nvfp4; do ...`).
 
-The
-recommended sampler settings were measured on `praxis-1-droid`.
+The recommended sampler settings were measured on `praxis-1-droid`.
 
 `praxis-1-base` is the pretrained model without the action heads of a rig,
 so it does not run on a robot by itself. `praxis/train/README.md`,
@@ -1239,7 +1238,21 @@ data module needs `train`, the policy server `serve`, the simulator `sim` (or
 
 CUDA kernel tests run when a GPU is available.
 
+## Citation
+
+```bibtex
+@techreport{runway2026praxis1,
+  title       = {Praxis-1: From Video Pretraining to Robot Control},
+  author      = {{Runway}},
+  institution = {Runway},
+  year        = {2026},
+  month       = nov,
+  url         = {https://runway.com/research/praxis-1-video-pretraining-to-robot-control}
+}
+```
+
 ## License
 
-See the license file of each set of weights. Wan2.2 and Qwen3.5 have their
-own licenses.
+The code in this repository is licensed under the Apache License 2.0 (see
+`LICENSE`). See the license file of each set of weights for the weights.
+Wan2.2 and Qwen3.5 have their own licenses.
