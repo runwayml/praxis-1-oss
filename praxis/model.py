@@ -25,6 +25,7 @@ from praxis.action_expert import ActionExpert, run_expert_on_taps_k
 from praxis.backbone import VideoBackbone, build_backbone
 from praxis.checkpoint import load_checkpoint, load_config, model_variant
 from praxis.layers import to_device_async
+from praxis.noise_prefetch import NoisePrefetch
 from praxis.sampler import (
     ACTION_SALT,
     VIDEO_SALT,
@@ -299,6 +300,21 @@ class PraxisPolicy(nn.Module):
         """NVFP4 expert scales couple context rows to the current query rows."""
         return getattr(self, "routed_quantization", {}).get("format") != "nvfp4"
 
+    def window_noise_shapes(
+        self, anchor: Tensor, depth: int
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Return the video and the action noise shapes of a window call.
+
+        A call at depth ``d`` (``K' = d + 1`` window chunks) draws the video
+        noise ``(1, C, 6 K', h, w)`` (``C, h, w`` of ``anchor``) and the action
+        noise ``(6 K', A)``.
+        """
+        lat = int(self.config["chunking"]["latents_per_chunk"])
+        a_dim = int(self.config["action_expert"]["action_patch_dim"])
+        kk = int(depth) + 1
+        c, h, w = anchor.shape[1], anchor.shape[3], anchor.shape[4]
+        return (1, int(c), kk * lat, int(h), int(w)), (kk * lat, a_dim)
+
     @torch.no_grad()
     def sample_window_joint(
         self,
@@ -316,6 +332,7 @@ class PraxisPolicy(nn.Module):
         ctx_cache: bool = True,
         overlap_expert: bool = True,
         pair_cfg: bool = False,
+        noise_prefetch: NoisePrefetch | None = None,
     ) -> tuple[Tensor | None, Tensor]:
         """Denoise the window of the chunk at depth ``d = len(cleans)`` jointly.
 
@@ -379,6 +396,11 @@ class PraxisPolicy(nn.Module):
           encoder passes run block by block in lockstep, and each
           mixture-of-experts layer reads its routed weights once for both
           (``EncoderTower.forward_chunk_causal_pair``). Same bits.
+        * ``noise_prefetch`` (:class:`praxis.noise_prefetch.NoisePrefetch`):
+          take the noise of this seed and these shapes from a draw made ahead
+          of the call. The draw is :func:`praxis.sampler.seeded_normal` of the
+          same seed, salts and shapes, so the noise has the same bytes. Without
+          a draw of this key the call draws itself.
 
         The pipeline sessions run this call, :meth:`plan_window_joint` and
         :meth:`finish_window_joint` under ``torch.inference_mode()``
@@ -430,9 +452,18 @@ class PraxisPolicy(nn.Module):
             if trace is not None:
                 trace(name, t)
 
-        noise_v = seeded_normal((1, c, kk * lat, h, w), seed, VIDEO_SALT)
+        video_shape, action_shape = (1, c, kk * lat, h, w), (kk * lat, a_dim)
+        noise = (
+            None
+            if noise_prefetch is None
+            else noise_prefetch.take(seed, video_shape, action_shape)
+        )
+        if noise is None:
+            noise_v = seeded_normal(video_shape, seed, VIDEO_SALT)
+            noise_a = seeded_normal(action_shape, seed, ACTION_SALT)
+        else:
+            noise_v, noise_a = noise
         probe("noise.salt0", noise_v)
-        noise_a = seeded_normal((kk * lat, a_dim), seed, ACTION_SALT)
         probe("noise.salt1", noise_a)
         ts = window_time_grid(settings.num_steps, settings.t_shift)
         probe("sampler.time_grid", torch.tensor(ts, dtype=torch.float64))

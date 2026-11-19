@@ -136,6 +136,8 @@ def configure_optimizations(
         result.ctx_cache = enabled
         result.overlap_expert = enabled
         result.state.dedup_encodes = enabled
+        # Session.__init__ set the default (CUDA, PRAXIS_NOISE_PREFETCH).
+        result.noise_prefetch = enabled and result.noise_prefetch
         return result
 
     pipe.session = session
@@ -207,6 +209,25 @@ def skip_video_decoder(session: dict) -> bool:
     raise SystemExit(f"skip_video_decoder: expected on|off|auto, got {value!r}")
 
 
+def noise_prefetch_setting(session: dict) -> bool | None:
+    """Return the ``noise_prefetch`` of the session settings, or None if absent.
+
+    Absent keeps the session default. Any value other than on or off is
+    refused, as for ``skip_video_decoder``.
+    """
+    value = session.get("noise_prefetch")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("on", "true", "1", "yes"):
+        return True
+    if text in ("off", "false", "0", "no"):
+        return False
+    raise SystemExit(f"noise_prefetch: expected on|off, got {value!r}")
+
+
 def settings(pipe: PraxisPipeline, session: dict) -> dict:
     """Return the sampler and session settings of the run."""
     s = pipe.sampler
@@ -242,8 +263,13 @@ def run(
     trace_dir: Path | None = None,
     stage_timing: bool = True,
     save_outputs: Path | None = None,
+    noise_counts: dict[str, int] | None = None,
 ) -> list[dict]:
-    """Run the sessions and return one record per call."""
+    """Run the sessions and return one record per call.
+
+    ``noise_counts`` (``hits``, ``misses``) gets the noise prefetch counters
+    of all the sessions of the run, warm-up and trace sessions included.
+    """
     height, width = view_size(pipe)
     cuda = pipe.device.type == "cuda"
     timer = StageTimer(
@@ -253,6 +279,7 @@ def run(
     stateless = session.get("context_mode", "observed") == "stateless"
     depth = 0 if stateless else int(session["max_context_chunks"])
     skip = skip_video_decoder(session)
+    noise_prefetch = noise_prefetch_setting(session)
     records: list[dict] = []
     # After the staged sessions come one plain session (one sync around each
     # call, no sync between the stages: the call time a server sees) and the
@@ -273,6 +300,9 @@ def run(
                 exec_horizon=session.get("exec_horizon"),
                 skip_last_video=skip,
             )
+            if noise_prefetch is not None:
+                # --set session.noise_prefetch=off|on overrides the default.
+                sess.noise_prefetch = noise_prefetch
             plain = s == plain_session or not stage_timing
             prof = None
             if trace_dir is not None and s == trace_session:
@@ -349,6 +379,10 @@ def run(
                     sort_by="cuda_time_total", row_limit=60
                 )
                 (trace_dir / "kernels.txt").write_text(table)
+            cache = getattr(sess, "_noise", None)
+            if noise_counts is not None and cache is not None:
+                noise_counts["hits"] += cache.hits
+                noise_counts["misses"] += cache.misses
     return records
 
 
@@ -449,6 +483,8 @@ def main() -> None:
     args = ap.parse_args()
     cfg = load_config(args.config, args.set)
     session = dict(cfg["session"])
+    # Refuse a bad --set session.noise_prefetch before the weights load.
+    noise_prefetch = noise_prefetch_setting(session)
     warmup = args.calls if args.warmup_calls is None else args.warmup_calls
     if args.sessions < 1 or args.calls < 1:
         ap.error("--sessions and --calls must be at least 1")
@@ -475,6 +511,16 @@ def main() -> None:
             f"the {pipe.embodiment!r} rig."
         )
     optimization_options = configure_optimizations(pipe, args.optimizations)
+    from praxis.pipeline import noise_prefetch_default
+
+    # The effective noise prefetch: --set session.noise_prefetch, else the
+    # session default (CUDA, PRAXIS_NOISE_PREFETCH) unless optimizations are off.
+    optimization_options["noise_prefetch"] = (
+        noise_prefetch
+        if noise_prefetch is not None
+        else args.optimizations and noise_prefetch_default(pipe.device)
+    )
+    noise_counts = {"hits": 0, "misses": 0}
     args.out.mkdir(parents=True, exist_ok=True)
     records = run(
         pipe,
@@ -485,8 +531,12 @@ def main() -> None:
         args.out if args.trace else None,
         stage_timing=args.timing == "stages",
         save_outputs=args.out / "outputs" if args.save_outputs else None,
+        noise_counts=noise_counts,
     )
     out = {
+        "noise_prefetch": (
+            noise_counts if optimization_options["noise_prefetch"] else None
+        ),
         "environment": environment(pipe),
         "settings": settings(pipe, session),
         "checkpoint": str(cfg["model"]["checkpoint"]),

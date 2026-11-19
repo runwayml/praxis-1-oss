@@ -31,6 +31,7 @@ from torch import Tensor
 from praxis import bimanual, single_arm, so101
 from praxis.checkpoint import model_variant
 from praxis.model import PraxisPolicy, SamplerSettings, TrunkPlan
+from praxis.noise_prefetch import NoisePrefetch
 from praxis.robot_io import NormStats, text_encoder_prompt
 from praxis.text_encoder import TextEncoder
 from praxis.vae import Autoencoder
@@ -282,11 +283,24 @@ class EncodeMemo:
         self.hits = 0
 
 
+def noise_prefetch_default(device: torch.device | str) -> bool:
+    """Return the ``noise_prefetch`` default of a session on ``device``.
+
+    On for a CUDA device unless ``PRAXIS_NOISE_PREFETCH=0``; off otherwise.
+    """
+    return (
+        torch.device(device).type == "cuda"
+        and os.environ.get("PRAXIS_NOISE_PREFETCH", "1") != "0"
+    )
+
+
 class Session:
     """The context state of one robot episode."""
 
     # Paired CFG default, also for sessions built without __init__.
     pair_cfg = True
+    # Noise prefetch default for sessions built without __init__ (off).
+    noise_prefetch = False
 
     def __init__(
         self,
@@ -321,6 +335,16 @@ class Session:
         # encoder passes run in lockstep and share each expert-weight read
         # (exact bits). Other layouts ignore it.
         self.pair_cfg = True
+        # True on CUDA: after the GPU work of a sample_window_joint call is
+        # queued, a worker thread draws the sampling noise of the next call
+        # (its seed and expected depth) into pinned memory. The next call
+        # takes it only for the same seed and shapes; the noise is a pure
+        # function of those, so the bits stay (praxis.noise_prefetch). Other
+        # calls draw in the call, and a call that finishes a plan
+        # (finish_window_joint) draws no noise. PRAXIS_NOISE_PREFETCH=0 turns
+        # it off.
+        self.noise_prefetch = noise_prefetch_default(pipeline.device)
+        self._noise: NoisePrefetch | None = None
         if hasattr(pipeline, "cuda_graphs") and (
             self.sampler.layout != "chunk" or self.sampler.guided
         ):
@@ -509,6 +533,7 @@ class Session:
             self.plan_result = "miss"
             # The fallback must not keep the taps of the stale plan alive.
             del plan
+        prefetch = self._noise_prefetch()
         video, actions = self.pipe.policy.sample_window_joint(
             text=text,
             text_uncond=uncond,
@@ -523,7 +548,12 @@ class Session:
             ctx_cache=self.ctx_cache,
             overlap_expert=self.overlap_expert,
             **({"pair_cfg": True} if self.pair_cfg else {}),
+            **({"noise_prefetch": prefetch} if prefetch is not None else {}),
         )
+        if prefetch is not None:
+            # The GPU work of this call is queued: draw the next call's noise
+            # beside it.
+            self._prefetch_next_noise(prefetch, inputs)
         return video, actions, text
 
     @torch.inference_mode()
@@ -552,3 +582,37 @@ class Session:
             latent = torch.cat([*cleans, latent.to(cleans[0].device, dtype)], dim=2)
         frames = self.pipe.vae.decode(latent)
         return frames[-len(result.action_rows_norm) :][: len(result.commands)]
+
+    def _noise_prefetch(self) -> NoisePrefetch | None:
+        """Return the noise prefetch of the session, or None when it is off."""
+        if not getattr(self, "noise_prefetch", False):
+            self._noise = None
+            return None
+        prefetch = getattr(self, "_noise", None)
+        if prefetch is None:
+            device = getattr(self.pipe, "device", torch.device("cpu"))
+            prefetch = NoisePrefetch(pin=torch.device(device).type == "cuda")
+            self._noise = prefetch
+        return prefetch
+
+    def _prefetch_next_noise(
+        self, prefetch: NoisePrefetch, inputs: ChunkInputs
+    ) -> None:
+        """Start the noise draw of the next call.
+
+        The next call has the seed ``seed + chunk_index + 1``. Its depth is
+        expected to be one more than this call's, up to the context limit of
+        the rig session (0 for a stateless session). A reset, a restart, a
+        seed change or another depth gives another key: the next call then
+        drops the draw and draws itself.
+        """
+        state = self.state
+        depth = len(inputs.cleans)
+        if getattr(state, "stateless", False):
+            depth = 0
+        else:
+            depth = min(depth + 1, int(getattr(state, "max_context_chunks", depth)))
+        video_shape, action_shape = self.pipe.policy.window_noise_shapes(
+            inputs.anchor, depth
+        )
+        prefetch.start(self.seed + inputs.chunk_index + 1, video_shape, action_shape)
