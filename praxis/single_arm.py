@@ -56,6 +56,7 @@ import numpy as np
 import torch
 
 from praxis import nvtx as NV
+from praxis import tile_resize
 from praxis.hardware import is_thor
 from praxis.robot_io import (
     ACTION_CHUNK,
@@ -108,6 +109,11 @@ LAZY_CURRENT_CLIP = True
 # Copy/crop on CUDA when both views need no resize. Other shapes retain CPU
 # resizing, which can differ from CUDA by one pixel level.
 TILE_ON_DEVICE = True
+# With TILE_ON_DEVICE: also tile on CUDA when the resize of both views is exact
+# in float32 (praxis.tile_resize.exact, e.g. 288x512 -> 288x468 -> 256x416).
+# The CUDA resize then gives the bits of the CPU resize. Set False to keep
+# every resize on the CPU.
+TILE_ON_DEVICE_RESIZE = True
 # Explicit Thor-only resize experiments. They remain off by default.
 THOR_TILE_RESIZE = False
 TILE_ON_DEVICE_ANTIALIAS = False
@@ -371,7 +377,7 @@ def _tile_view(
       is not resized.
 
     ``device`` (, :data:`TILE_ON_DEVICE`): the uint8 frames go to
-    that device first and the tile is made there.
+    that device first and the tile is made there (see :func:`_resize`).
     """
     a = np.asarray(frames, np.uint8)
     if a.ndim == 3:
@@ -381,23 +387,41 @@ def _tile_view(
     if device is None:
         fr = torch.from_numpy(np.ascontiguousarray(a)).permute(0, 3, 1, 2)
     else:
+        # A plain (pageable) copy of the whole frame stack, not the pinned
+        # non-blocking copy of TILE_U8_PINNED: that path stages the small
+        # uint8 tile canvas after CPU tiling, while this one uploads the raw
+        # frames of each view (any shape), which would need its own pinned
+        # buffers per view and shape, each waited on before a rewrite.
         fr = torch.from_numpy(np.ascontiguousarray(a)).to(device).permute(0, 3, 1, 2)
     if antialias:
         return _fit_view(fr, tile_h, tile_w, tol)
     cropped = aspect_crop(fr, tile_h, tile_w, tol)
     out = torch.cat(
         [
-            torch.nn.functional.interpolate(
-                chunk.float(),
-                size=(tile_h, tile_w),
-                mode="bilinear",
-                align_corners=False,
-                antialias=antialias,
-            )
+            _resize(chunk.float(), (tile_h, tile_w), antialias)
             for chunk in cropped.split(TILE_CHUNK_FRAMES, dim=0)
         ]
     )
     return out.round().clamp(0, 255).to(torch.uint8)
+
+
+def _resize(x: torch.Tensor, size: tuple[int, int], antialias: bool) -> torch.Tensor:
+    """The bilinear resize of the canvas: float32 ``(T, 3, H, W)`` to ``size``.
+
+    On CUDA with :data:`TILE_ON_DEVICE_RESIZE`, an exact resize
+    (:func:`praxis.tile_resize.exact`) runs as :func:`praxis.tile_resize.resize`
+    and gives the bits of the CPU resize. Any other resize is ``interpolate``
+    on the device of ``x``.
+    """
+    if (
+        x.is_cuda
+        and TILE_ON_DEVICE_RESIZE
+        and tile_resize.exact(tuple(x.shape[-2:]), size, antialias)
+    ):
+        return tile_resize.resize(x, size, antialias)
+    return torch.nn.functional.interpolate(
+        x, size=size, mode="bilinear", align_corners=False, antialias=antialias
+    )
 
 
 def _fit_view(fr: torch.Tensor, tile_h: int, tile_w: int, tol: float) -> torch.Tensor:
@@ -409,13 +433,7 @@ def _fit_view(fr: torch.Tensor, tile_h: int, tile_w: int, tol: float) -> torch.T
     if tuple(cropped.shape[-2:]) != (rh, rw):
         cropped = torch.cat(
             [
-                torch.nn.functional.interpolate(
-                    chunk.float(),
-                    size=(rh, rw),
-                    mode="bilinear",
-                    align_corners=False,
-                    antialias=True,
-                )
+                _resize(chunk.float(), (rh, rw), True)
                 .round()
                 .clamp(0, 255)
                 .to(torch.uint8)
@@ -431,6 +449,12 @@ def _tile_on_device(exterior, wrist, tile_h, tile_w, tol, device, antialias) -> 
         return False
     target = fit_resize_size(tile_w) if antialias else (tile_h, tile_w)
     fits = True
+    # TILE_ON_DEVICE_RESIZE: the crop of each view (the fit rule crops to
+    # the native view aspect) resizes to the target exactly. Antialiased
+    # downscales such as 720x1280 or 288x512 to the 234x416 fit are not exact
+    # (renormalized edge weights such as 3/7) and keep the CPU resize; an
+    # antialiased upscale can be exact: a 117x208 view, 2x up to the fit.
+    exact = TILE_ON_DEVICE_RESIZE
     for view in (exterior, wrist):
         shape = np.shape(view)
         if len(shape) not in (3, 4) or shape[-1] != 3:
@@ -440,7 +464,11 @@ def _tile_on_device(exterior, wrist, tile_h, tile_w, tol, device, antialias) -> 
             return False
         y0, y1, x0, x1 = aspect_crop_box(h, w, *target, tol)
         fits &= (y1 - y0, x1 - x0) == target
-    if fits:
+        if exact:
+            aspect = NATIVE_VIEW if antialias else target
+            y0, y1, x0, x1 = aspect_crop_box(h, w, *aspect, tol)
+            exact = tile_resize.exact((y1 - y0, x1 - x0), target, antialias)
+    if fits or exact:
         return True
     return (
         THOR_TILE_RESIZE
