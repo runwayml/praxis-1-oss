@@ -914,7 +914,11 @@ def weight_map(path: str | Path) -> dict[str, str]:
     root = Path(path)
     index = root / INDEX_NAME
     if index.is_file():
-        return dict(json.loads(index.read_text())["weight_map"])
+        mapping = dict(json.loads(index.read_text())["weight_map"])
+        # Reject shard names that escape the checkpoint directory.
+        if not all((root / f).resolve().is_relative_to(root.resolve()) for f in mapping.values()):
+            raise CheckpointError(f"{INDEX_NAME} names a shard outside {root}")
+        return mapping
     single = root / SINGLE_NAME
     if single.is_file():
         with safe_open(str(single), framework="pt") as f:
