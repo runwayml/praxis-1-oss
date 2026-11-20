@@ -65,7 +65,7 @@ from pathlib import Path
 import torch
 import uvicorn
 import yaml
-from fastapi import FastAPI, WebSocket
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket
 
 from praxis import robot_io
 from praxis.layers import Attention
@@ -81,6 +81,19 @@ from praxis.serve.policy import (
 from praxis.serve.wire import deserialise_request, serialise
 
 logger = logging.getLogger(__name__)
+
+
+# Fail closed: guard every route with one shared constant-time token check.
+def _token_ok(value: str | None) -> bool:
+    expected = os.environ.get("PRAXIS_API_TOKEN")
+    return bool(expected) and secrets.compare_digest(
+        value or "", f"Bearer {expected}"
+    )
+
+
+def _require_token(authorization: str | None = Header(default=None)) -> None:
+    if not _token_ok(authorization):
+        raise HTTPException(status_code=401)
 
 
 def _iso_now() -> str:
@@ -103,7 +116,7 @@ class InferenceServer:
         self.default_key = next(iter(registry))
         self.executor = executor
         self.app = FastAPI()
-        self.app.get("/api/v1/models")(self.get_models)
+        self.app.get("/api/v1/models", dependencies=[Depends(_require_token)])(self.get_models)
         self.app.websocket("/api/v1/session")(self.session)
         self.app.websocket("/api/v1/session/{model_id:path}")(self.session)
 
@@ -112,6 +125,9 @@ class InferenceServer:
 
     async def session(self, websocket: WebSocket, model_id: str | None = None) -> None:
         """Serve one robot session."""
+        if not _token_ok(websocket.headers.get("authorization")):
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         try:
             overrides = params.parse_session_params(websocket.query_params)
@@ -500,7 +516,7 @@ def build_server(cfg: dict) -> InferenceServer:
     return InferenceServer({"default": factory}, executor)
 
 
-def serve(app: FastAPI, host: str = "0.0.0.0", port: int = 8000) -> None:
+def serve(app: FastAPI, host: str = "127.0.0.1", port: int = 8000) -> None:
     """Serve ``app`` with uvicorn until the process stops.
 
     The server pings each client every 120 s, so a long first call does not

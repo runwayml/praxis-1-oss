@@ -52,7 +52,7 @@ def main() -> None:
     ap.add_argument(
         "--set", action="append", default=[], help="override, e.g. sampler.num_steps=4"
     )
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     for name, (key, kind) in FLAGS.items():
         ap.add_argument(f"--{name.replace('_', '-')}", type=kind, help=f"sets {key}")
