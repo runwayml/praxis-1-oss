@@ -179,6 +179,9 @@ def _decode_h264(obj: dict) -> np.ndarray:
     if not 1 <= t <= MAX_IMAGE_FRAMES:
         raise ValueError("H.264 stack must contain 1 to 25 frames")
     _charge(t * h * w * 3)
+    # The declared shape is client-controlled; check the real payload first.
+    if len(obj[b"data"]) > MAX_DECODED_BYTES:
+        raise ValueError("H.264 data exceeds the request byte limit")
     frames = []
     with av.open(io.BytesIO(obj[b"data"]), mode="r", format="h264") as container:
         for frame in container.decode(video=0):
