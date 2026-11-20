@@ -24,6 +24,7 @@ section of the top README tells. Then serve the checkpoint on one GPU:
 - Local machine:
   `python -m praxis.serve --config configs/serve_droid.yaml --host 0.0.0.0 --port 8000`.
   The client URI is `ws://<host>:8000/api/v1/session`.
+  Set `PRAXIS_API_TOKEN` and send `Authorization: Bearer <token>` on every request. The local bind defaults to `127.0.0.1`.
 - Docker: build `docker/Dockerfile`, then mount the weights at `/weights`
   and publish port 8000. The client URI is the same as on a local machine.
 - Modal, with your own Modal credentials: put the weights into a Modal
