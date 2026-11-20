@@ -45,8 +45,8 @@ Errors:
 * ``max_chunks_per_episode`` reached: ``{"error": msg}``. The server stops
   reading the session.
 
-All policy calls of all sessions run one after the other on one worker
-thread. The event loop stays free for the pings of the clients.
+Each session runs its policy calls on its own worker thread. Sessions no
+longer block each other. The event loop stays free for the pings of the clients.
 """
 
 from __future__ import annotations
@@ -91,7 +91,8 @@ class InferenceServer:
     """The FastAPI app of the policy server.
 
     ``registry`` maps a model id to its policy factory. The first entry is
-    the default model. ``executor`` runs the policy calls.
+    the default model. ``executor`` runs the warmup calls. Each session has
+    its own worker for its policy calls.
     """
 
     def __init__(
@@ -137,6 +138,10 @@ class InferenceServer:
             )
             return
         policy: ServedPolicy | None = None
+        # One worker per session so slow policies cannot block other robots.
+        executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="praxis-session"
+        )
         try:
             await websocket.send_bytes(
                 serialise({"status": "loading", "message": "Loading policy..."})
@@ -163,12 +168,13 @@ class InferenceServer:
                 await _refuse(websocket, str(exc))
                 return
             await websocket.send_bytes(ready)
-            await self._calls(websocket, policy, rollout_id, session_id)
+            await self._calls(websocket, policy, rollout_id, session_id, executor)
         except Exception as exc:  # the client left, or a send failed
             logger.info("session closed: %s", exc)
         finally:
             if policy is not None:
                 policy.close()
+            executor.shutdown(wait=False, cancel_futures=True)
 
     async def _calls(
         self,
@@ -176,12 +182,14 @@ class InferenceServer:
         policy: ServedPolicy,
         rollout_id: str,
         session_id: str | None = None,
+        executor: ThreadPoolExecutor | None = None,
     ) -> None:
         """Answer the observations of one session until it ends.
 
         ``session_id`` is the id of a protocol v2 session, None for v1.
         """
         loop = asyncio.get_running_loop()
+        executor = executor or self.executor
         v2 = session_id is not None
         n_calls = 0
         while True:
@@ -206,7 +214,7 @@ class InferenceServer:
                             "The session ID does not belong to this connection"
                         )
                     if obs.get("end_session") is True:
-                        await loop.run_in_executor(self.executor, policy.close)
+                        await loop.run_in_executor(executor, policy.close)
                         await websocket.send_bytes(
                             serialise({"session_id": session_id, "end_session": True})
                         )
@@ -236,7 +244,7 @@ class InferenceServer:
                 n_calls += 1
                 t_queue = time.monotonic()
                 rows, t_call = await loop.run_in_executor(
-                    self.executor, _timed, policy.select_action, obs
+                    executor, _timed, policy.select_action, obs
                 )
                 t_pol = time.monotonic()
                 response: dict[str, object] = {
