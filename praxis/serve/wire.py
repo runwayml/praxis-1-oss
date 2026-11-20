@@ -247,7 +247,15 @@ def deserialise_request(message: bytes) -> tuple[Any, DecodeStats]:
     stats = DecodeStats()
     _ACTIVE.stats = stats
     try:
-        return msgpack.unpackb(message, object_pairs_hook=_unpack_pairs), stats
+        max_items = MAX_DECODED_BYTES // 8  # one 8-byte pointer per element
+        return msgpack.unpackb(
+            message,
+            object_pairs_hook=_unpack_pairs,
+            max_array_len=max_items,
+            max_map_len=max_items,
+            max_str_len=MAX_DECODED_BYTES,
+            max_bin_len=MAX_DECODED_BYTES,
+        ), stats
     finally:
         _ACTIVE.stats = None
 
