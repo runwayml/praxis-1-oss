@@ -307,6 +307,8 @@ class YamModelPolicy:
         sampler: SamplerSettings | None = None,
         decode_video: bool = False,
         player: YamPlayerConfig | None = None,
+        routed_precision: str = "bf16",
+        nvfp4_cache: str | None = None,
     ) -> YamModelPolicy:
         """Load the checkpoint. ``sampler`` None = the serve defaults of the bimanual rig."""
         from praxis.model import SamplerSettings
@@ -318,6 +320,8 @@ class YamModelPolicy:
             text_encoder=text_encoder,
             device=device,
             sampler=sampler or SamplerSettings(t_shift=1.0, cfg_video_scale=1.0),
+            routed_precision=routed_precision,
+            nvfp4_cache=nvfp4_cache,
         )
         return cls(pipe, prompt, session, decode_video, player)
 

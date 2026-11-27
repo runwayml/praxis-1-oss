@@ -58,6 +58,8 @@ class YamModelConfig:
     vae_weights: str = "weights/Wan2.2_VAE.pth"
     text_encoder: str = "weights/Qwen3.5-2B"
     device: str = "cuda"
+    routed_precision: str = "bf16"  # "nvfp4": routed experts in NVFP4 (Thor: the `thor` extra)
+    nvfp4_cache: str | None = None  # directory of the packed NVFP4 experts
 
 
 @dataclass
@@ -230,4 +232,6 @@ def make_yam_policy(kind: str, cfg: YamSuiteConfig) -> YamPolicy:
         ),
         decode_video=cfg.policy.decode_video,
         player=cfg.player,
+        routed_precision=m.routed_precision,
+        nvfp4_cache=m.nvfp4_cache,
     )
