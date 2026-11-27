@@ -1,0 +1,66 @@
+# praxis policy server for NVIDIA Jetson AGX Thor (SM110, arm64, JetPack 7) with
+# native NVFP4 routed experts (the Quack SM110 backend: the `nvfp4` and `thor`
+# extras, see "Thor and architecture selection" in the top README).
+#
+# The image holds code and dependencies only. It sets no serve config: pass one
+# at run time. Checkpoints, weights and the compile/NVFP4 caches are mounts.
+#
+# Build on the Thor (or any arm64 host; no GPU is needed to build) from the
+# repository root:
+#
+#   docker build -f docker/Dockerfile.thor-nvfp4 -t praxis-serve:thor-nvfp4 .
+#
+# Run (configs read checkpoints/ and weights/ relative to /opt/praxis):
+#
+#   docker run -d --name praxis-serve --restart unless-stopped \
+#     --runtime nvidia --gpus all -p 127.0.0.1:8000:8000 \
+#     -v /path/to/checkpoints:/opt/praxis/checkpoints:ro \
+#     -v /path/to/weights:/opt/praxis/weights:ro \
+#     -v praxis-cache:/cache \
+#     praxis-serve:thor-nvfp4 \
+#     --config configs/serve_yam.yaml \
+#     --set model.checkpoint=checkpoints/praxis-1-yam-nvfp4 \
+#     --set model.routed_precision=nvfp4 --set model.nvfp4_cache=/cache/nvfp4
+#
+# The first boot packs the NVFP4 experts into /cache/nvfp4 and compiles the
+# kernels into /cache (PRAXIS_CACHE_DIR); keep that volume so later boots load
+# them instead.
+
+FROM nvidia/cuda:13.0.2-devel-ubuntu24.04
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv python3.12-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.12 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+# PyTorch's cu130 aarch64 wheels include sm_110.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 \
+    torch==2.13.0 torchvision==0.28.0
+
+# causal-conv1d has no arm64 + CUDA 13 wheel: build it from source.
+RUN pip install --no-cache-dir packaging ninja wheel \
+    && CAUSAL_CONV1D_FORCE_BUILD=TRUE MAX_JOBS=8 pip install --no-cache-dir \
+        --no-build-isolation causal-conv1d==1.6.1
+
+RUN pip install --no-cache-dir "flash-attn-4[cu13]==4.0.0b36"
+
+WORKDIR /opt/praxis
+COPY pyproject.toml README.md ./
+COPY praxis praxis
+COPY configs configs
+RUN pip install --no-cache-dir ".[serve,kernels,nvfp4,thor]" \
+        scipy==1.15.3 numpy==2.2.6 pillow==10.4.0 av==18.0.0
+
+# Last: the installs above can replace the cuDNN that torch needs.
+RUN pip install --no-cache-dir --no-deps nvidia-cudnn-cu13==9.24.0.43 \
+    && python -c "import torch; v = torch.backends.cudnn.version(); assert v == 92400, v"
+
+ENV PRAXIS_CACHE_DIR=/cache
+VOLUME ["/cache"]
+EXPOSE 8000
+
+# The server only: `docker run ... <image> --config <serve config> [--set ...]`.
+ENTRYPOINT ["python", "-m", "praxis.serve"]
